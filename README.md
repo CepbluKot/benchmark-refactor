@@ -111,10 +111,11 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
 0. Резолвит единый `benchmark_run_id` для всего запуска:
    - из аргумента `run(..., benchmark_run_id=...)`, либо
    - через `BenchmarkRunIdProvider.next_benchmark_run_id()`.
-1. Для `mode != "sequential"`:
+1. Для каждой таблицы выбирает `TableExecutionStrategy` по `table_plan.mode`.
+2. По умолчанию (`DefaultTableExecutionStrategy`):
    - запускает jobs через `execution_adapter.execute_variant(job)`;
    - сразу сохраняет результат в `result_store.store_result(job, result)`.
-2. Для `mode == "sequential"`:
+3. Для `mode == "sequential"` используется `SequentialTopNTableExecutionStrategy`:
    - Stage A: прогоняет только `types`-варианты;
    - сохраняет score/DDL type-этапа в result-store;
    - выбирает top-N (`sequential_top_n`) через `result_store.get_top_type_variants(...)`;
@@ -351,13 +352,42 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
 1. `iter_variants(table, mode, column_rules, index_rules, column_order=None, max_iterations=None)`
 2. `total_variants(table, mode, column_rules, index_rules, column_order=None, max_iterations=None)`
 
-### Внутренние генераторы
+### Расширяемый API стратегий
 
-1. `_make_generator(...)`
-2. `_gen_types(...)`
-3. `_gen_indexes(...)`
-4. `_gen_sequential(...)`
-5. `_gen_combined(...)`
+1. `VariantGenerationStrategy`
+   - `iter_variants(...)`
+   - `total_variants(...)`
+2. Встроенные реализации:
+   - `TypesVariantGenerationStrategy`
+   - `IndexesVariantGenerationStrategy`
+   - `SequentialVariantGenerationStrategy`
+   - `CombinedVariantGenerationStrategy`
+3. Реестр:
+   - `MODE_VARIANT_STRATEGIES`
+   - `register_variant_generation_strategy(mode, strategy, overwrite=False)`
+   - `get_variant_generation_strategy(mode)`
+
+Новый mode добавляется без правок `if/elif`:
+
+```python
+from combiner import (
+    VariantGenerationStrategy,
+    VariantMeta,
+    register_variant_generation_strategy,
+)
+
+
+class MyModeStrategy(VariantGenerationStrategy):
+    def iter_variants(self, table, column_rules, index_rules, column_order=None):
+        # your generation logic
+        yield table.copy(), VariantMeta(global_index=0, mode="my_mode")
+
+    def total_variants(self, table, column_rules, index_rules, column_order=None):
+        return 1
+
+
+register_variant_generation_strategy("my_mode", MyModeStrategy())
+```
 
 ## 10. Генерация тестовых SQL (`query_generator.py`)
 
@@ -520,13 +550,36 @@ Data + metrics:
    - выдает `max(existing_id)+1`;
    - хранит локальный reserved id, чтобы не выдавать дубликаты между вызовами.
 
+### Table execution strategy
+
+1. `TableExecutionStrategy`
+   - `execute_table(runner, table_plan, benchmark_run_id)`
+2. `DefaultTableExecutionStrategy`
+   - обычный проход `VariantJob` из `BenchmarkEngine`.
+3. `SequentialTopNTableExecutionStrategy`
+   - двухэтапный алгоритм `types -> top-N -> indexes`.
+
 ### `BenchmarkRunner`
 
-1. `__init__(engine, execution_adapter, result_store, run_id_provider=None)`
+1. `__init__(engine, execution_adapter, result_store, run_id_provider=None, table_execution_strategies=None, default_table_execution_strategy=None)`
 2. `run(benchmark_ids=None, benchmark_run_id=None)`
-3. `_run_sequential(table_plan)`
+3. `register_table_execution_strategy(mode, strategy, overwrite=False)`
 4. `_next_run_id()`
-5. `_execute_and_store(job)`
+5. `_execute_regular_table(table_plan, benchmark_run_id)`
+6. `_execute_and_store(job)`
+
+### Расширение режимов
+
+Если нужен новый нестандартный режим, обычно делается 2 шага:
+
+1. Генерация DDL-вариантов:
+   - реализуй `VariantGenerationStrategy`;
+   - зарегистрируй через `register_variant_generation_strategy("my_mode", ...)`.
+2. Оркестрация выполнения (если нужна особая логика):
+   - реализуй `TableExecutionStrategy`;
+   - подключи через `runner.register_table_execution_strategy("my_mode", ...)`.
+
+Если режим должен задаваться из JSON (`BenchmarkConfig.mode`), добавь значение в `BenchmarkMode` в `models.py`.
 
 ## 14. Как запускать
 

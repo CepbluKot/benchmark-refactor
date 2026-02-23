@@ -2,7 +2,14 @@ import unittest
 
 from clickhouse_ddl import TableDDL
 from column_rules import ColumnAlternatives, ColumnRule
-from combiner import iter_variants, total_variants
+from combiner import (
+    MODE_VARIANT_STRATEGIES,
+    VariantGenerationStrategy,
+    VariantMeta,
+    iter_variants,
+    register_variant_generation_strategy,
+    total_variants,
+)
 from index_rules import IndexAlternatives, IndexRule, IndexVariant
 from naming import is_variant_table, parse_variant_name, variant_table_name
 
@@ -180,6 +187,104 @@ class CombinerAndNamingTests(unittest.TestCase):
         """Проверяет, что variant name raises for too long benchmark id."""
         with self.assertRaises(ValueError):
             variant_table_name("events", "b" * 100, 0)
+
+    def test_custom_variant_strategy_can_be_registered(self) -> None:
+        """Проверяет, что custom variant strategy can be registered."""
+        mode = "__test_custom_mode__"
+        previous_strategy = MODE_VARIANT_STRATEGIES.get(mode)
+
+        class SingleVariantStrategy(VariantGenerationStrategy):
+            def iter_variants(self, table, column_rules, index_rules, column_order=None):
+                del column_rules, index_rules, column_order
+                yield table.copy(), VariantMeta(global_index=0, mode=mode)
+
+            def total_variants(self, table, column_rules, index_rules, column_order=None):
+                del table, column_rules, index_rules, column_order
+                return 1
+
+        def cleanup() -> None:
+            if previous_strategy is None:
+                MODE_VARIANT_STRATEGIES.pop(mode, None)
+            else:
+                MODE_VARIANT_STRATEGIES[mode] = previous_strategy
+
+        self.addCleanup(cleanup)
+        register_variant_generation_strategy(
+            mode=mode,
+            strategy=SingleVariantStrategy(),
+            overwrite=True,
+        )
+
+        variants = list(
+            iter_variants(
+                self.table,
+                mode=mode,
+                column_rules=self.column_rules,
+                index_rules=self.index_rules,
+            )
+        )
+
+        self.assertEqual(len(variants), 1)
+        self.assertEqual(total_variants(
+            self.table,
+            mode=mode,
+            column_rules=self.column_rules,
+            index_rules=self.index_rules,
+        ), 1)
+        self.assertEqual(variants[0][1].mode, mode)
+        self.assertEqual(variants[0][1].global_index, 0)
+
+    def test_register_variant_strategy_rejects_duplicate_without_overwrite(self) -> None:
+        """Проверяет, что register variant strategy rejects duplicate without overwrite."""
+
+        class DummyStrategy(VariantGenerationStrategy):
+            def iter_variants(self, table, column_rules, index_rules, column_order=None):
+                del table, column_rules, index_rules, column_order
+                return iter(())
+
+            def total_variants(self, table, column_rules, index_rules, column_order=None):
+                del table, column_rules, index_rules, column_order
+                return 0
+
+        with self.assertRaisesRegex(ValueError, "уже зарегистрирована"):
+            register_variant_generation_strategy("types", DummyStrategy())
+
+    def test_iter_variants_raises_for_unknown_mode(self) -> None:
+        """Проверяет, что iter variants raises for unknown mode."""
+        with self.assertRaisesRegex(ValueError, "Неизвестный mode"):
+            list(
+                iter_variants(
+                    self.table,
+                    mode="unknown_mode",
+                    column_rules=self.column_rules,
+                    index_rules=self.index_rules,
+                )
+            )
+
+    def test_total_variants_raises_for_unknown_mode(self) -> None:
+        """Проверяет, что total variants raises for unknown mode."""
+        with self.assertRaisesRegex(ValueError, "Неизвестный mode"):
+            total_variants(
+                self.table,
+                mode="unknown_mode",
+                column_rules=self.column_rules,
+                index_rules=self.index_rules,
+            )
+
+    def test_register_variant_strategy_rejects_empty_mode(self) -> None:
+        """Проверяет, что register variant strategy rejects empty mode."""
+
+        class DummyStrategy(VariantGenerationStrategy):
+            def iter_variants(self, table, column_rules, index_rules, column_order=None):
+                del table, column_rules, index_rules, column_order
+                return iter(())
+
+            def total_variants(self, table, column_rules, index_rules, column_order=None):
+                del table, column_rules, index_rules, column_order
+                return 0
+
+        with self.assertRaisesRegex(ValueError, "не должен быть пустым"):
+            register_variant_generation_strategy("   ", DummyStrategy())
 
 
 if __name__ == "__main__":

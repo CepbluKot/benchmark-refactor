@@ -855,62 +855,56 @@ class MaxIdBenchmarkRunIdProvider(BenchmarkRunIdProvider):
         return next_id
 
 
-class BenchmarkRunner:
+class TableExecutionStrategy(ABC):
     """
-    Верхнеуровневый фасад запуска бенчмарка.
+    Стратегия выполнения table-level плана.
 
-    Объединяет генерацию заданий и их выполнение в один метод `run`.
+    Позволяет подключать особую оркестрацию под конкретный `BenchmarkMode`
+    (например, двухэтапный `sequential`).
     """
 
-    def __init__(
+    @abstractmethod
+    def execute_table(
         self,
-        engine: BenchmarkEngine,
-        execution_adapter: BenchmarkExecutionAdapter,
-        result_store: BenchmarkResultStore,
-        run_id_provider: Optional[BenchmarkRunIdProvider] = None,
-    ) -> None:
-        """Сохраняет engine, адаптер выполнения и persistence-хранилище."""
-        self._engine = engine
-        self._execution_adapter = execution_adapter
-        self._result_store = result_store
-        self._run_id_provider = run_id_provider or InMemoryBenchmarkRunIdProvider()
-
-    def run(
-        self,
-        benchmark_ids: Optional[Sequence[str]] = None,
-        benchmark_run_id: Optional[int] = None,
-    ) -> int:
-        """
-        Выполняет все VariantJob и возвращает run-level `benchmark_run_id`.
-
-        Для `mode="sequential"` используется двухфазный алгоритм:
-          1) прогон type/codec-вариантов;
-          2) выбор top-N через result-store и прогон индексных вариантов на их DDL.
-        """
-        run_id = benchmark_run_id if benchmark_run_id is not None else self._next_run_id()
-        if run_id <= 0:
-            raise ValueError(f"benchmark_run_id должен быть > 0, получено: {run_id}")
-
-        for table_plan in self._engine.iter_table_plans(benchmark_ids=benchmark_ids):
-            if table_plan.mode != "sequential":
-                for job in self._engine.iter_variant_jobs_for_table_plan(
-                    table_plan,
-                    benchmark_run_id=run_id,
-                ):
-                    self._execute_and_store(job)
-                continue
-
-            self._run_sequential(table_plan, benchmark_run_id=run_id)
-        return run_id
-
-    def _run_sequential(
-        self,
+        runner: "BenchmarkRunner",
         table_plan: TableBenchmarkPlan,
         benchmark_run_id: int,
     ) -> None:
-        """Адаптивный sequential: types -> persist -> top-N select -> indexes."""
-        source_ddl, raw_query_plan = self._engine.prepare_table_context(table_plan)
-        effective_column_order = self._engine.resolve_column_order(
+        """Выполняет table_plan целиком и персистит результаты через runner."""
+        pass
+
+
+class DefaultTableExecutionStrategy(TableExecutionStrategy):
+    """Стандартное выполнение: один проход по VariantJob из engine."""
+
+    def execute_table(
+        self,
+        runner: "BenchmarkRunner",
+        table_plan: TableBenchmarkPlan,
+        benchmark_run_id: int,
+    ) -> None:
+        runner._execute_regular_table(
+            table_plan=table_plan,
+            benchmark_run_id=benchmark_run_id,
+        )
+
+
+class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
+    """
+    Спец-оркестрация для `mode="sequential"`:
+      1) прогон всех type/codec вариантов;
+      2) выбор top-N по score из result-store;
+      3) прогон index-вариантов на top-N DDL.
+    """
+
+    def execute_table(
+        self,
+        runner: "BenchmarkRunner",
+        table_plan: TableBenchmarkPlan,
+        benchmark_run_id: int,
+    ) -> None:
+        source_ddl, raw_query_plan = runner._engine.prepare_table_context(table_plan)
+        effective_column_order = runner._engine.resolve_column_order(
             table_plan=table_plan,
             source_ddl=source_ddl,
         )
@@ -932,7 +926,7 @@ class BenchmarkRunner:
             column_order=effective_column_order,
             max_iterations=table_plan.max_iterations,
         ):
-            job = self._engine.build_variant_job(
+            job = runner._engine.build_variant_job(
                 table_plan=table_plan,
                 raw_query_plan=raw_query_plan,
                 variant_ddl=variant_ddl,
@@ -941,13 +935,13 @@ class BenchmarkRunner:
                 benchmark_run_id=benchmark_run_id,
                 job_mode="sequential",
             )
-            self._execute_and_store(job)
+            runner._execute_and_store(job)
 
         if type_total <= 0:
             return
 
         top_n = min(table_plan.sequential_top_n, type_total)
-        top_variants = self._result_store.get_top_type_variants(
+        top_variants = runner._result_store.get_top_type_variants(
             benchmark_run_id=benchmark_run_id,
             benchmark_id=table_plan.benchmark_id,
             source_database=table_plan.database,
@@ -956,8 +950,8 @@ class BenchmarkRunner:
         )
         if not top_variants:
             return
-        next_global_index = type_total
 
+        next_global_index = type_total
         for type_variant in top_variants:
             base_ddl = type_variant.variant_ddl.copy()
             index_total = total_variants(
@@ -979,7 +973,7 @@ class BenchmarkRunner:
             ):
                 index_meta.global_index = next_global_index
                 next_global_index += 1
-                index_job = self._engine.build_variant_job(
+                index_job = runner._engine.build_variant_job(
                     table_plan=table_plan,
                     raw_query_plan=raw_query_plan,
                     variant_ddl=variant_ddl,
@@ -988,7 +982,102 @@ class BenchmarkRunner:
                     benchmark_run_id=benchmark_run_id,
                     job_mode="sequential",
                 )
-                self._execute_and_store(index_job)
+                runner._execute_and_store(index_job)
+
+
+class BenchmarkRunner:
+    """
+    Верхнеуровневый фасад запуска бенчмарка.
+
+    Объединяет генерацию заданий и их выполнение в один метод `run`.
+    Для каждого mode выбирается стратегия исполнения table-level плана.
+    """
+
+    def __init__(
+        self,
+        engine: BenchmarkEngine,
+        execution_adapter: BenchmarkExecutionAdapter,
+        result_store: BenchmarkResultStore,
+        run_id_provider: Optional[BenchmarkRunIdProvider] = None,
+        table_execution_strategies: Optional[Dict[str, TableExecutionStrategy]] = None,
+        default_table_execution_strategy: Optional[TableExecutionStrategy] = None,
+    ) -> None:
+        """Сохраняет engine, адаптер выполнения и persistence-хранилище."""
+        self._engine = engine
+        self._execution_adapter = execution_adapter
+        self._result_store = result_store
+        self._run_id_provider = run_id_provider or InMemoryBenchmarkRunIdProvider()
+        self._default_table_execution_strategy = (
+            default_table_execution_strategy or DefaultTableExecutionStrategy()
+        )
+        self._table_execution_strategies: Dict[str, TableExecutionStrategy] = {
+            "sequential": SequentialTopNTableExecutionStrategy(),
+        }
+        if table_execution_strategies:
+            for mode, strategy in table_execution_strategies.items():
+                self.register_table_execution_strategy(
+                    mode=mode,
+                    strategy=strategy,
+                    overwrite=True,
+                )
+
+    def register_table_execution_strategy(
+        self,
+        mode: str,
+        strategy: TableExecutionStrategy,
+        *,
+        overwrite: bool = False,
+    ) -> None:
+        """Регистрирует стратегию выполнения для конкретного режима."""
+        normalized_mode = mode.strip()
+        if not normalized_mode:
+            raise ValueError("mode не должен быть пустым")
+        if normalized_mode in self._table_execution_strategies and not overwrite:
+            raise ValueError(
+                f"Стратегия выполнения для mode={normalized_mode!r} уже зарегистрирована. "
+                "Используй overwrite=True для замены."
+            )
+        self._table_execution_strategies[normalized_mode] = strategy
+
+    def run(
+        self,
+        benchmark_ids: Optional[Sequence[str]] = None,
+        benchmark_run_id: Optional[int] = None,
+    ) -> int:
+        """
+        Выполняет все VariantJob и возвращает run-level `benchmark_run_id`.
+
+        Для `mode="sequential"` используется двухфазный алгоритм:
+          1) прогон type/codec-вариантов;
+          2) выбор top-N через result-store и прогон индексных вариантов на их DDL.
+        """
+        run_id = benchmark_run_id if benchmark_run_id is not None else self._next_run_id()
+        if run_id <= 0:
+            raise ValueError(f"benchmark_run_id должен быть > 0, получено: {run_id}")
+
+        for table_plan in self._engine.iter_table_plans(benchmark_ids=benchmark_ids):
+            strategy = self._table_execution_strategies.get(
+                table_plan.mode,
+                self._default_table_execution_strategy,
+            )
+            strategy.execute_table(
+                runner=self,
+                table_plan=table_plan,
+                benchmark_run_id=run_id,
+            )
+        return run_id
+
+    def _execute_regular_table(
+        self,
+        table_plan: TableBenchmarkPlan,
+        benchmark_run_id: int,
+    ) -> None:
+        """Стандартное выполнение table-plan: прогон всех VariantJob из engine."""
+        for job in self._engine.iter_variant_jobs_for_table_plan(
+            table_plan,
+            benchmark_run_id=benchmark_run_id,
+        ):
+            self._execute_and_store(job)
 
     def _next_run_id(self) -> int:
         """Берёт следующий serial benchmark run id у configured provider."""

@@ -10,6 +10,7 @@ from benchmark_engine import (
     BenchmarkPlanner,
     BenchmarkRunner,
     BenchmarkVariantResult,
+    TableExecutionStrategy,
     FetcherMetadataProvider,
     MetadataProvider,
     QueryPlanBuilder,
@@ -126,6 +127,17 @@ class SequentialScoringAdapter(BenchmarkExecutionAdapter):
                 "indexes_count": len(job.variant_ddl.indexes),
             },
         )
+
+
+class RecordingTableExecutionStrategy(TableExecutionStrategy):
+    """Стратегия table-level выполнения, которая только записывает факт вызова."""
+
+    def __init__(self) -> None:
+        self.calls: List[tuple[str, str, int]] = []
+
+    def execute_table(self, runner, table_plan, benchmark_run_id: int) -> None:
+        del runner
+        self.calls.append((table_plan.benchmark_id, table_plan.table, benchmark_run_id))
 
 
 class NoTopVariantsResultStore(BenchmarkResultStore):
@@ -870,6 +882,216 @@ class PlannerEngineRunnerTests(unittest.TestCase):
 
         executed_benchmark_ids = [job.benchmark_id for job in adapter.executed_jobs]
         self.assertEqual(executed_benchmark_ids, ["bench_a", "bench_z"])
+
+    def test_runner_can_register_mode_execution_strategy(self) -> None:
+        """Проверяет, что runner can register mode execution strategy."""
+        benchmark = BenchmarkConfig(
+            id="bench_custom_mode_strategy",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            global_rules=RulesConfig(
+                column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = RecordingExecutionAdapter()
+        result_store = InMemoryBenchmarkResultStore()
+        strategy = RecordingTableExecutionStrategy()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+        )
+        runner.register_table_execution_strategy("types", strategy)
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual(strategy.calls, [("bench_custom_mode_strategy", "events", 1)])
+        self.assertEqual(len(adapter.executed_jobs), 0)
+        self.assertEqual(len(result_store.records), 0)
+
+    def test_runner_accepts_constructor_mode_execution_strategies(self) -> None:
+        """Проверяет, что runner accepts constructor mode execution strategies."""
+        benchmark = BenchmarkConfig(
+            id="bench_ctor_custom_mode_strategy",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            global_rules=RulesConfig(
+                column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = RecordingExecutionAdapter()
+        result_store = InMemoryBenchmarkResultStore()
+        strategy = RecordingTableExecutionStrategy()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+            table_execution_strategies={"types": strategy},
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual(strategy.calls, [("bench_ctor_custom_mode_strategy", "events", 1)])
+        self.assertEqual(len(adapter.executed_jobs), 0)
+        self.assertEqual(len(result_store.records), 0)
+
+    def test_runner_uses_injected_default_table_execution_strategy(self) -> None:
+        """Проверяет, что runner uses injected default table execution strategy."""
+        benchmark = BenchmarkConfig(
+            id="bench_custom_default_strategy",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            global_rules=RulesConfig(
+                column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = RecordingExecutionAdapter()
+        result_store = InMemoryBenchmarkResultStore()
+        default_strategy = RecordingTableExecutionStrategy()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+            default_table_execution_strategy=default_strategy,
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual(default_strategy.calls, [("bench_custom_default_strategy", "events", 1)])
+        self.assertEqual(len(adapter.executed_jobs), 0)
+        self.assertEqual(len(result_store.records), 0)
+
+    def test_runner_rejects_duplicate_mode_execution_strategy_without_overwrite(self) -> None:
+        """Проверяет, что runner rejects duplicate mode execution strategy without overwrite."""
+        benchmark = BenchmarkConfig(
+            id="bench_duplicate_strategy",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            global_rules=RulesConfig(
+                column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=RecordingExecutionAdapter(),
+            result_store=InMemoryBenchmarkResultStore(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "уже зарегистрирована"):
+            runner.register_table_execution_strategy(
+                "sequential",
+                RecordingTableExecutionStrategy(),
+            )
+
+    def test_runner_register_mode_execution_strategy_rejects_empty_mode(self) -> None:
+        """Проверяет, что runner register mode execution strategy rejects empty mode."""
+        benchmark = BenchmarkConfig(
+            id="bench_empty_mode_strategy",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            global_rules=RulesConfig(
+                column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=RecordingExecutionAdapter(),
+            result_store=InMemoryBenchmarkResultStore(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "не должен быть пустым"):
+            runner.register_table_execution_strategy(
+                "   ",
+                RecordingTableExecutionStrategy(),
+            )
+
+    def test_runner_register_mode_execution_strategy_allows_overwrite(self) -> None:
+        """Проверяет, что runner register mode execution strategy allows overwrite."""
+        benchmark = BenchmarkConfig(
+            id="bench_override_sequential_strategy",
+            connection_id="prod_ch",
+            mode="sequential",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            sequential_top_n=1,
+            global_rules=RulesConfig(
+                column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt64",
+                        indexes=[IndexConfig(type="minmax", granularity=4)],
+                    )
+                ],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = RecordingExecutionAdapter()
+        result_store = InMemoryBenchmarkResultStore()
+        sequential_override = RecordingTableExecutionStrategy()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+        )
+        runner.register_table_execution_strategy(
+            "sequential",
+            sequential_override,
+            overwrite=True,
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual(
+            sequential_override.calls,
+            [("bench_override_sequential_strategy", "events", 1)],
+        )
+        self.assertEqual(len(adapter.executed_jobs), 0)
+        self.assertEqual(len(result_store.records), 0)
 
     def test_runner_uses_max_id_provider_as_source_of_run_ids(self) -> None:
         """Проверяет, что runner uses max id provider as source of run ids."""
