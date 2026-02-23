@@ -42,7 +42,8 @@ Python-движок для перебора вариантов DDL (типы/к�
 Упрощенный поток:
 
 ```text
-project json -> ConfigLoader -> BenchmarkRootConfig
+file-mode: project json -> ConfigLoader.load/parse -> BenchmarkRootConfig
+env-mode (текущий main.py): BENCH_*_CONFIG_B64 -> settings.py -> parse_config_parts -> BenchmarkRootConfig
 BenchmarkRootConfig + MetadataProvider -> BenchmarkPlanner -> TableBenchmarkPlan
 TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter -> BenchmarkVariantResult -> BenchmarkResultStore
 ```
@@ -51,14 +52,24 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
 
 ### 2.1 Загрузка конфигурации
 
-1. `load_config(path)` вызывает `ConfigLoader.load(path)`.
-2. `ConfigLoader` валидирует `BenchmarkProjectConfig`.
-3. Подгружает `connections_file`, `rule_banks_file`, при необходимости `benchmarks_file`.
-4. Собирает `BenchmarkRootConfig`.
-5. Проверяет ссылочную целостность:
-   - `benchmark.connection_id` существует;
-   - `rules.rule_bank` существует;
-   - `default_rule_banks[dbms]` указывает на существующий банк.
+Есть два поддерживаемых режима:
+
+1. File-mode (`load_config` / `parse_config`):
+   - `ConfigLoader` валидирует `BenchmarkProjectConfig`;
+   - читает `connections_file`, `rule_banks_file`, `benchmarks_file` (или inline `benchmarks`);
+   - собирает `BenchmarkRootConfig`.
+2. Env-mode (`parse_config_parts`, текущий `main.py`):
+   - `settings.py` декодирует 4 base64 JSON-секции:
+     - `BENCH_CELERY_CONFIG_B64`
+     - `BENCH_CONNECTIONS_CONFIG_B64`
+     - `BENCH_RULE_BANKS_CONFIG_B64`
+     - `BENCH_BENCHMARKS_CONFIG_B64`
+   - `parse_config_parts(...)` собирает `BenchmarkRootConfig` напрямую из этих секций.
+
+После сборки выполняется валидация ссылок:
+- `benchmark.connection_id` существует;
+- `rules.rule_bank` существует;
+- `default_rule_banks[dbms]` указывает на существующий банк.
 
 ### 2.2 Планирование таблиц
 
@@ -194,21 +205,24 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
    Читает project JSON и запускает сборку.
 2. `parse(raw, base_dir=None)`  
    Парсит уже загруженный dict.
-3. `_parse_project_config(raw, base_dir)`  
-   Внутренний full pipeline сборки.
-4. `_resolve_file_path(base_dir, ref)`  
+3. `parse_parts(celery_raw, connections_raw, rule_banks_raw, benchmarks_raw)`  
+   Сборка `BenchmarkRootConfig` из 4 независимых JSON-секций (env-mode).
+4. `_parse_project_config(raw, base_dir)`  
+   Внутренний full pipeline сборки для file-mode.
+5. `_resolve_file_path(base_dir, ref)`  
    Резолв относительных путей.
-5. `_read_json(path)`  
+6. `_read_json(path)`  
    Чтение JSON с нормальными ошибками.
-6. `_validate_references(config)`  
+7. `_validate_references(config)`  
    Проверка кросс-ссылок.
-7. `_validate_table_rule_scope(bench)`  
+8. `_validate_table_rule_scope(bench)`  
    Проверка, что table_rules не выходят за `databases`.
 
 ### Функции
 
 1. `load_config(path)`
 2. `parse_config(raw, base_dir=None)`
+3. `parse_config_parts(celery_raw, connections_raw, rule_banks_raw, benchmarks_raw)`
 
 ## 6. Resolver API (`resolver.py`)
 
@@ -510,19 +524,45 @@ Data + metrics:
 
 ## 14. Как запускать
 
-### 14.1 Обычное демо
+### 14.1 Запуск `main.py` через env base64 (текущий основной путь)
+
+1. Сгенерируй `.env` из примерных JSON:
+
+```bash
+./venv/bin/python encode_configs_base64.py | sed 's/^export //' > .env
+```
+
+2. Запусти:
+
+```bash
+./venv/bin/python main.py
+```
+
+`main.py` ожидает эти переменные в `.env`:
+- `BENCH_CELERY_CONFIG_B64`
+- `BENCH_CONNECTIONS_CONFIG_B64`
+- `BENCH_RULE_BANKS_CONFIG_B64`
+- `BENCH_BENCHMARKS_CONFIG_B64`
+
+`encode_configs_base64.py` берёт пути к JSON из глобальных переменных в начале файла:
+- `CELERY_JSON_PATH`
+- `CONNECTIONS_JSON_PATH`
+- `RULE_BANKS_JSON_PATH`
+- `BENCHMARKS_JSON_PATH`
+
+### 14.2 Обычное демо
 
 ```bash
 ./venv/bin/python examples/example.py
 ```
 
-### 14.2 Демо нового sequential top-N
+### 14.3 Демо нового sequential top-N
 
 ```bash
 ./venv/bin/python examples/example_sequential_topn.py
 ```
 
-### 14.3 Тесты
+### 14.4 Тесты
 
 ```bash
 ./venv/bin/python -m pytest -q
@@ -530,14 +570,17 @@ Data + metrics:
 
 ## 15. Примеры конфигов
 
-1. `configs/benchmark.project.example.json`  
-   Базовый mixed пример (`types`, `combined`, table overrides).
-2. `configs/benchmark.project.sequential_topn.example.json`  
-   Пример двухфазного `sequential` с `sequential_top_n` и локальными override.
-3. `configs/connections.example.json`
-4. `configs/rule_banks.example.json`
+1. `configs/celery.example.json`  
+   Отдельный конфиг Celery для env-mode.
+2. `configs/connections.example.json`
+3. `configs/rule_banks.example.json`
+4. `configs/benchmarks.example.json`
 5. `configs/rule_banks.clickhouse_baseline.json`  
    Отдельный большой универсальный baseline bank для ClickHouse (только `by_type`).
+6. `configs/benchmark.project.example.json`  
+   Пример file-mode (project wrapper + inline benchmarks).
+7. `configs/benchmark.project.sequential_topn.example.json`  
+   Пример file-mode для двухфазного `sequential`.
 
 ## 16. Важные практические детали
 
@@ -570,3 +613,7 @@ runner = BenchmarkRunner(
 )
 run_id = runner.run()
 ```
+10. Текущий `main.py` использует `StubMetadataProvider` (in-memory DDL), а не реальный `Fetcher`.
+11. Для production-интеграции обычно заменяют:
+    - `StubMetadataProvider` -> `FetcherMetadataProvider` (или свой provider),
+    - `NoopExecutionAdapter` -> рабочий adapter с реальными замерами.
