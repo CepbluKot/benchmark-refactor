@@ -85,6 +85,7 @@ ORDER BY (user_id, ts)
 
 class ClickHouseDDLTests(unittest.TestCase):
     def test_parse_extracts_columns_indexes_and_options(self) -> None:
+        """Проверяет, что parse extracts columns indexes and options."""
         table = TableDDL.from_ddl(DDL)
 
         self.assertEqual(table.name, "analytics.events")
@@ -97,6 +98,7 @@ class ClickHouseDDLTests(unittest.TestCase):
         self.assertEqual(table.order_by, "(user_id, event_time)")
 
     def test_copy_and_to_ddl_keep_original_unchanged(self) -> None:
+        """Проверяет, что copy and to ddl keep original unchanged."""
         source = TableDDL.from_ddl(DDL)
         variant = source.copy()
         variant.column("user_id").type = "UInt32"
@@ -118,6 +120,7 @@ class ClickHouseDDLTests(unittest.TestCase):
         )
 
     def test_parse_complex_ddl_extracts_cluster_body_and_table_options(self) -> None:
+        """Проверяет, что parse complex ddl extracts cluster body and table options."""
         table = TableDDL.from_ddl(COMPLEX_DDL)
 
         self.assertEqual(table.name, "analytics.events_ext")
@@ -152,6 +155,7 @@ class ClickHouseDDLTests(unittest.TestCase):
         )
 
     def test_parse_preserves_nested_types_with_commas(self) -> None:
+        """Проверяет, что parse preserves nested types with commas."""
         table = TableDDL.from_ddl(NESTED_TYPES_DDL)
 
         self.assertEqual([c.name for c in table.columns], ["price", "state", "meta"])
@@ -160,6 +164,7 @@ class ClickHouseDDLTests(unittest.TestCase):
         self.assertEqual(table.column("meta").type, "Array(Tuple(UInt16, String))")
 
     def test_parse_handles_missing_index_type(self) -> None:
+        """Проверяет, что parse handles missing index type."""
         table = TableDDL.from_ddl(INDEX_WITHOUT_TYPE_DDL)
 
         self.assertEqual(len(table.indexes), 1)
@@ -168,12 +173,14 @@ class ClickHouseDDLTests(unittest.TestCase):
         self.assertIsNone(table.index("idx_x").granularity)
 
     def test_parse_handles_parametric_index_type_without_granularity(self) -> None:
+        """Проверяет, что parse handles parametric index type without granularity."""
         table = TableDDL.from_ddl(PARAM_INDEX_DDL)
 
         self.assertEqual(table.index("idx_payload").index_type, "bloom_filter(0.01)")
         self.assertIsNone(table.index("idx_payload").granularity)
 
     def test_parse_ignores_single_line_comments_and_semicolon(self) -> None:
+        """Проверяет, что parse ignores single line comments and semicolon."""
         table = TableDDL.from_ddl(COMMENTED_DDL)
 
         self.assertEqual(table.name, "analytics.comments_test")
@@ -183,6 +190,7 @@ class ClickHouseDDLTests(unittest.TestCase):
         self.assertEqual(table.order_by, "(user_id, ts)")
 
     def test_to_ddl_orders_known_clauses_and_keeps_other_options(self) -> None:
+        """Проверяет, что to ddl orders known clauses and keeps other options."""
         table = TableDDL.from_ddl(COMPLEX_DDL)
         rendered = table.to_ddl()
 
@@ -204,11 +212,13 @@ class ClickHouseDDLTests(unittest.TestCase):
         self.assertLess(settings_pos, comment_pos)
 
     def test_column_and_index_lookup_return_none_when_missing(self) -> None:
+        """Проверяет, что column and index lookup return none when missing."""
         table = TableDDL.from_ddl(DDL)
         self.assertIsNone(table.column("missing_col"))
         self.assertIsNone(table.index("missing_idx"))
 
     def test_to_ddl_omits_codec_when_column_codec_is_none(self) -> None:
+        """Проверяет, что to ddl omits codec when column codec is none."""
         table = TableDDL.from_ddl(DDL)
         table.column("user_id").codec = None
 
@@ -217,10 +227,12 @@ class ClickHouseDDLTests(unittest.TestCase):
         self.assertNotIn("`user_id` UInt64 CODEC", rendered)
 
     def test_from_ddl_raises_on_non_create_table_statement(self) -> None:
+        """Проверяет, что from ddl raises on non create table statement."""
         with self.assertRaises(ValueError):
             TableDDL.from_ddl("SELECT 1")
 
     def test_from_ddl_raises_on_unbalanced_parentheses(self) -> None:
+        """Проверяет, что from ddl raises on unbalanced parentheses."""
         bad_ddl = """
         CREATE TABLE analytics.bad
         (

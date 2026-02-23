@@ -12,6 +12,7 @@ def _write_json(path: Path, payload: dict) -> None:
 
 class LoaderTests(unittest.TestCase):
     def test_load_config_with_external_benchmarks_file(self) -> None:
+        """Проверяет, что load config with external benchmarks file."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             _write_json(
@@ -81,6 +82,7 @@ class LoaderTests(unittest.TestCase):
             self.assertEqual(config.celery.threads_per_worker, 1)
 
     def test_load_config_raises_for_unknown_connection_reference(self) -> None:
+        """Проверяет, что load config raises for unknown connection reference."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             _write_json(
@@ -124,6 +126,7 @@ class LoaderTests(unittest.TestCase):
                 load_config(base / "project.json")
 
     def test_parse_config_supports_relative_paths_via_base_dir(self) -> None:
+        """Проверяет, что parse config supports relative paths via base dir."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             _write_json(
@@ -178,6 +181,7 @@ class LoaderTests(unittest.TestCase):
             self.assertEqual(config.benchmarks[0].id, "bench_inline")
 
     def test_parse_config_parts_with_inline_benchmarks(self) -> None:
+        """Проверяет, что parse config parts with inline benchmarks."""
         config = parse_config_parts(
             celery_raw={
                 "workers": 3,
@@ -221,6 +225,7 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(config.celery.workers, 3)
 
     def test_parse_config_parts_requires_valid_benchmarks_config(self) -> None:
+        """Проверяет, что parse config parts requires valid benchmarks config."""
         with self.assertRaisesRegex(ValueError, "Ошибки в benchmarks-конфиге"):
             parse_config_parts(
                 celery_raw={"workers": 2, "threads_per_worker": 1},
@@ -242,6 +247,7 @@ class LoaderTests(unittest.TestCase):
             )
 
     def test_parse_config_parts_supports_split_configs(self) -> None:
+        """Проверяет, что parse config parts supports split configs."""
         config = parse_config_parts(
             celery_raw={"workers": 2, "threads_per_worker": 1},
             connections_raw={

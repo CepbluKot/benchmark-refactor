@@ -661,7 +661,13 @@ class BenchmarkEngine:
 
         matched_columns: List[str] = []
         for column in source_ddl.columns:
-            if any(rule.matches(column) for rule in table_plan.rules.column_rules):
+            matched_by_column_rule = any(
+                rule.matches(column) for rule in table_plan.rules.column_rules
+            )
+            matched_by_index_rule = any(
+                rule.matches(column) for rule in table_plan.rules.index_rules
+            )
+            if matched_by_column_rule or matched_by_index_rule:
                 matched_columns.append(column.name)
 
         if not matched_columns:

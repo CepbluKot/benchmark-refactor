@@ -7,6 +7,7 @@ from index_rules import IndexAlternatives, IndexRule, IndexVariant
 
 class RuleMatchingTests(unittest.TestCase):
     def test_column_rule_matches_by_type_strictly(self) -> None:
+        """Проверяет, что column rule matches by type strictly."""
         col = ColumnDef(name="country", type="LowCardinality(String)", codec=None)
         broad_rule = ColumnRule(
             by_type="LowCardinality",
@@ -21,6 +22,7 @@ class RuleMatchingTests(unittest.TestCase):
         self.assertTrue(exact_rule.matches(col))
 
     def test_index_rule_matches_by_type_strictly(self) -> None:
+        """Проверяет, что index rule matches by type strictly."""
         col = ColumnDef(name="country", type="LowCardinality(String)", codec=None)
         broad_rule = IndexRule(
             by_type="LowCardinality",

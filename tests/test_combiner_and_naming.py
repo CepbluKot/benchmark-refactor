@@ -56,6 +56,7 @@ class CombinerAndNamingTests(unittest.TestCase):
         ]
 
     def test_total_variants_by_mode(self) -> None:
+        """Проверяет, что total variants by mode."""
         self.assertEqual(
             total_variants(
                 self.table,
@@ -94,6 +95,7 @@ class CombinerAndNamingTests(unittest.TestCase):
         )
 
     def test_iter_variants_respects_max_iterations(self) -> None:
+        """Проверяет, что iter variants respects max iterations."""
         variants = list(
             iter_variants(
                 self.table,
@@ -107,6 +109,7 @@ class CombinerAndNamingTests(unittest.TestCase):
         self.assertEqual([meta.global_index for _, meta in variants], [0, 1])
 
     def test_indexes_mode_uses_column_order_for_iteration_priority(self) -> None:
+        """Проверяет, что indexes mode uses column order for iteration priority."""
         index_rules = [
             IndexRule(
                 by_type="DateTime",
@@ -158,6 +161,7 @@ class CombinerAndNamingTests(unittest.TestCase):
         self.assertIsNone(meta_second_reversed.index_choices["user_id"])
 
     def test_variant_name_roundtrip(self) -> None:
+        """Проверяет, что variant name roundtrip."""
         name = variant_table_name("user-events", "bench prod", 42)
 
         self.assertEqual(name, "user_events__bench__bench_prod__0042")
@@ -167,11 +171,13 @@ class CombinerAndNamingTests(unittest.TestCase):
         self.assertTrue(is_variant_table(name))
 
     def test_variant_name_is_truncated_to_clickhouse_limit(self) -> None:
+        """Проверяет, что variant name is truncated to clickhouse limit."""
         name = variant_table_name("a" * 200, "bench", 1)
         self.assertLessEqual(len(name), 64)
         self.assertTrue(name.endswith("__bench__bench__0001"))
 
     def test_variant_name_raises_for_too_long_benchmark_id(self) -> None:
+        """Проверяет, что variant name raises for too long benchmark id."""
         with self.assertRaises(ValueError):
             variant_table_name("events", "b" * 100, 0)
 

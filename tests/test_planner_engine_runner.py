@@ -4,12 +4,16 @@ from typing import Dict, List
 from benchmark_engine import (
     BenchmarkEngine,
     BenchmarkExecutionAdapter,
+    BenchmarkResultStore,
     InMemoryBenchmarkResultStore,
     MaxIdBenchmarkRunIdProvider,
     BenchmarkPlanner,
     BenchmarkRunner,
     BenchmarkVariantResult,
+    FetcherMetadataProvider,
     MetadataProvider,
+    QueryPlanBuilder,
+    TopTypeVariant,
     TableSelector,
     VariantJob,
 )
@@ -124,6 +128,26 @@ class SequentialScoringAdapter(BenchmarkExecutionAdapter):
         )
 
 
+class NoTopVariantsResultStore(BenchmarkResultStore):
+    """Хранилище, которое сохраняет stage1, но всегда возвращает пустой top-N."""
+
+    def __init__(self) -> None:
+        self.records: List[BenchmarkVariantResult] = []
+
+    def store_result(self, job: VariantJob, result: BenchmarkVariantResult) -> None:
+        self.records.append(result)
+
+    def get_top_type_variants(
+        self,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        top_n: int,
+    ) -> List[TopTypeVariant]:
+        return []
+
+
 class PlannerEngineRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.provider = StaticMetadataProvider(
@@ -150,6 +174,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         )
 
     def test_table_selector_deduplicates_manual_tables(self) -> None:
+        """Проверяет, что table selector deduplicates manual tables."""
         benchmark = BenchmarkConfig(
             id="bench_selector",
             connection_id="prod_ch",
@@ -170,6 +195,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(targets[0].table, "events")
 
     def test_planner_applies_table_level_overrides(self) -> None:
+        """Проверяет, что planner applies table level overrides."""
         benchmark = BenchmarkConfig(
             id="bench_overrides",
             connection_id="prod_ch",
@@ -233,6 +259,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(plan.rules.column_rules[0].by_type, "Nullable")
 
     def test_planner_applies_rule_modes_from_benchmark(self) -> None:
+        """Проверяет, что planner applies rule modes from benchmark."""
         benchmark = BenchmarkConfig(
             id="bench_rule_modes",
             connection_id="prod_ch",
@@ -295,6 +322,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual([rule.by_type for rule in plan.rules.index_rules], ["UInt64"])
 
     def test_planner_raises_when_no_rules_can_be_resolved(self) -> None:
+        """Проверяет, что planner raises when no rules can be resolved."""
         benchmark = BenchmarkConfig(
             id="bench_no_rules",
             connection_id="prod_ch",
@@ -311,7 +339,68 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "не найдено ни column_rules"):
             list(planner.iter_table_plans())
 
+    def test_planner_provider_for_connection_raises_for_missing_provider(self) -> None:
+        """Проверяет, что planner provider for connection raises for missing provider."""
+        benchmark = BenchmarkConfig(
+            id="bench_missing_provider",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["events"],
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
+                ]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={},
+        )
+
+        with self.assertRaisesRegex(ValueError, "не зарегистрирован"):
+            planner.provider_for_connection("prod_ch")
+
+    def test_planner_benchmark_filter_keeps_only_selected_ids(self) -> None:
+        """Проверяет, что planner benchmark filter keeps only selected ids."""
+        common_rules = RulesConfig(
+            column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
+        )
+        bench_a = BenchmarkConfig(
+            id="bench_a",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["events"],
+            global_rules=common_rules,
+        )
+        bench_b = BenchmarkConfig(
+            id="bench_b",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["sessions"],
+            global_rules=common_rules,
+        )
+        root = BenchmarkRootConfig(
+            connections=[self.connection],
+            benchmarks=[bench_a, bench_b],
+            rule_banks={},
+            default_rule_banks={},
+            celery=CeleryConfig(workers=1, threads_per_worker=1),
+        )
+        planner = BenchmarkPlanner(
+            config=root,
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+
+        plans = list(planner.iter_table_plans(benchmark_ids=["bench_b"]))
+        self.assertEqual(len(plans), 1)
+        self.assertEqual(plans[0].benchmark_id, "bench_b")
+        self.assertEqual(plans[0].table, "sessions")
+
     def test_engine_builds_jobs_and_renders_table_placeholders(self) -> None:
+        """Проверяет, что engine builds jobs and renders table placeholders."""
         benchmark = BenchmarkConfig(
             id="bench_types",
             connection_id="prod_ch",
@@ -358,6 +447,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertNotIn("{table}", job.query_plan.test_queries[0].query)
 
     def test_engine_auto_column_order_uses_compressed_size_desc(self) -> None:
+        """Проверяет, что engine auto column order uses compressed size desc."""
         provider = StaticMetadataProvider(
             {"analytics": {"events": EVENTS_DDL}},
             column_sizes_by_db_table={
@@ -413,6 +503,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(third.column("user_id").type, "UInt64")
 
     def test_engine_indexes_mode_uses_column_order_for_priority(self) -> None:
+        """Проверяет, что engine indexes mode uses column order for priority."""
         provider = StaticMetadataProvider(
             {"analytics": {"events": EVENTS_DDL}},
             column_sizes_by_db_table={
@@ -461,7 +552,169 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(first_indexes, [])
         self.assertEqual(second_indexes, ["user_id"])
 
+    def test_query_plan_builder_supports_auto_and_auto_with_manual(self) -> None:
+        """Проверяет, что query plan builder supports auto and auto with manual."""
+        table = TableDDL.from_ddl(EVENTS_DDL)
+        builder = QueryPlanBuilder()
+
+        auto_plan = builder.build(table, QueriesConfig(mode="auto"))
+        self.assertGreater(len(auto_plan.test_queries), 0)
+
+        manual_query = "SELECT 42 FROM {table}"
+        mixed_plan = builder.build(
+            table,
+            QueriesConfig(
+                mode="auto_with_manual",
+                test_queries=[QueryConfigItem(query=manual_query)],
+            ),
+        )
+        mixed_sqls = [q.query for q in mixed_plan.test_queries]
+        self.assertIn(manual_query, mixed_sqls)
+        self.assertGreater(len(mixed_plan.test_queries), len(auto_plan.test_queries))
+
+    def test_fetcher_metadata_provider_handles_optional_fetch_column_sizes(self) -> None:
+        """Проверяет, что fetcher metadata provider handles optional fetch column sizes."""
+        class FetcherNoSizes:
+            def list_databases(self) -> List[str]:
+                return ["analytics"]
+
+            def list_tables(self, database: str) -> List[str]:
+                return ["events"]
+
+            def fetch_ddl(self, database: str, table: str) -> TableDDL:
+                return TableDDL.from_ddl(EVENTS_DDL)
+
+        class FetcherWithSizes(FetcherNoSizes):
+            def fetch_column_sizes(self, database: str, table: str) -> Dict[str, int]:
+                return {"event_time": 1000}
+
+        provider_without_sizes = FetcherMetadataProvider(FetcherNoSizes())
+        provider_with_sizes = FetcherMetadataProvider(FetcherWithSizes())
+
+        self.assertEqual(provider_without_sizes.fetch_column_sizes("analytics", "events"), {})
+        self.assertEqual(
+            provider_with_sizes.fetch_column_sizes("analytics", "events"),
+            {"event_time": 1000},
+        )
+        ddl = provider_with_sizes.fetch_table_ddl("analytics", "events")
+        self.assertEqual(ddl.name, "analytics.events")
+
+    def test_result_store_validates_result_identity(self) -> None:
+        """Проверяет, что result store validates result identity."""
+        benchmark = BenchmarkConfig(
+            id="bench_result_store_validations",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            global_rules=RulesConfig(
+                column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        job = next(engine.iter_variant_jobs())
+        store = InMemoryBenchmarkResultStore()
+
+        with self.assertRaisesRegex(ValueError, "benchmark_run_id"):
+            store.store_result(
+                job,
+                BenchmarkVariantResult(
+                    benchmark_run_id=job.benchmark_run_id + 1,
+                    benchmark_id=job.benchmark_id,
+                    source_database=job.source_database,
+                    source_table=job.source_table,
+                    variant_table=job.variant_table,
+                    variant_index=job.variant_meta.global_index,
+                ),
+            )
+
+        with self.assertRaisesRegex(ValueError, "benchmark_id"):
+            store.store_result(
+                job,
+                BenchmarkVariantResult(
+                    benchmark_run_id=job.benchmark_run_id,
+                    benchmark_id="other_bench",
+                    source_database=job.source_database,
+                    source_table=job.source_table,
+                    variant_table=job.variant_table,
+                    variant_index=job.variant_meta.global_index,
+                ),
+            )
+
+    def test_result_store_top_variants_sorts_and_handles_non_positive_topn(self) -> None:
+        """Проверяет, что result store top variants sorts and handles non positive topn."""
+        benchmark = BenchmarkConfig(
+            id="bench_result_store_topn",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=2,
+            global_rules=RulesConfig(
+                column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        jobs = list(engine.iter_variant_jobs())
+        self.assertEqual(len(jobs), 2)
+
+        store = InMemoryBenchmarkResultStore()
+        store.store_result(
+            jobs[0],
+            BenchmarkVariantResult(
+                benchmark_run_id=jobs[0].benchmark_run_id,
+                benchmark_id=jobs[0].benchmark_id,
+                source_database=jobs[0].source_database,
+                source_table=jobs[0].source_table,
+                variant_table=jobs[0].variant_table,
+                variant_index=jobs[0].variant_meta.global_index,
+                score=None,
+            ),
+        )
+        store.store_result(
+            jobs[1],
+            BenchmarkVariantResult(
+                benchmark_run_id=jobs[1].benchmark_run_id,
+                benchmark_id=jobs[1].benchmark_id,
+                source_database=jobs[1].source_database,
+                source_table=jobs[1].source_table,
+                variant_table=jobs[1].variant_table,
+                variant_index=jobs[1].variant_meta.global_index,
+                score=10.0,
+            ),
+        )
+
+        self.assertEqual(
+            store.get_top_type_variants(
+                benchmark_run_id=1,
+                benchmark_id="bench_result_store_topn",
+                source_database="analytics",
+                source_table="events",
+                top_n=0,
+            ),
+            [],
+        )
+
+        top = store.get_top_type_variants(
+            benchmark_run_id=1,
+            benchmark_id="bench_result_store_topn",
+            source_database="analytics",
+            source_table="events",
+            top_n=2,
+        )
+        self.assertEqual([item.variant_index for item in top], [1, 0])
+
     def test_runner_passes_jobs_to_execution_adapter(self) -> None:
+        """Проверяет, что runner passes jobs to execution adapter."""
         benchmark = BenchmarkConfig(
             id="bench_run",
             connection_id="prod_ch",
@@ -501,7 +754,34 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         )
         self.assertEqual(result_store.records[0].score, 1.0)
 
+    def test_runner_rejects_non_positive_explicit_run_id(self) -> None:
+        """Проверяет, что runner rejects non positive explicit run id."""
+        benchmark = BenchmarkConfig(
+            id="bench_bad_run_id",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["events"],
+            global_rules=RulesConfig(
+                column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=RecordingExecutionAdapter(),
+            result_store=InMemoryBenchmarkResultStore(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "должен быть > 0"):
+            runner.run(benchmark_run_id=0)
+
     def test_runner_assigns_single_serial_run_id_per_run(self) -> None:
+        """Проверяет, что runner assigns single serial run id per run."""
         benchmark = BenchmarkConfig(
             id="bench_run_id_serial",
             connection_id="prod_ch",
@@ -539,6 +819,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertTrue(run2_rows)
 
     def test_runner_executes_benchmarks_in_lexicographic_id_order(self) -> None:
+        """Проверяет, что runner executes benchmarks in lexicographic id order."""
         benchmark_z = BenchmarkConfig(
             id="bench_z",
             connection_id="prod_ch",
@@ -591,6 +872,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(executed_benchmark_ids, ["bench_a", "bench_z"])
 
     def test_runner_uses_max_id_provider_as_source_of_run_ids(self) -> None:
+        """Проверяет, что runner uses max id provider as source of run ids."""
         benchmark = BenchmarkConfig(
             id="bench_run_id_from_max",
             connection_id="prod_ch",
@@ -637,7 +919,14 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         run2_rows = [r for r in result_store.records if r.benchmark_run_id == 12]
         self.assertTrue(run2_rows)
 
+    def test_max_id_provider_rejects_negative_observed_max(self) -> None:
+        """Проверяет, что max id provider rejects negative observed max."""
+        provider = MaxIdBenchmarkRunIdProvider(max_id_getter=lambda: -1)
+        with self.assertRaisesRegex(ValueError, "отрицательный benchmark id"):
+            provider.next_benchmark_run_id()
+
     def test_sequential_mode_runs_indexes_for_top_n_type_variants(self) -> None:
+        """Проверяет, что sequential mode runs indexes for top n type variants."""
         benchmark = BenchmarkConfig(
             id="bench_sequential_topn",
             connection_id="prod_ch",
@@ -711,6 +1000,58 @@ class PlannerEngineRunnerTests(unittest.TestCase):
 
         variant_tables = [job.variant_table for job in adapter.executed_jobs]
         self.assertEqual(len(variant_tables), len(set(variant_tables)))
+
+    def test_sequential_mode_stops_after_type_stage_when_top_variants_empty(self) -> None:
+        """Проверяет, что sequential mode stops after type stage when top variants empty."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_no_top",
+            connection_id="prod_ch",
+            mode="sequential",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            sequential_top_n=1,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt32",
+                        by_name="user_id",
+                        indexes=[IndexConfig(type="minmax", granularity=4)],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}")],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = SequentialScoringAdapter()
+        result_store = NoTopVariantsResultStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual(len(adapter.executed_jobs), 2)  # только type-stage
+        self.assertEqual(
+            [job.variant_meta.mode for job in adapter.executed_jobs],
+            ["types", "types"],
+        )
 
 
 if __name__ == "__main__":

@@ -18,18 +18,22 @@ from resolver import RuleResolver
 
 class ModelsValidationTests(unittest.TestCase):
     def test_column_rule_requires_matcher(self) -> None:
+        """Проверяет, что column rule requires matcher."""
         with self.assertRaises(ValidationError):
             ColumnRuleConfig()
 
     def test_column_rule_by_name_requires_by_type(self) -> None:
+        """Проверяет, что column rule by name requires by type."""
         with self.assertRaises(ValidationError):
             ColumnRuleConfig(by_name="user_id")
 
     def test_queries_manual_requires_test_queries(self) -> None:
+        """Проверяет, что queries manual requires test queries."""
         with self.assertRaises(ValidationError):
             QueriesConfig(mode="manual")
 
     def test_benchmark_config_rejects_duplicate_table_rules(self) -> None:
+        """Проверяет, что benchmark config rejects duplicate table rules."""
         with self.assertRaises(ValidationError):
             BenchmarkConfig(
                 id="bench",
@@ -44,6 +48,7 @@ class ModelsValidationTests(unittest.TestCase):
             )
 
     def test_benchmark_config_rejects_benchmark_level_celery(self) -> None:
+        """Проверяет, что benchmark config rejects benchmark level celery."""
         with self.assertRaises(ValidationError):
             BenchmarkConfig.model_validate(
                 {
@@ -57,6 +62,7 @@ class ModelsValidationTests(unittest.TestCase):
             )
 
     def test_benchmark_config_rejects_unknown_rules_mode(self) -> None:
+        """Проверяет, что benchmark config rejects unknown rules mode."""
         with self.assertRaises(ValidationError):
             BenchmarkConfig.model_validate(
                 {
@@ -70,6 +76,7 @@ class ModelsValidationTests(unittest.TestCase):
             )
 
     def test_benchmark_project_requires_exactly_one_benchmarks_source(self) -> None:
+        """Проверяет, что benchmark project requires exactly one benchmarks source."""
         with self.assertRaises(ValidationError):
             BenchmarkProjectConfig(
                 connections_file="connections.json",
@@ -106,6 +113,7 @@ class RuleResolverTests(unittest.TestCase):
         )
 
     def test_resolve_uses_default_bank_by_dbms(self) -> None:
+        """Проверяет, что resolve uses default bank by dbms."""
         resolver = RuleResolver(
             banks={"bank_a": self._bank()},
             default_rule_banks={"clickhouse": "bank_a"},
@@ -119,6 +127,7 @@ class RuleResolverTests(unittest.TestCase):
         self.assertEqual(resolved.column_order, {"user_id": 1})
 
     def test_inline_overrides_disable_default_bank_fallback(self) -> None:
+        """Проверяет, что inline overrides disable default bank fallback."""
         resolver = RuleResolver(
             banks={"bank_a": self._bank()},
             default_rule_banks={"clickhouse": "bank_a"},
@@ -135,6 +144,7 @@ class RuleResolverTests(unittest.TestCase):
         self.assertEqual(resolved.column_order, {})
 
     def test_merge_local_rules_over_global_field_by_field(self) -> None:
+        """Проверяет, что merge local rules over global field by field."""
         global_rules = RulesConfig(
             rule_bank="bank_a",
             index_rules=[
@@ -162,6 +172,7 @@ class RuleResolverTests(unittest.TestCase):
         self.assertEqual(merged.index_rules[0].by_type, "UInt64")
 
     def test_no_fallback_bank_when_default_absent(self) -> None:
+        """Проверяет, что no fallback bank when default absent."""
         resolver = RuleResolver(banks={})
         resolved = resolver.resolve(RulesConfig(), dbms="clickhouse")
 
@@ -171,6 +182,7 @@ class RuleResolverTests(unittest.TestCase):
         self.assertEqual(resolved.column_order, {})
 
     def test_global_bank_only_mode_ignores_inline_rules(self) -> None:
+        """Проверяет, что global bank only mode ignores inline rules."""
         resolver = RuleResolver(
             banks={"bank_a": self._bank()},
             default_rule_banks={"clickhouse": "bank_a"},
@@ -201,6 +213,7 @@ class RuleResolverTests(unittest.TestCase):
         self.assertEqual(resolved.index_rules[0].by_type, "UInt64")
 
     def test_global_bank_with_inline_priority_prepends_inline(self) -> None:
+        """Проверяет, что global bank with inline priority prepends inline."""
         resolver = RuleResolver(
             banks={"bank_a": self._bank()},
             default_rule_banks={"clickhouse": "bank_a"},
@@ -229,6 +242,7 @@ class RuleResolverTests(unittest.TestCase):
         self.assertEqual([rule.by_type for rule in resolved.index_rules], ["DateTime", "UInt64"])
 
     def test_inline_only_mode_uses_only_inline_rules(self) -> None:
+        """Проверяет, что inline only mode uses only inline rules."""
         resolver = RuleResolver(
             banks={"bank_a": self._bank()},
             default_rule_banks={"clickhouse": "bank_a"},
@@ -259,6 +273,7 @@ class RuleResolverTests(unittest.TestCase):
         self.assertEqual(resolved.index_rules[0].by_type, "DateTime")
 
     def test_global_bank_mode_raises_when_global_bank_is_missing(self) -> None:
+        """Проверяет, что global bank mode raises when global bank is missing."""
         resolver = RuleResolver(banks={"bank_a": self._bank()}, default_rule_banks={})
         merged = RulesConfig(
             column_rules=[ColumnRuleConfig(by_type="DateTime", codecs=["CODEC(ZSTD(1))"])],
