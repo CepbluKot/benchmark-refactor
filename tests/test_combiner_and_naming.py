@@ -106,6 +106,57 @@ class CombinerAndNamingTests(unittest.TestCase):
         self.assertEqual(len(variants), 2)
         self.assertEqual([meta.global_index for _, meta in variants], [0, 1])
 
+    def test_indexes_mode_uses_column_order_for_iteration_priority(self) -> None:
+        index_rules = [
+            IndexRule(
+                by_type="DateTime",
+                by_name="event_time",
+                alternatives=IndexAlternatives(
+                    variants=[IndexVariant(index_type="minmax", granularity=4)]
+                ),
+            ),
+            IndexRule(
+                by_type="UInt64",
+                by_name="user_id",
+                alternatives=IndexAlternatives(
+                    variants=[IndexVariant(index_type="minmax", granularity=4)]
+                ),
+            ),
+        ]
+
+        # event_time приоритетнее user_id: второй вариант меняет user_id.
+        prioritized_event_time = list(
+            iter_variants(
+                self.table,
+                mode="indexes",
+                column_rules=[],
+                index_rules=index_rules,
+                column_order={"event_time": 1, "user_id": 2},
+                max_iterations=2,
+            )
+        )
+        _, meta_first = prioritized_event_time[0]
+        _, meta_second = prioritized_event_time[1]
+        self.assertIsNone(meta_first.index_choices["event_time"])
+        self.assertIsNone(meta_first.index_choices["user_id"])
+        self.assertIsNone(meta_second.index_choices["event_time"])
+        self.assertIsNotNone(meta_second.index_choices["user_id"])
+
+        # user_id приоритетнее event_time: второй вариант меняет event_time.
+        prioritized_user_id = list(
+            iter_variants(
+                self.table,
+                mode="indexes",
+                column_rules=[],
+                index_rules=index_rules,
+                column_order={"user_id": 1, "event_time": 2},
+                max_iterations=2,
+            )
+        )
+        _, meta_second_reversed = prioritized_user_id[1]
+        self.assertIsNotNone(meta_second_reversed.index_choices["event_time"])
+        self.assertIsNone(meta_second_reversed.index_choices["user_id"])
+
     def test_variant_name_roundtrip(self) -> None:
         name = variant_table_name("user-events", "bench prod", 42)
 
@@ -127,4 +178,3 @@ class CombinerAndNamingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

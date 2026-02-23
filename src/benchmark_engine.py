@@ -926,8 +926,6 @@ class BenchmarkRunner:
             column_order=effective_column_order,
             max_iterations=table_plan.max_iterations,
         ):
-            ddl_text = variant_ddl.to_ddl()
-            print(ddl_text)
             job = self._engine.build_variant_job(
                 table_plan=table_plan,
                 raw_query_plan=raw_query_plan,
@@ -973,8 +971,6 @@ class BenchmarkRunner:
                 column_order=effective_column_order,
                 max_iterations=table_plan.max_iterations,
             ):
-                ddl_text = variant_ddl.to_ddl()
-                print(ddl_text)
                 index_meta.global_index = next_global_index
                 next_global_index += 1
                 index_job = self._engine.build_variant_job(

@@ -328,9 +328,9 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
 ### `index_variants.py`
 
 1. `IndexVariantMeta`
-2. `_resolve_index_columns(table, rules)`
-3. `iter_index_variants(table, rules)`
-4. `total_index_variants(table, rules)`
+2. `_resolve_index_columns(table, rules, column_order=None)`
+3. `iter_index_variants(table, rules, column_order=None)`
+4. `total_index_variants(table, rules, column_order=None)`
 
 ## 9. Комбинатор режимов (`combiner.py`)
 
@@ -597,7 +597,7 @@ Data + metrics:
 5. Автоподстановки builtin rule bank больше нет: если нужны дефолтные правила, укажи `default_rule_banks` в своем JSON.
 6. Готовый baseline для ClickHouse вынесен в `configs/rule_banks.clickhouse_baseline.json`.
 7. `by_type` матчится строго по полному типу: `LowCardinality(String)` и `LowCardinality` — это разные значения.
-8. `column_order_mode="compressed_size_desc"` автоматически расставляет приоритет колонок по убыванию `data_compressed_bytes` в исходной таблице.
+8. `column_order_mode="compressed_size_desc"` автоматически расставляет приоритет колонок по убыванию `data_compressed_bytes` в исходной таблице для генерации и type-, и index-вариантов.
 9. Для serial run id из БД:
 
 ```python

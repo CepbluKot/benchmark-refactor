@@ -60,7 +60,7 @@ def iter_variants(
         mode:           режим перебора.
         column_rules:   правила для типов/кодеков.
         index_rules:    правила для индексов.
-        column_order:   приоритет перебора колонок (для column-вариантов).
+        column_order:   приоритет перебора колонок (для column и index вариантов).
         max_iterations: если задан — обрезает генератор после N вариантов.
 
     Yields: (variant_table, meta)
@@ -83,7 +83,7 @@ def total_variants(
 ) -> int:
     """Подсчитывает количество вариантов без их генерации."""
     col_total = total_column_variants(table, column_rules, column_order)
-    idx_total = total_index_variants(table, index_rules)
+    idx_total = total_index_variants(table, index_rules, column_order)
 
     if mode == "types":
         n = col_total
@@ -114,7 +114,7 @@ def _make_generator(
     if mode == "types":
         yield from _gen_types(table, column_rules, column_order)
     elif mode == "indexes":
-        yield from _gen_indexes(table, index_rules)
+        yield from _gen_indexes(table, index_rules, column_order)
     elif mode == "sequential":
         yield from _gen_sequential(table, column_rules, index_rules, column_order)
     elif mode == "combined":
@@ -133,9 +133,13 @@ def _gen_types(table, column_rules, column_order):
         )
 
 
-def _gen_indexes(table, index_rules):
+def _gen_indexes(table, index_rules, column_order):
     """Режим `indexes`: меняем только наборы skip-индексов."""
-    for variant, idx_meta in iter_index_variants(table, index_rules):
+    for variant, idx_meta in iter_index_variants(
+        table,
+        index_rules,
+        column_order=column_order,
+    ):
         yield variant, VariantMeta(
             global_index=0,
             mode="indexes",
@@ -153,7 +157,11 @@ def _gen_sequential(table, column_rules, index_rules, column_order):
             column_meta=col_meta,
         )
     # Затем все индексные варианты (на основе исходной таблицы)
-    for variant, idx_meta in iter_index_variants(table, index_rules):
+    for variant, idx_meta in iter_index_variants(
+        table,
+        index_rules,
+        column_order=column_order,
+    ):
         yield variant, VariantMeta(
             global_index=0,
             mode="sequential",
@@ -166,7 +174,9 @@ def _gen_combined(table, column_rules, index_rules, column_order):
     Декартово произведение: для каждого типового варианта — все индексные.
     Материализуем индексные варианты в памяти (обычно их немного).
     """
-    index_variants_list = list(iter_index_variants(table, index_rules))
+    index_variants_list = list(
+        iter_index_variants(table, index_rules, column_order=column_order)
+    )
 
     for col_variant, col_meta in iter_column_variants(table, column_rules, column_order):
         for idx_variant_base, idx_meta_base in index_variants_list:

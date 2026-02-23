@@ -35,10 +35,13 @@ class IndexVariantMeta(BaseModel):
 def _resolve_index_columns(
     table: TableDDL,
     rules: List[IndexRule],
+    column_order: Optional[Dict[str, int]] = None,
 ) -> List[Tuple[str, IndexAlternatives]]:
     """
     Матчит колонки по index-правилам (первое совпадение побеждает).
-    Порядок = порядок колонок в таблице.
+    Порядок:
+      - если передан column_order, сортировка по нему (меньше = раньше);
+      - иначе порядок колонок в таблице.
     """
     matched: Dict[str, IndexAlternatives] = {}
     for col in table.columns:
@@ -46,7 +49,13 @@ def _resolve_index_columns(
             if rule.matches(col):
                 matched[col.name] = rule.alternatives
                 break
-    return [(name, matched[name]) for name in matched]
+
+    if not column_order:
+        return [(name, matched[name]) for name in matched]
+
+    inf = float("inf")
+    ordered = sorted(matched, key=lambda col_name: column_order.get(col_name, inf))
+    return [(name, matched[name]) for name in ordered]
 
 
 # ─── генератор ───────────────────────────────────────────────────────────────
@@ -54,6 +63,7 @@ def _resolve_index_columns(
 def iter_index_variants(
     table: TableDDL,
     rules: List[IndexRule],
+    column_order: Optional[Dict[str, int]] = None,
 ) -> Generator[Tuple[TableDDL, IndexVariantMeta], None, None]:
     """
     Генерирует все варианты TableDDL с разными наборами skip-индексов.
@@ -61,10 +71,11 @@ def iter_index_variants(
 
     Для каждой matched-колонки перебираются все варианты индексов из правила.
     Между колонками — декартово произведение.
+    Если передан `column_order`, он влияет на порядок перебора колонок.
 
     Yields: (variant_table, meta)
     """
-    resolved = _resolve_index_columns(table, rules)
+    resolved = _resolve_index_columns(table, rules, column_order=column_order)
 
     if not resolved:
         yield table.copy(), IndexVariantMeta(index=0, index_choices={})
@@ -107,9 +118,10 @@ def iter_index_variants(
 def total_index_variants(
     table: TableDDL,
     rules: List[IndexRule],
+    column_order: Optional[Dict[str, int]] = None,
 ) -> int:
     """Количество вариантов (включая «без индекса» для каждой колонки)."""
-    resolved = _resolve_index_columns(table, rules)
+    resolved = _resolve_index_columns(table, rules, column_order=column_order)
     n = 1
     for _, alt in resolved:
         n *= (alt.total() + 1)  # +1 за вариант None

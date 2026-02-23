@@ -19,6 +19,7 @@
       "mode": "combined",
       "column_rules_mode": "global_bank_with_inline_priority",
       "index_rules_mode": "global_bank_with_inline_priority",
+      "column_order_mode": "compressed_size_desc",
       "databases": [
         "analytics",
         "marketing"
@@ -63,7 +64,14 @@
                   "CODEC(ZSTD(5))"
                 ]
               }
-            ]
+            ],
+            "index_rules": [
+              {
+                "by_type": "Nullable(Decimal(18,4))",
+                "indexes": [
+                  {"type": "bloom_filter(0.01)", "granularity": 228}
+                ]
+              }]
           },
           "queries": {
             "mode": "manual",

@@ -412,6 +412,55 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(third.column("event_time").type, "Date32")
         self.assertEqual(third.column("user_id").type, "UInt64")
 
+    def test_engine_indexes_mode_uses_column_order_for_priority(self) -> None:
+        provider = StaticMetadataProvider(
+            {"analytics": {"events": EVENTS_DDL}},
+            column_sizes_by_db_table={
+                "analytics": {
+                    "events": {
+                        "event_time": 10_000,
+                        "user_id": 100,
+                    }
+                }
+            },
+        )
+        benchmark = BenchmarkConfig(
+            id="bench_auto_index_order",
+            connection_id="prod_ch",
+            mode="indexes",
+            column_order_mode="compressed_size_desc",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=2,
+            global_rules=RulesConfig(
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="DateTime",
+                        by_name="event_time",
+                        indexes=[IndexConfig(type="minmax", granularity=4)],
+                    ),
+                    IndexRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        indexes=[IndexConfig(type="minmax", granularity=4)],
+                    ),
+                ]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+
+        jobs = list(engine.iter_variant_jobs())
+        self.assertEqual(len(jobs), 2)
+
+        first_indexes = [idx.expr for idx in jobs[0].variant_ddl.indexes]
+        second_indexes = [idx.expr for idx in jobs[1].variant_ddl.indexes]
+        self.assertEqual(first_indexes, [])
+        self.assertEqual(second_indexes, ["user_id"])
+
     def test_runner_passes_jobs_to_execution_adapter(self) -> None:
         benchmark = BenchmarkConfig(
             id="bench_run",
