@@ -543,7 +543,9 @@ Data + metrics:
 2. Для `sequential` индексный этап зависит от `score` адаптера, поэтому корректный `execute_variant(...)` критичен.
 3. Если у варианта `score=None`, он почти всегда проиграет ранжирование top-N.
 4. Если `sequential_top_n` больше количества type-вариантов, фактически берутся все.
-5. Для serial run id из БД:
+5. Встроенный fallback для `dbms=clickhouse` — большой baseline rule bank (только `by_type`, без `by_name`), который покрывает частые типы, кодеки и индексы.
+6. `by_type` матчится строго по полному типу: `LowCardinality(String)` и `LowCardinality` — это разные значения.
+7. Для serial run id из БД:
 
 ```python
 from benchmark_engine import (

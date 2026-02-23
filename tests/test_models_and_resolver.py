@@ -2,6 +2,7 @@ import unittest
 
 from pydantic import ValidationError
 
+from default_rule_banks import CLICKHOUSE_DEFAULT_RULE_BANK
 from models import (
     BenchmarkConfig,
     BenchmarkProjectConfig,
@@ -142,6 +143,25 @@ class RuleResolverTests(unittest.TestCase):
         self.assertEqual(resolved.source_bank, "builtin:clickhouse")
         self.assertGreater(len(resolved.column_rules), 0)
         self.assertGreater(len(resolved.index_rules), 0)
+
+    def test_builtin_clickhouse_bank_uses_type_only_rules(self) -> None:
+        self.assertTrue(
+            all(rule.by_name is None for rule in CLICKHOUSE_DEFAULT_RULE_BANK.column_rules)
+        )
+        self.assertTrue(
+            all(rule.by_name is None for rule in CLICKHOUSE_DEFAULT_RULE_BANK.index_rules)
+        )
+
+    def test_builtin_clickhouse_bank_has_only_exact_match_type_tokens(self) -> None:
+        column_types = {rule.by_type for rule in CLICKHOUSE_DEFAULT_RULE_BANK.column_rules}
+        index_types = {rule.by_type for rule in CLICKHOUSE_DEFAULT_RULE_BANK.index_rules}
+
+        self.assertNotIn("LowCardinality", column_types)
+        self.assertNotIn("Nullable", column_types)
+        self.assertNotIn("LowCardinality", index_types)
+        self.assertNotIn("Nullable", index_types)
+        self.assertIn("LowCardinality(String)", column_types)
+        self.assertIn("Nullable(String)", column_types)
 
 
 if __name__ == "__main__":
