@@ -2,7 +2,6 @@ import unittest
 
 from pydantic import ValidationError
 
-from default_rule_banks import CLICKHOUSE_DEFAULT_RULE_BANK
 from models import (
     BenchmarkConfig,
     BenchmarkProjectConfig,
@@ -136,32 +135,14 @@ class RuleResolverTests(unittest.TestCase):
         self.assertEqual(merged.column_rules[0].by_type, "DateTime")
         self.assertEqual(merged.index_rules[0].by_type, "UInt64")
 
-    def test_builtin_bank_used_when_custom_default_absent(self) -> None:
+    def test_no_fallback_bank_when_default_absent(self) -> None:
         resolver = RuleResolver(banks={})
         resolved = resolver.resolve(RulesConfig(), dbms="clickhouse")
 
-        self.assertEqual(resolved.source_bank, "builtin:clickhouse")
-        self.assertGreater(len(resolved.column_rules), 0)
-        self.assertGreater(len(resolved.index_rules), 0)
-
-    def test_builtin_clickhouse_bank_uses_type_only_rules(self) -> None:
-        self.assertTrue(
-            all(rule.by_name is None for rule in CLICKHOUSE_DEFAULT_RULE_BANK.column_rules)
-        )
-        self.assertTrue(
-            all(rule.by_name is None for rule in CLICKHOUSE_DEFAULT_RULE_BANK.index_rules)
-        )
-
-    def test_builtin_clickhouse_bank_has_only_exact_match_type_tokens(self) -> None:
-        column_types = {rule.by_type for rule in CLICKHOUSE_DEFAULT_RULE_BANK.column_rules}
-        index_types = {rule.by_type for rule in CLICKHOUSE_DEFAULT_RULE_BANK.index_rules}
-
-        self.assertNotIn("LowCardinality", column_types)
-        self.assertNotIn("Nullable", column_types)
-        self.assertNotIn("LowCardinality", index_types)
-        self.assertNotIn("Nullable", index_types)
-        self.assertIn("LowCardinality(String)", column_types)
-        self.assertIn("Nullable(String)", column_types)
+        self.assertIsNone(resolved.source_bank)
+        self.assertEqual(resolved.column_rules, [])
+        self.assertEqual(resolved.index_rules, [])
+        self.assertEqual(resolved.column_order, {})
 
 
 if __name__ == "__main__":

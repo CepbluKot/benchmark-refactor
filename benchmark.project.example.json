@@ -58,7 +58,7 @@
             "column_rules": [
               {
                 "by_name": "revenue",
-                "by_type": "Nullable",
+                "by_type": "Nullable(Decimal(18,4))",
                 "types": [
                   "Nullable(Decimal(18,4))",
                   "Nullable(Float64)"
@@ -87,4 +87,3 @@
     }
   ]
 }
-

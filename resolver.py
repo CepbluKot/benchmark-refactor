@@ -3,7 +3,7 @@
 
 Задача модуля:
   - объединить глобальные и локальные правила;
-  - выбрать источник правил (явный bank, default bank по DBMS, builtin bank);
+  - выбрать источник правил (явный bank или default bank по DBMS из конфига);
   - преобразовать config-модели в runtime-правила генератора вариантов.
 """
 
@@ -12,7 +12,6 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from column_rules import ColumnAlternatives, ColumnRule
-from default_rule_banks import BUILTIN_RULE_BANKS_BY_DBMS
 from index_rules import IndexAlternatives, IndexRule, IndexVariant
 from models import ColumnRuleConfig, IndexRuleConfig, RuleBankConfig, RulesConfig
 
@@ -77,29 +76,24 @@ class ResolvedRules:
 
 class RuleResolver:
     """
-    Основной resolver с поддержкой default/builtin rule bank по DBMS.
+    Основной resolver с поддержкой default rule bank по DBMS.
 
     Приоритет источников:
       1) `rules_config.rule_bank` (явно указанный банк);
       2) inline override без банка (работаем только с inline);
       3) `default_rule_banks[dbms]`;
-      4) builtin bank для DBMS (например clickhouse).
     """
 
     def __init__(
         self,
         banks: Dict[str, RuleBankConfig],
         default_rule_banks: Optional[Dict[str, str]] = None,
-        builtin_rule_banks: Optional[Dict[str, RuleBankConfig]] = None,
     ) -> None:
-        """Инициализирует resolver пользовательскими, default и builtin банками."""
+        """Инициализирует resolver пользовательскими банками и default map."""
         self._banks = dict(banks)
         self._default_rule_banks = {
             dbms.lower(): bank_id for dbms, bank_id in (default_rule_banks or {}).items()
         }
-        self._builtin_rule_banks = dict(
-            builtin_rule_banks or BUILTIN_RULE_BANKS_BY_DBMS
-        )
 
     @staticmethod
     def merge(global_rules: RulesConfig, local_rules: Optional[RulesConfig]) -> RulesConfig:
@@ -166,9 +160,6 @@ class RuleResolver:
         if dbms_key and dbms_key in self._default_rule_banks:
             bank_id = self._default_rule_banks[dbms_key]
             return self._banks[bank_id]
-
-        if dbms_key and dbms_key in self._builtin_rule_banks:
-            return self._builtin_rule_banks[dbms_key]
         return None
 
     def _resolve_bank_name(self, rules_config: RulesConfig, dbms: Optional[str]) -> Optional[str]:
@@ -179,9 +170,6 @@ class RuleResolver:
         dbms_key = (dbms or "").lower()
         if dbms_key and dbms_key in self._default_rule_banks:
             return self._default_rule_banks[dbms_key]
-
-        if dbms_key and dbms_key in self._builtin_rule_banks:
-            return f"builtin:{dbms_key}"
         return None
 
 

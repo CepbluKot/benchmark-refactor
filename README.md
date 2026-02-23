@@ -70,8 +70,7 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
 4. `RuleResolver.resolve(...)` выбирает источник правил:
    - explicit `rule_bank`;
    - inline overrides;
-   - `default_rule_banks`;
-   - builtin bank.
+   - `default_rule_banks`.
 5. Вычисляются итоговые параметры таблицы:
    - `mode`;
    - `max_iterations`;
@@ -233,7 +232,7 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
 
 ### Класс `RuleResolver`
 
-1. `__init__(banks, default_rule_banks=None, builtin_rule_banks=None)`
+1. `__init__(banks, default_rule_banks=None)`
 2. `merge(global_rules, local_rules)`
 3. `resolve(rules_config, dbms=None)`
 4. `_pick_bank(rules_config, dbms)`
@@ -536,6 +535,8 @@ Data + metrics:
    Пример двухфазного `sequential` с `sequential_top_n` и локальными override.
 3. `connections.example.json`
 4. `rule_banks.example.json`
+5. `rule_banks.clickhouse_baseline.json`  
+   Отдельный большой универсальный baseline bank для ClickHouse (только `by_type`).
 
 ## 16. Важные практические детали
 
@@ -543,9 +544,10 @@ Data + metrics:
 2. Для `sequential` индексный этап зависит от `score` адаптера, поэтому корректный `execute_variant(...)` критичен.
 3. Если у варианта `score=None`, он почти всегда проиграет ранжирование top-N.
 4. Если `sequential_top_n` больше количества type-вариантов, фактически берутся все.
-5. Встроенный fallback для `dbms=clickhouse` — большой baseline rule bank (только `by_type`, без `by_name`), который покрывает частые типы, кодеки и индексы.
-6. `by_type` матчится строго по полному типу: `LowCardinality(String)` и `LowCardinality` — это разные значения.
-7. Для serial run id из БД:
+5. Автоподстановки builtin rule bank больше нет: если нужны дефолтные правила, укажи `default_rule_banks` в своем JSON.
+6. Готовый baseline для ClickHouse вынесен в `rule_banks.clickhouse_baseline.json`.
+7. `by_type` матчится строго по полному типу: `LowCardinality(String)` и `LowCardinality` — это разные значения.
+8. Для serial run id из БД:
 
 ```python
 from benchmark_engine import (
