@@ -1,4 +1,11 @@
-"""Class-based orchestration для планирования и выполнения DDL-бенчмарка."""
+"""
+Core orchestration слоя бенчмарка (planner -> engine -> runner).
+
+Поток данных в этом модуле:
+  1) `BenchmarkPlanner` разворачивает JSON-конфиг в table-level планы;
+  2) `BenchmarkEngine` по каждому плану строит DDL-варианты и query-планы;
+  3) `BenchmarkRunner` передаёт VariantJob в адаптер фактического выполнения.
+"""
 
 from __future__ import annotations
 
@@ -24,6 +31,8 @@ from resolver import ResolvedRules, RuleResolver
 
 
 class _FrozenModel(BaseModel):
+    """Общая immutable-база для runtime DTO внутри движка."""
+
     model_config = ConfigDict(
         frozen=True,
         extra="forbid",
@@ -32,21 +41,37 @@ class _FrozenModel(BaseModel):
 
 
 class TableTarget(_FrozenModel):
+    """Конкретная таблица-цель (`database.table`) после раскрытия селекторов."""
+
     database: str
     table: str
 
 
 class WeightedQuery(_FrozenModel):
+    """Тестовый запрос и его вес в метрике итогового score."""
+
     query: str
     weight: float = 1.0
 
 
 class QueryPlan(_FrozenModel):
+    """Готовый набор warmup/test запросов для одной variant-таблицы."""
+
     warmup_queries: List[str]
     test_queries: List[WeightedQuery]
 
 
 class TableBenchmarkPlan(_FrozenModel):
+    """
+    Table-level план, сформированный planner'ом до этапа генерации вариантов.
+
+    Этот объект уже учитывает merge:
+      - global/table rules,
+      - global/table max_iterations,
+      - global/table queries,
+      - benchmark-level Celery override.
+    """
+
     benchmark_id: str
     connection_id: str
     connection_dbms: str
@@ -60,6 +85,16 @@ class TableBenchmarkPlan(_FrozenModel):
 
 
 class VariantJob(_FrozenModel):
+    """
+    Полная единица выполнения для конкретного варианта DDL.
+
+    Содержит всё, что нужно execution-слою:
+      - DDL variant-таблицы;
+      - query-план;
+      - runtime-параметры (mode, max_iterations, celery);
+      - метаданные варианта (индекс, total и т.д.).
+    """
+
     benchmark_id: str
     connection_id: str
     connection_dbms: str
@@ -76,6 +111,12 @@ class VariantJob(_FrozenModel):
 
 
 class BenchmarkVariantResult(_FrozenModel):
+    """
+    Результат выполнения одного `VariantJob`.
+
+    Заполняется execution-адаптером и возвращается наружу через `BenchmarkRunner.run`.
+    """
+
     benchmark_id: str
     source_database: str
     source_table: str
@@ -86,45 +127,65 @@ class BenchmarkVariantResult(_FrozenModel):
 
 
 class MetadataProvider(ABC):
-    """Интерфейс получения метаданных/DDL из СУБД."""
+    """
+    Абстракция доступа к метаданным источника.
+
+    Позволяет planner/engine работать с любым backend'ом (реальный Fetcher,
+    тестовый in-memory provider, mock и т.п.).
+    """
 
     @abstractmethod
     def list_databases(self) -> List[str]:
+        """Возвращает список доступных БД для селектора `databases="*"`."""
         pass
 
     @abstractmethod
     def list_tables(self, database: str) -> List[str]:
+        """Возвращает таблицы БД для селектора `tables="*"`."""
         pass
 
     @abstractmethod
     def fetch_table_ddl(self, database: str, table: str) -> TableDDL:
+        """Читает и парсит DDL исходной таблицы в `TableDDL`."""
         pass
 
 
 class FetcherMetadataProvider(MetadataProvider):
-    """Адаптер текущего Fetcher под новый интерфейс движка."""
+    """Адаптер над существующим `Fetcher` для контракта `MetadataProvider`."""
 
     def __init__(self, fetcher: Any) -> None:
+        """Сохраняет объект fetcher с совместимыми методами list*/fetch_ddl."""
         self._fetcher = fetcher
 
     def list_databases(self) -> List[str]:
+        """Проксирует список БД из fetcher."""
         return self._fetcher.list_databases()
 
     def list_tables(self, database: str) -> List[str]:
+        """Проксирует список таблиц по БД из fetcher."""
         return self._fetcher.list_tables(database)
 
     def fetch_table_ddl(self, database: str, table: str) -> TableDDL:
+        """Проксирует получение DDL таблицы из fetcher."""
         return self._fetcher.fetch_ddl(database, table)
 
 
 class TableSelector:
-    """Определяет итоговый список таблиц под бенчмарк."""
+    """
+    Разворачивает selectors из `BenchmarkConfig` в список `TableTarget`.
+
+    Поддерживает все варианты:
+      - `databases="*"`/`tables="*"`;
+      - ручной список БД;
+      - ручной список таблиц (общий или map по БД).
+    """
 
     def select_targets(
         self,
         benchmark: BenchmarkConfig,
         provider: MetadataProvider,
     ) -> List[TableTarget]:
+        """Возвращает deduplicated список таблиц для конкретного benchmark."""
         databases = self._resolve_databases(benchmark, provider)
         targets = self._resolve_tables(benchmark, databases, provider)
         return self._deduplicate(targets)
@@ -133,6 +194,7 @@ class TableSelector:
     def _resolve_databases(
         benchmark: BenchmarkConfig, provider: MetadataProvider
     ) -> List[str]:
+        """Разрешает selector `databases` в конкретный список имён БД."""
         if benchmark.databases == "*":
             return provider.list_databases()
         return list(benchmark.databases)
@@ -143,6 +205,7 @@ class TableSelector:
         databases: List[str],
         provider: MetadataProvider,
     ) -> List[TableTarget]:
+        """Разрешает selector `tables` для уже выбранного списка БД."""
         selector = benchmark.tables
         targets: List[TableTarget] = []
 
@@ -172,6 +235,7 @@ class TableSelector:
 
     @staticmethod
     def _deduplicate(targets: List[TableTarget]) -> List[TableTarget]:
+        """Удаляет дубли `(database, table)` при объединении разных селекторов."""
         seen: set[Tuple[str, str]] = set()
         result: List[TableTarget] = []
         for target in targets:
@@ -184,9 +248,21 @@ class TableSelector:
 
 
 class QueryPlanBuilder:
-    """Собирает warmup/test query plan из QueriesConfig."""
+    """
+    Строит query-plan для одной таблицы на основе `QueriesConfig`.
+
+    Сначала формирует набор запросов с `{table}` placeholder,
+    затем этот placeholder подставляется в имя конкретной variant-таблицы.
+    """
 
     def build(self, table_ddl: TableDDL, queries_config: QueriesConfig) -> QueryPlan:
+        """
+        Собирает сырой план запросов (ещё без подстановки имени таблицы).
+
+        В режиме `auto` использует `query_generator`,
+        в `manual` — только пользовательские запросы,
+        в `auto_with_manual` — объединяет оба набора.
+        """
         mode = queries_config.mode
         warmups = list(queries_config.warmup_queries)
 
@@ -210,6 +286,11 @@ class QueryPlanBuilder:
         database: str,
         table: str,
     ) -> QueryPlan:
+        """
+        Подставляет реальное имя таблицы в каждый запрос плана.
+
+        Используется перед отправкой `VariantJob` в execution-адаптер.
+        """
         full_table_name = f"`{database}`.`{table}`"
         warmups = [query.replace("{table}", full_table_name) for query in plan.warmup_queries]
         tests = [
@@ -223,7 +304,15 @@ class QueryPlanBuilder:
 
 
 class BenchmarkPlanner:
-    """Формирует table-level план бенчмарка."""
+    """
+    Формирует table-level планы из корневого конфига.
+
+    На этом этапе происходит ключевой merge:
+      - выбор целевых таблиц;
+      - merge global/local rules;
+      - выбор mode/max_iterations/queries с учетом table override;
+      - привязка celery-конфига.
+    """
 
     def __init__(
         self,
@@ -232,6 +321,7 @@ class BenchmarkPlanner:
         table_selector: Optional[TableSelector] = None,
         rule_resolver: Optional[RuleResolver] = None,
     ) -> None:
+        """Инициализирует planner и фиксирует доступные metadata providers."""
         self._config = config
         self._providers = dict(providers_by_connection_id)
         self._connections: Dict[str, ConnectionConfig] = {
@@ -244,6 +334,7 @@ class BenchmarkPlanner:
         )
 
     def provider_for_connection(self, connection_id: str) -> MetadataProvider:
+        """Возвращает provider по `connection_id` или бросает понятную ошибку."""
         if connection_id not in self._providers:
             raise ValueError(
                 f"MetadataProvider для connection_id={connection_id!r} не зарегистрирован"
@@ -254,6 +345,12 @@ class BenchmarkPlanner:
         self,
         benchmark_ids: Optional[Sequence[str]] = None,
     ) -> Iterator[TableBenchmarkPlan]:
+        """
+        Итерирует table-level планы для выбранных benchmark_id.
+
+        Это последняя стадия перед генерацией вариантов DDL:
+        дальше engine работает уже только с `TableBenchmarkPlan`.
+        """
         benchmark_filter = set(benchmark_ids) if benchmark_ids else None
 
         for benchmark in self._config.benchmarks:
@@ -315,6 +412,7 @@ class BenchmarkPlanner:
         benchmark: BenchmarkConfig,
         target: TableTarget,
     ) -> Optional[TableRuleConfig]:
+        """Ищет table-level override для конкретной таблицы."""
         for table_rule in benchmark.table_rules:
             if table_rule.database == target.database and table_rule.table == target.table:
                 return table_rule
@@ -322,13 +420,21 @@ class BenchmarkPlanner:
 
 
 class BenchmarkEngine:
-    """Генерирует VariantJob с готовым DDL и query-plan."""
+    """
+    Преобразует `TableBenchmarkPlan` в поток `VariantJob`.
+
+    Для каждой исходной таблицы:
+      1) читает исходный DDL;
+      2) генерирует DDL-варианты через combiner;
+      3) готовит query-план для каждой variant-таблицы.
+    """
 
     def __init__(
         self,
         planner: BenchmarkPlanner,
         query_builder: Optional[QueryPlanBuilder] = None,
     ) -> None:
+        """Принимает planner и опциональный билдер query-плана."""
         self._planner = planner
         self._query_builder = query_builder or QueryPlanBuilder()
 
@@ -336,6 +442,7 @@ class BenchmarkEngine:
         self,
         benchmark_ids: Optional[Sequence[str]] = None,
     ) -> Iterator[VariantJob]:
+        """Итерирует fully prepared задания на выполнение каждого варианта."""
         for table_plan in self._planner.iter_table_plans(benchmark_ids=benchmark_ids):
             provider = self._planner.provider_for_connection(table_plan.connection_id)
             source_ddl = provider.fetch_table_ddl(
@@ -393,11 +500,15 @@ class BenchmarkEngine:
 
 class BenchmarkExecutionAdapter(ABC):
     """
-    Интерфейс интеграции с вашим существующим кодом выполнения/замеров.
+    Контракт между engine и реальным исполнителем бенчмарка.
+
+    Любая интеграция (Celery, sync worker, внешний сервис) должна уметь
+    принять `VariantJob` и вернуть `BenchmarkVariantResult`.
     """
 
     @abstractmethod
     def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
+        """Выполняет один вариант и возвращает результат замеров."""
         pass
 
 
@@ -405,6 +516,7 @@ class NoopExecutionAdapter(BenchmarkExecutionAdapter):
     """Заглушка, полезна для dry-run и отладки плана."""
 
     def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
+        """Возвращает технический результат без фактического выполнения SQL."""
         return BenchmarkVariantResult(
             benchmark_id=job.benchmark_id,
             source_database=job.source_database,
@@ -417,13 +529,18 @@ class NoopExecutionAdapter(BenchmarkExecutionAdapter):
 
 
 class BenchmarkRunner:
-    """Сквозной runner: планирует jobs и передаёт в execution adapter."""
+    """
+    Верхнеуровневый фасад запуска бенчмарка.
+
+    Объединяет генерацию заданий и их выполнение в один метод `run`.
+    """
 
     def __init__(
         self,
         engine: BenchmarkEngine,
         execution_adapter: BenchmarkExecutionAdapter,
     ) -> None:
+        """Сохраняет engine и адаптер выполнения."""
         self._engine = engine
         self._execution_adapter = execution_adapter
 
@@ -431,6 +548,7 @@ class BenchmarkRunner:
         self,
         benchmark_ids: Optional[Sequence[str]] = None,
     ) -> List[BenchmarkVariantResult]:
+        """Выполняет все VariantJob и возвращает список результатов."""
         results: List[BenchmarkVariantResult] = []
         for job in self._engine.iter_variant_jobs(benchmark_ids=benchmark_ids):
             results.append(self._execution_adapter.execute_variant(job))

@@ -1,4 +1,12 @@
-"""Pydantic v2 модели JSON-конфига бенчмарка."""
+"""
+Pydantic-модели JSON-конфига бенчмарка.
+
+Этот модуль описывает весь контракт входной конфигурации:
+  - источники подключений к СУБД;
+  - правила генерации DDL-вариантов (банки и inline override);
+  - селекторы БД/таблиц;
+  - параметры выполнения бенчмарка и Celery.
+"""
 
 from __future__ import annotations
 
@@ -14,10 +22,18 @@ TablesSelector = Union[Literal["*"], List[str], Dict[str, TableListSelector]]
 
 
 class _Base(BaseModel):
+    """Базовая модель конфига: запрещает неизвестные поля."""
+
     model_config = {"extra": "forbid"}
 
 
 class ColumnRuleConfig(_Base):
+    """
+    JSON-описание одного правила для подбора альтернатив колонок.
+
+    Используется в `rule_banks` и в inline `rules.column_rules`.
+    """
+
     by_type: Optional[str] = None
     by_name: Optional[str] = None
     types: List[str] = Field(default_factory=list)
@@ -25,6 +41,12 @@ class ColumnRuleConfig(_Base):
 
     @model_validator(mode="after")
     def check_matchers(self) -> "ColumnRuleConfig":
+        """
+        Валидирует корректность матчинга.
+
+        Правило должно быть привязано минимум к типу колонки;
+        `by_name` без `by_type` запрещён, чтобы избежать слишком широких совпадений.
+        """
         if self.by_name is None and self.by_type is None:
             raise ValueError("нужно задать хотя бы by_type или by_name")
         if self.by_name is not None and self.by_type is None:
@@ -35,17 +57,26 @@ class ColumnRuleConfig(_Base):
 
 
 class IndexConfig(_Base):
+    """Конфигурация одного skip-индекса (тип + гранулярность)."""
+
     type: str
     granularity: int = Field(default=1, ge=1)
 
 
 class IndexRuleConfig(_Base):
+    """
+    JSON-описание правила генерации индексных вариантов для колонки.
+
+    Аналог `ColumnRuleConfig`, но вместо type/codec управляет набором индексов.
+    """
+
     by_type: Optional[str] = None
     by_name: Optional[str] = None
     indexes: List[IndexConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def check_matchers(self) -> "IndexRuleConfig":
+        """Проверяет, что правило содержит валидный набор матчеров."""
         if self.by_name is None and self.by_type is None:
             raise ValueError("нужно задать хотя бы by_type или by_name")
         if self.by_name is not None and self.by_type is None:
@@ -56,27 +87,49 @@ class IndexRuleConfig(_Base):
 
 
 class RuleBankConfig(_Base):
+    """
+    Именованный банк правил.
+
+    Банк можно переиспользовать в нескольких бенчмарках через `rules.rule_bank`.
+    """
+
     column_rules: List[ColumnRuleConfig] = Field(default_factory=list)
     index_rules: List[IndexRuleConfig] = Field(default_factory=list)
     column_order: Dict[str, int] = Field(default_factory=dict)
 
 
 class RulesConfig(_Base):
+    """
+    Универсальный контейнер правил для global/table-level настроек.
+
+    Поддерживает два источника:
+      1) ссылка на `rule_bank`;
+      2) inline-переопределения (`column_rules`, `index_rules`, `column_order`).
+    """
+
     rule_bank: Optional[str] = None
     column_rules: Optional[List[ColumnRuleConfig]] = None
     index_rules: Optional[List[IndexRuleConfig]] = None
     column_order: Optional[Dict[str, int]] = None
 
     def has_inline_overrides(self) -> bool:
+        """True, если задано хотя бы одно inline-поле поверх банка."""
         return any(
             value is not None
             for value in (self.column_rules, self.index_rules, self.column_order)
         )
 
     def is_empty(self) -> bool:
+        """True, если правила полностью отсутствуют (ни банка, ни inline override)."""
         return self.rule_bank is None and not self.has_inline_overrides()
 
     def merged_over(self, base: "RulesConfig") -> "RulesConfig":
+        """
+        Строит объединение `self` поверх `base`.
+
+        Используется для merge глобальных и локальных правил:
+        каждое поле локального блока перезаписывает одноимённое глобальное.
+        """
         merged = RulesConfig(
             rule_bank=self.rule_bank if self.rule_bank is not None else base.rule_bank,
             column_rules=(
@@ -93,28 +146,52 @@ class RulesConfig(_Base):
 
 
 class TestQueryConfig(_Base):
+    """Конфигурация одного тестового SQL-запроса и его веса в scoring."""
+
     query: str
     weight: float = Field(default=1.0, gt=0)
 
 
 class QueriesConfig(_Base):
+    """
+    Настройки генерации/выбора query-плана для замеров.
+
+    Режимы:
+      - auto: автогенерированные запросы;
+      - manual: только пользовательские;
+      - auto_with_manual: объединение обоих наборов.
+    """
+
     mode: Literal["auto", "manual", "auto_with_manual"] = "auto"
     warmup_queries: List[str] = Field(default_factory=list)
     test_queries: List[TestQueryConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def check_manual_has_queries(self) -> "QueriesConfig":
+        """Гарантирует, что `manual` режим не запущен с пустым списком запросов."""
         if self.mode == "manual" and not self.test_queries:
             raise ValueError("mode=manual требует хотя бы одного test_query")
         return self
 
 
 class CeleryConfig(_Base):
+    """Параметры запуска Celery-воркеров для бенчмарк-джоб."""
+
     workers: int = Field(default=4, gt=0)
     threads_per_worker: int = Field(default=2, gt=0)
 
 
 class TableRuleConfig(_Base):
+    """
+    Локальные override для конкретной таблицы `database.table`.
+
+    Может переопределять:
+      - rules;
+      - max_iterations;
+      - mode;
+      - queries.
+    """
+
     database: str
     table: str
     rules: RulesConfig = Field(default_factory=RulesConfig)
@@ -125,6 +202,7 @@ class TableRuleConfig(_Base):
     @field_validator("database", "table")
     @classmethod
     def non_empty_table_target(cls, value: str) -> str:
+        """Проверяет, что имя БД/таблицы не пустое после trim."""
         value = value.strip()
         if not value:
             raise ValueError("database/table не должны быть пустыми")
@@ -132,6 +210,8 @@ class TableRuleConfig(_Base):
 
 
 class ConnectionConfig(_Base):
+    """Параметры подключения к конкретной СУБД для запуска бенчмарка."""
+
     id: str
     dbms: str = "clickhouse"
     credential_type: str = "password"
@@ -143,6 +223,7 @@ class ConnectionConfig(_Base):
     @field_validator("dbms", "credential_type")
     @classmethod
     def normalize_tokens(cls, value: str) -> str:
+        """Нормализует текстовые токены до lower-case без пробелов по краям."""
         token = value.strip().lower()
         if not token:
             raise ValueError("значение не должно быть пустым")
@@ -150,6 +231,16 @@ class ConnectionConfig(_Base):
 
 
 class BenchmarkConfig(_Base):
+    """
+    Конфигурация одного логического бенчмарка.
+
+    Описывает:
+      - какое подключение использовать (`connection_id`);
+      - какие БД/таблицы включить;
+      - глобальные правила и table-level override;
+      - ограничение по итерациям и режим комбинатора.
+    """
+
     id: str
     connection_id: str
     mode: BenchmarkMode
@@ -165,6 +256,11 @@ class BenchmarkConfig(_Base):
 
     @model_validator(mode="after")
     def validate_selectors(self) -> "BenchmarkConfig":
+        """
+        Проверяет валидность селекторов databases/tables и table_rules.
+
+        Цель: отловить ошибки до этапа планирования (пустые списки, лишние БД, дубликаты).
+        """
         if isinstance(self.databases, list) and not self.databases:
             raise ValueError("databases не может быть пустым списком")
 
@@ -198,6 +294,12 @@ class BenchmarkConfig(_Base):
 
 
 class BenchmarkRootConfig(_Base):
+    """
+    Корневая конфигурация, с которой работает planner/engine.
+
+    Это уже собранный и валидированный объект после загрузки project-конфига.
+    """
+
     connections: List[ConnectionConfig]
     benchmarks: List[BenchmarkConfig]
     rule_banks: Dict[str, RuleBankConfig] = Field(default_factory=dict)
@@ -207,10 +309,12 @@ class BenchmarkRootConfig(_Base):
     @field_validator("default_rule_banks")
     @classmethod
     def normalize_default_rule_banks(cls, value: Dict[str, str]) -> Dict[str, str]:
+        """Нормализует ключи DBMS в lower-case для предсказуемого lookup."""
         return {dbms.strip().lower(): bank_id for dbms, bank_id in value.items()}
 
     @model_validator(mode="after")
     def validate_uniqueness(self) -> "BenchmarkRootConfig":
+        """Проверяет уникальность id у connections и benchmarks."""
         connection_ids = [c.id for c in self.connections]
         if len(connection_ids) != len(set(connection_ids)):
             raise ValueError("connections содержит дублирующиеся id")
@@ -223,30 +327,39 @@ class BenchmarkRootConfig(_Base):
 
 
 class ConnectionsFileConfig(_Base):
+    """Структура файла `connections.json` в project-режиме."""
+
     connections: List[ConnectionConfig]
 
     @model_validator(mode="after")
     def validate_non_empty(self) -> "ConnectionsFileConfig":
+        """Запрещает пустой файл подключений."""
         if not self.connections:
             raise ValueError("connections файл не должен быть пустым")
         return self
 
 
 class RuleBanksFileConfig(_Base):
+    """Структура файла `rule_banks.json` в project-режиме."""
+
     rule_banks: Dict[str, RuleBankConfig] = Field(default_factory=dict)
     default_rule_banks: Dict[str, str] = Field(default_factory=dict)
 
     @field_validator("default_rule_banks")
     @classmethod
     def normalize_default_rule_banks(cls, value: Dict[str, str]) -> Dict[str, str]:
+        """Нормализует DBMS-ключи до lower-case."""
         return {dbms.strip().lower(): bank_id for dbms, bank_id in value.items()}
 
 
 class BenchmarksFileConfig(_Base):
+    """Структура файла `benchmarks.json` в project-режиме."""
+
     benchmarks: List[BenchmarkConfig]
 
     @model_validator(mode="after")
     def validate_non_empty(self) -> "BenchmarksFileConfig":
+        """Запрещает пустой список бенчмарков в отдельном файле."""
         if not self.benchmarks:
             raise ValueError("benchmarks файл не должен быть пустым")
         return self
@@ -254,7 +367,10 @@ class BenchmarksFileConfig(_Base):
 
 class BenchmarkProjectConfig(_Base):
     """
-    Проектный конфиг: тяжелые секции лежат в отдельных JSON-файлах.
+    "Лёгкий" проектный конфиг-обёртка.
+
+    Идея: крупные секции (`connections`, `rule_banks`, иногда `benchmarks`)
+    хранятся в отдельных JSON-файлах и склеиваются `loader.ConfigLoader`.
     """
 
     connections_file: str
@@ -266,6 +382,7 @@ class BenchmarkProjectConfig(_Base):
     @field_validator("connections_file", "rule_banks_file", "benchmarks_file")
     @classmethod
     def normalize_file_refs(cls, value: Optional[str]) -> Optional[str]:
+        """Нормализует строки путей и отсекает пустые значения."""
         if value is None:
             return None
         cleaned = value.strip()
@@ -275,6 +392,7 @@ class BenchmarkProjectConfig(_Base):
 
     @model_validator(mode="after")
     def validate_benchmarks_source(self) -> "BenchmarkProjectConfig":
+        """Требует ровно один источник `benchmarks`: inline или файл."""
         has_inline = self.benchmarks is not None
         has_file = self.benchmarks_file is not None
         if has_inline == has_file:

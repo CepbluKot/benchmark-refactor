@@ -53,6 +53,7 @@ class IndexAlternatives(BaseModel):
             yield variant.to_index_def(col, i)
 
     def total(self) -> int:
+        """Количество явных индексных альтернатив для колонки."""
         return len(self.variants)
 
 
@@ -69,6 +70,7 @@ class IndexRule(BaseModel):
     by_name: Optional[str] = None
 
     def matches(self, col: ColumnDef) -> bool:
+        """Проверяет, подходит ли правило к колонке по by_type/by_name."""
         name_ok = self.by_name is None or col.name == self.by_name
         type_ok = (
             self.by_type is None

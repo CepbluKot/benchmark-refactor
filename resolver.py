@@ -1,4 +1,11 @@
-"""Резолвер правил и merge глобальных/локальных override'ов."""
+"""
+Резолвер правил для этапа планирования бенчмарка.
+
+Задача модуля:
+  - объединить глобальные и локальные правила;
+  - выбрать источник правил (явный bank, default bank по DBMS, builtin bank);
+  - преобразовать config-модели в runtime-правила генератора вариантов.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +18,7 @@ from models import ColumnRuleConfig, IndexRuleConfig, RuleBankConfig, RulesConfi
 
 
 def _column_rule_from_config(cfg: ColumnRuleConfig) -> ColumnRule:
+    """Конвертирует `ColumnRuleConfig` в runtime `ColumnRule`."""
     return ColumnRule(
         by_type=cfg.by_type,
         by_name=cfg.by_name,
@@ -22,6 +30,7 @@ def _column_rule_from_config(cfg: ColumnRuleConfig) -> ColumnRule:
 
 
 def _index_rule_from_config(cfg: IndexRuleConfig) -> IndexRule:
+    """Конвертирует `IndexRuleConfig` в runtime `IndexRule`."""
     return IndexRule(
         by_type=cfg.by_type,
         by_name=cfg.by_name,
@@ -35,7 +44,12 @@ def _index_rule_from_config(cfg: IndexRuleConfig) -> IndexRule:
 
 
 class ResolvedRules:
-    """Итоговые правила после резолвинга банка + инлайна."""
+    """
+    Runtime-правила после полного резолвинга источников.
+
+    Используется planner'ом как финальный набор для combiner:
+    `column_rules`, `index_rules`, `column_order`.
+    """
 
     def __init__(
         self,
@@ -44,12 +58,14 @@ class ResolvedRules:
         column_order: Dict[str, int],
         source_bank: Optional[str] = None,
     ) -> None:
+        """Сохраняет уже разрешённые правила и технический `source_bank` для трассировки."""
         self.column_rules = column_rules
         self.index_rules = index_rules
         self.column_order = column_order
         self.source_bank = source_bank
 
     def __repr__(self) -> str:
+        """Короткое представление для логов и отладки."""
         return (
             f"ResolvedRules("
             f"column_rules={len(self.column_rules)}, "
@@ -60,7 +76,15 @@ class ResolvedRules:
 
 
 class RuleResolver:
-    """Классический resolver с поддержкой default rule banks по DBMS."""
+    """
+    Основной resolver с поддержкой default/builtin rule bank по DBMS.
+
+    Приоритет источников:
+      1) `rules_config.rule_bank` (явно указанный банк);
+      2) inline override без банка (работаем только с inline);
+      3) `default_rule_banks[dbms]`;
+      4) builtin bank для DBMS (например clickhouse).
+    """
 
     def __init__(
         self,
@@ -68,6 +92,7 @@ class RuleResolver:
         default_rule_banks: Optional[Dict[str, str]] = None,
         builtin_rule_banks: Optional[Dict[str, RuleBankConfig]] = None,
     ) -> None:
+        """Инициализирует resolver пользовательскими, default и builtin банками."""
         self._banks = dict(banks)
         self._default_rule_banks = {
             dbms.lower(): bank_id for dbms, bank_id in (default_rule_banks or {}).items()
@@ -78,12 +103,22 @@ class RuleResolver:
 
     @staticmethod
     def merge(global_rules: RulesConfig, local_rules: Optional[RulesConfig]) -> RulesConfig:
-        """Локальные правила перезатирают глобальные по полям."""
+        """
+        Объединяет глобальные и локальные правила.
+
+        Поля локальных правил перезаписывают одноимённые поля глобальных.
+        """
         if local_rules is None:
             return global_rules.model_copy(deep=True)
         return local_rules.merged_over(global_rules)
 
     def resolve(self, rules_config: RulesConfig, dbms: Optional[str] = None) -> ResolvedRules:
+        """
+        Резолвит `RulesConfig` в финальные runtime-правила.
+
+        Для каждого блока правил (`column_rules`, `index_rules`, `column_order`)
+        выбирает inline значение, а если его нет — берёт из выбранного банка.
+        """
         source_bank = None
         bank = self._pick_bank(rules_config, dbms)
         if bank is not None:
@@ -120,6 +155,7 @@ class RuleResolver:
     def _pick_bank(
         self, rules_config: RulesConfig, dbms: Optional[str]
     ) -> Optional[RuleBankConfig]:
+        """Выбирает банк правил согласно приоритетам resolver'а."""
         if rules_config.rule_bank is not None:
             return self._banks[rules_config.rule_bank]
 
@@ -136,6 +172,7 @@ class RuleResolver:
         return None
 
     def _resolve_bank_name(self, rules_config: RulesConfig, dbms: Optional[str]) -> Optional[str]:
+        """Возвращает человекочитаемое имя банка, из которого взяты правила."""
         if rules_config.rule_bank is not None:
             return rules_config.rule_bank
 
@@ -154,7 +191,11 @@ def resolve(
     default_rule_banks: Optional[Dict[str, str]] = None,
     dbms: Optional[str] = None,
 ) -> ResolvedRules:
-    """Обратная совместимость со старым API."""
+    """
+    Функциональная обёртка над `RuleResolver` для обратной совместимости.
+
+    Нужна в местах, где используется прежний API `resolve(...)` без класса.
+    """
     resolver = RuleResolver(
         banks=banks,
         default_rule_banks=default_rule_banks,

@@ -16,6 +16,8 @@ from column_rules import ColumnAlternatives, ColumnRule
 # ─── метаданные варианта ──────────────────────────────────────────────────────
 
 class ColumnVariantMeta(BaseModel):
+    """Метаданные одного column-варианта: индекс и выбранные (type, codec) по колонкам."""
+
     index: int
     column_choices: Dict[str, Tuple[Optional[str], Optional[str]]]  # {name: (type, codec)}
 
@@ -88,6 +90,7 @@ def total_column_variants(
     rules: List[ColumnRule],
     column_order: Optional[Dict[str, int]] = None,
 ) -> int:
+    """Подсчитывает число column-вариантов без материализации самих таблиц."""
     resolved = _resolve_columns(table, rules, column_order or {})
     n = 1
     for col_name, alt in resolved:

@@ -32,6 +32,7 @@ class ColumnAlternatives(BaseModel):
         yield from itertools.product(type_options, codec_options)
 
     def total(self, original: ColumnDef) -> int:
+        """Количество комбинаций для колонки с учётом fallback на исходные значения."""
         return max(len(self.types), 1) * max(len(self.codecs), 1)
 
 
@@ -55,6 +56,7 @@ class ColumnRule(BaseModel):
     by_name: Optional[str] = None
 
     def matches(self, col: ColumnDef) -> bool:
+        """Проверяет, подходит ли правило к конкретной колонке таблицы."""
         name_ok = self.by_name is None or col.name == self.by_name
         type_ok = (
             self.by_type is None

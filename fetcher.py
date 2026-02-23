@@ -45,6 +45,7 @@ class TableMetrics(BaseModel):
 
     @property
     def compression_ratio(self) -> Optional[float]:
+        """Отношение `compressed/uncompressed` (меньше = лучше сжатие)."""
         if self.total_bytes_uncompressed > 0:
             return self.total_bytes / self.total_bytes_uncompressed
         return None
@@ -84,12 +85,14 @@ class Fetcher:
     """
 
     def __init__(self, connection: ConnectionConfig) -> None:
+        """Создаёт fetcher для одного `ConnectionConfig` (без подключения)."""
         self._conn = connection
         self._client = None     # type: ignore[assignment]  # инициализируется в connect()
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     def connect(self) -> None:
+        """Открывает соединение с ClickHouse, если оно ещё не открыто."""
         if self._client is not None:
             return
         try:
@@ -113,16 +116,19 @@ class Fetcher:
         )
 
     def disconnect(self) -> None:
+        """Закрывает текущее соединение (идемпотентно)."""
         if self._client is not None:
             self._client.disconnect()
             self._client = None
             logger.debug("Disconnected from %s", self._conn.host)
 
     def __enter__(self) -> "Fetcher":
+        """Вход в контекстный менеджер: автоматически подключается."""
         self.connect()
         return self
 
     def __exit__(self, *_) -> None:
+        """Выход из контекстного менеджера: автоматически отключается."""
         self.disconnect()
 
     # ── execute ──────────────────────────────────────────────────────────────
@@ -172,6 +178,7 @@ class Fetcher:
         return tables
 
     def table_exists(self, database: str, table: str) -> bool:
+        """Проверяет существование таблицы в `system.tables`."""
         rows = self._execute(
             "SELECT count() FROM system.tables "
             "WHERE database = %(db)s AND name = %(tbl)s",
@@ -210,6 +217,7 @@ class Fetcher:
     def drop_table(
         self, database: str, table: str, if_exists: bool = True
     ) -> None:
+        """Удаляет таблицу-вариант после теста или перед пересозданием."""
         exists = "IF EXISTS " if if_exists else ""
         self._execute(f"DROP TABLE {exists}`{database}`.`{table}`")
         logger.info("Dropped %s.%s", database, table)
@@ -333,6 +341,7 @@ class Fetcher:
 
     @staticmethod
     def _generate_query_id() -> str:
+        """Генерирует короткий query id для поиска записи в `system.query_log`."""
         import uuid
         return uuid.uuid4().hex[:12]
 
@@ -344,4 +353,5 @@ class Fetcher:
 # ─── фабрика ─────────────────────────────────────────────────────────────────
 
 def make_fetcher(connection: ConnectionConfig) -> Fetcher:
+    """Фабрика fetcher'а (удобна для DI и единообразия в коде)."""
     return Fetcher(connection)

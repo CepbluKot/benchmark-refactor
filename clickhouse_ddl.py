@@ -31,6 +31,7 @@ class ColumnDef(BaseModel):
     extra: str = ""               # DEFAULT expr / TTL / COMMENT / ...
 
     def to_sql(self, indent: str = "    ") -> str:
+        """Рендерит колонку обратно в строку DDL внутри тела CREATE TABLE."""
         parts = [f"`{self.name}`", self.type]
         if self.extra:
             parts.append(self.extra)
@@ -39,6 +40,7 @@ class ColumnDef(BaseModel):
         return indent + ' '.join(parts)
 
     def copy(self) -> 'ColumnDef':
+        """Возвращает глубокую копию колонки для безопасного мутабельного перебора."""
         return deepcopy(self)
 
 
@@ -59,12 +61,14 @@ class IndexDef(BaseModel):
     _raw: str = PrivateAttr(default="")
 
     def to_sql(self, indent: str = "    ") -> str:
+        """Рендерит индекс в строку DDL формата `INDEX ... TYPE ...`."""
         s = f"INDEX {self.name} {self.expr} TYPE {self.index_type}"
         if self.granularity is not None:
             s += f" GRANULARITY {self.granularity}"
         return indent + s
 
     def copy(self) -> 'IndexDef':
+        """Возвращает глубокую копию описания индекса."""
         return deepcopy(self)
 
 
@@ -186,6 +190,7 @@ class TableDDL(BaseModel):
 
     @classmethod
     def from_ddl(cls, ddl: str) -> 'TableDDL':
+        """Парсит сырой `CREATE TABLE` SQL в структурированный `TableDDL`."""
         # Убираем однострочные SQL-комментарии (-- ...)
         ddl = re.sub(r'--[^\n]*', '', ddl).strip()
 
@@ -241,6 +246,7 @@ class TableDDL(BaseModel):
 
     @classmethod
     def _parse_column(cls, text: str) -> ColumnDef:
+        """Парсит одну строку/элемент тела таблицы как колонку."""
         name, rest = cls._consume_identifier(text)
         col_type, rest = cls._consume_type(rest)
         codec, extra = cls._extract_codec(rest)
@@ -248,6 +254,7 @@ class TableDDL(BaseModel):
 
     @classmethod
     def _parse_index(cls, text: str) -> IndexDef:
+        """Парсит одну строку/элемент тела таблицы как skip-индекс."""
         raw = text
         rest = re.sub(r'^INDEX\s+', '', text, flags=re.IGNORECASE).lstrip()
 
@@ -313,6 +320,7 @@ class TableDDL(BaseModel):
     # ── сборка DDL ───────────────────────────────────────────────────────────
 
     def to_ddl(self) -> str:
+        """Собирает текущий объект обратно в `CREATE TABLE` SQL."""
         header = f"CREATE TABLE {self.name}"
         if self.cluster:
             header += f" ON CLUSTER {self.cluster}"

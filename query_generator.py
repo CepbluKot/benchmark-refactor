@@ -39,6 +39,7 @@ def _base_type(col: ColumnDef) -> str:
 
 
 def _is_integer(col: ColumnDef) -> bool:
+    """True для целочисленных типов ClickHouse."""
     base = _base_type(col)
     return base in {
         "UInt8", "UInt16", "UInt32", "UInt64", "UInt128", "UInt256",
@@ -47,32 +48,40 @@ def _is_integer(col: ColumnDef) -> bool:
 
 
 def _is_float(col: ColumnDef) -> bool:
+    """True для Float32/Float64."""
     return _base_type(col) in {"Float32", "Float64"}
 
 
 def _is_numeric(col: ColumnDef) -> bool:
+    """True для всех числовых типов, используемых в агрегатах."""
     return _is_integer(col) or _is_float(col) or _base_type(col) in {"Decimal"}
 
 
 def _is_datetime(col: ColumnDef) -> bool:
+    """True для Date/DateTime-семейства."""
     return _base_type(col) in {"DateTime", "DateTime64", "Date", "Date32"}
 
 
 def _is_string(col: ColumnDef) -> bool:
+    """True для строковых типов."""
     return _base_type(col) in {"String", "FixedString"}
 
 
 def _is_low_cardinality(col: ColumnDef) -> bool:
+    """True, если колонка обёрнута в `LowCardinality(...)`."""
     return col.type.startswith("LowCardinality(")
 
 
 def _is_nullable(col: ColumnDef) -> bool:
+    """True, если колонка обёрнута в `Nullable(...)`."""
     return col.type.startswith("Nullable(")
 
 
 # ─── датакласс результата ─────────────────────────────────────────────────────
 
 class GeneratedQuery(BaseModel):
+    """Один автогенерированный SQL-запрос с пояснением его назначения."""
+
     query: str
     description: str = ""
 
@@ -91,6 +100,7 @@ class QueryGenerator:
     """
 
     def __init__(self, table: TableDDL) -> None:
+        """Инициализирует генератор для конкретной схемы таблицы."""
         self.table = table
         self._placeholder = "{table}"   # подставляется в runner
 

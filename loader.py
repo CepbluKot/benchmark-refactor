@@ -1,4 +1,11 @@
-"""Загрузка и валидация JSON-конфига бенчмарка."""
+"""
+Загрузка project-конфига и сборка `BenchmarkRootConfig`.
+
+Модуль отвечает за multi-file конфигурацию:
+  - читает project JSON;
+  - подгружает отдельные файлы connections/rule_banks/benchmarks;
+  - валидирует ссылочную целостность.
+"""
 
 from __future__ import annotations
 
@@ -20,12 +27,17 @@ from models import (
 
 class ConfigLoader:
     """
-    Класс-обёртка над загрузкой project-конфига:
-      - connections/rule_banks подгружаются из отдельных файлов
-      - benchmarks берутся inline или из benchmarks_file
+    Обёртка над проектной загрузкой конфигурации.
+
+    Pipeline:
+      1) парсинг `BenchmarkProjectConfig`;
+      2) чтение вложенных JSON-файлов;
+      3) сборка `BenchmarkRootConfig`;
+      4) проверка ссылок (connection_id, rule_bank, default_rule_banks).
     """
 
     def load(self, path: Union[str, Path]) -> BenchmarkRootConfig:
+        """Загружает и валидирует project-конфиг из файла."""
         config_path = Path(path)
         raw = self._read_json(config_path)
         return self.parse(raw, base_dir=config_path.parent)
@@ -35,6 +47,7 @@ class ConfigLoader:
         raw: Dict[str, Any],
         base_dir: Optional[Union[str, Path]] = None,
     ) -> BenchmarkRootConfig:
+        """Парсит уже загруженный dict project-конфига."""
         return self._parse_project_config(
             raw,
             base_dir=Path(base_dir) if base_dir is not None else Path.cwd(),
@@ -45,6 +58,7 @@ class ConfigLoader:
         raw: Dict[str, Any],
         base_dir: Path,
     ) -> BenchmarkRootConfig:
+        """Собирает `BenchmarkRootConfig` из project-конфига и связанных файлов."""
         try:
             project = BenchmarkProjectConfig.model_validate(raw)
         except ValidationError as e:
@@ -93,6 +107,7 @@ class ConfigLoader:
 
     @staticmethod
     def _resolve_file_path(base_dir: Path, ref: str) -> Path:
+        """Резолвит относительный путь к файлу относительно `base_dir`."""
         path = Path(ref)
         if path.is_absolute():
             return path
@@ -100,6 +115,7 @@ class ConfigLoader:
 
     @staticmethod
     def _read_json(path: Path) -> Dict[str, Any]:
+        """Читает JSON-файл и преобразует ошибки в понятные ValueError."""
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -109,6 +125,14 @@ class ConfigLoader:
             raise ValueError(f"Некорректный JSON в файле {path}: {e}") from e
 
     def _validate_references(self, config: BenchmarkRootConfig) -> None:
+        """
+        Валидирует кросс-ссылки между секциями конфига.
+
+        Проверяет:
+          - `default_rule_banks` ссылаются на существующие bank id;
+          - каждый `benchmark.connection_id` существует;
+          - `rule_bank` в global/table rules существует.
+        """
         connection_ids = {c.id for c in config.connections}
         bank_ids = set(config.rule_banks.keys())
 
@@ -138,6 +162,7 @@ class ConfigLoader:
 
     @staticmethod
     def _validate_table_rule_scope(bench: BenchmarkConfig) -> None:
+        """Проверяет, что table-level override не выходят за selector `databases`."""
         if bench.databases == "*":
             return
 
@@ -151,7 +176,7 @@ class ConfigLoader:
 
 
 def load_config(path: Union[str, Path]) -> BenchmarkRootConfig:
-    """Загружает project-конфиг из JSON-файла."""
+    """Публичный helper: загрузка project-конфига из файла."""
     return ConfigLoader().load(path)
 
 
@@ -159,5 +184,5 @@ def parse_config(
     raw: Dict[str, Any],
     base_dir: Optional[Union[str, Path]] = None,
 ) -> BenchmarkRootConfig:
-    """Парсит project-конфиг из dict."""
+    """Публичный helper: парсинг project-конфига из уже загруженного dict."""
     return ConfigLoader().parse(raw, base_dir=base_dir)

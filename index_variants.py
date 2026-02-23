@@ -23,6 +23,8 @@ from index_rules import IndexAlternatives, IndexRule
 # ─── метаданные варианта ──────────────────────────────────────────────────────
 
 class IndexVariantMeta(BaseModel):
+    """Метаданные одного index-варианта: индекс и выбранные индексы по колонкам."""
+
     index: int
     # {col_name: IndexDef | None}  None = индекс не добавлен для этой колонки
     index_choices: Dict[str, Optional[IndexDef]]

@@ -33,10 +33,12 @@ class VariantMeta(BaseModel):
 
     @property
     def column_choices(self):
+        """Возвращает решения по колонкам для текущего варианта (если есть)."""
         return self.column_meta.column_choices if self.column_meta else {}
 
     @property
     def index_choices(self):
+        """Возвращает решения по индексам для текущего варианта (если есть)."""
         return self.index_meta.index_choices if self.index_meta else {}
 
 
@@ -108,6 +110,7 @@ def _make_generator(
     index_rules: List[IndexRule],
     column_order: Optional[Dict[str, int]],
 ) -> Generator[Tuple[TableDDL, VariantMeta], None, None]:
+    """Выбирает конкретный генератор вариантов согласно `mode`."""
     if mode == "types":
         yield from _gen_types(table, column_rules, column_order)
     elif mode == "indexes":
@@ -121,6 +124,7 @@ def _make_generator(
 
 
 def _gen_types(table, column_rules, column_order):
+    """Режим `types`: меняем только типы/кодеки колонок."""
     for variant, col_meta in iter_column_variants(table, column_rules, column_order):
         yield variant, VariantMeta(
             global_index=0,
@@ -130,6 +134,7 @@ def _gen_types(table, column_rules, column_order):
 
 
 def _gen_indexes(table, index_rules):
+    """Режим `indexes`: меняем только наборы skip-индексов."""
     for variant, idx_meta in iter_index_variants(table, index_rules):
         yield variant, VariantMeta(
             global_index=0,
@@ -139,6 +144,7 @@ def _gen_indexes(table, index_rules):
 
 
 def _gen_sequential(table, column_rules, index_rules, column_order):
+    """Режим `sequential`: сначала типовые, затем индексные варианты."""
     # Сначала все типовые варианты
     for variant, col_meta in iter_column_variants(table, column_rules, column_order):
         yield variant, VariantMeta(

@@ -72,15 +72,19 @@ class InMemoryMetadataProvider(MetadataProvider):
     """
 
     def __init__(self, ddl_by_db_table: Dict[str, Dict[str, str]]) -> None:
+        """Принимает map вида `{database: {table: ddl_sql}}`."""
         self._ddl_by_db_table = ddl_by_db_table
 
     def list_databases(self) -> List[str]:
+        """Возвращает доступные БД из in-memory словаря."""
         return sorted(self._ddl_by_db_table.keys())
 
     def list_tables(self, database: str) -> List[str]:
+        """Возвращает таблицы указанной БД."""
         return sorted(self._ddl_by_db_table.get(database, {}).keys())
 
     def fetch_table_ddl(self, database: str, table: str) -> TableDDL:
+        """Парсит DDL строки таблицы в `TableDDL`."""
         ddl = self._ddl_by_db_table[database][table]
         return TableDDL.from_ddl(ddl)
 
@@ -97,6 +101,7 @@ class DemoExecutionAdapter(BenchmarkExecutionAdapter):
     """
 
     def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
+        """Dry-run выполнение: печатает план и возвращает псевдо-score."""
         pseudo_score = round(1.0 / (1 + job.variant_meta.global_index), 6)
         print(
             f"[{job.benchmark_id}] {job.source_database}.{job.source_table} "
@@ -120,6 +125,7 @@ class DemoExecutionAdapter(BenchmarkExecutionAdapter):
 
 
 def main() -> None:
+    """Демонстрирует запуск пайплайна planner -> engine -> runner на тестовых DDL."""
     config_path = Path(__file__).with_name("benchmark.project.example.json")
     config = load_config(config_path)
 
