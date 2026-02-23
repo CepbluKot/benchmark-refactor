@@ -18,6 +18,7 @@ from benchmark_engine import (
     BenchmarkPlanner,
     BenchmarkRunner,
     BenchmarkVariantResult,
+    InMemoryBenchmarkResultStore,
     MetadataProvider,
     VariantJob,
 )
@@ -147,16 +148,24 @@ def main() -> None:
         providers_by_connection_id={"prod_ch": provider},
     )
     engine = BenchmarkEngine(planner=planner)
+    result_store = InMemoryBenchmarkResultStore()
     runner = BenchmarkRunner(
         engine=engine,
         execution_adapter=DemoExecutionAdapter(),
+        result_store=result_store,
     )
 
     print("=== План + dry-run выполнения benchmark_id='bench_mixed_selectors' ===")
-    results = runner.run(benchmark_ids=["bench_mixed_selectors"])
-    print(f"Всего результатов: {len(results)}")
+    run_id = runner.run(benchmark_ids=["bench_mixed_selectors"])
+    run_results = [
+        row
+        for row in result_store.records
+        if row.benchmark_run_id == run_id and row.benchmark_id == "bench_mixed_selectors"
+    ]
+    print(f"Run id: {run_id}")
+    print(f"Всего результатов: {len(run_results)}")
     print("Первые 3 score:")
-    for result in results[:3]:
+    for result in run_results[:3]:
         print(
             f"  {result.variant_table}: score={result.score}, payload={result.payload}"
         )

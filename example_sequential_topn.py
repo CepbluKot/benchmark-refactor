@@ -16,6 +16,7 @@ from benchmark_engine import (
     BenchmarkPlanner,
     BenchmarkRunner,
     BenchmarkVariantResult,
+    InMemoryBenchmarkResultStore,
     MetadataProvider,
     VariantJob,
 )
@@ -147,16 +148,24 @@ def main() -> None:
         providers_by_connection_id={"prod_ch": provider},
     )
     engine = BenchmarkEngine(planner=planner)
+    result_store = InMemoryBenchmarkResultStore()
     runner = BenchmarkRunner(
         engine=engine,
         execution_adapter=SequentialTopNDemoAdapter(),
+        result_store=result_store,
     )
 
     print("=== Sequential top-N demo: benchmark_id='bench_sequential_topn' ===")
-    results = runner.run(benchmark_ids=["bench_sequential_topn"])
+    run_id = runner.run(benchmark_ids=["bench_sequential_topn"])
+    results = [
+        row
+        for row in result_store.records
+        if row.benchmark_run_id == run_id and row.benchmark_id == "bench_sequential_topn"
+    ]
 
     type_results = [r for r in results if r.payload.get("stage") == "types"]
     index_results = [r for r in results if r.payload.get("stage") == "indexes"]
+    print(f"Run id: {run_id}")
     print(f"Всего результатов: {len(results)}")
     print(f"  type stage:  {len(type_results)}")
     print(f"  index stage: {len(index_results)}")

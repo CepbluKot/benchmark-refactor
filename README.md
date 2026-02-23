@@ -24,7 +24,7 @@ Python-движок для перебора вариантов DDL (типы/к�
 ```text
 project json -> ConfigLoader -> BenchmarkRootConfig
 BenchmarkRootConfig + MetadataProvider -> BenchmarkPlanner -> TableBenchmarkPlan
-TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter -> BenchmarkVariantResult
+TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter -> BenchmarkVariantResult -> BenchmarkResultStore
 ```
 
 ## 2. Алгоритм работы (end-to-end)
@@ -81,13 +81,16 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
    - из аргумента `run(..., benchmark_run_id=...)`, либо
    - через `BenchmarkRunIdProvider.next_benchmark_run_id()`.
 1. Для `mode != "sequential"`:
-   - запускает все jobs как есть через `execution_adapter.execute_variant(job)`.
+   - запускает jobs через `execution_adapter.execute_variant(job)`;
+   - сразу сохраняет результат в `result_store.store_result(job, result)`.
 2. Для `mode == "sequential"`:
    - Stage A: прогоняет только `types`-варианты;
-   - собирает `score` для каждого type-варианта;
-   - выбирает top-N (`sequential_top_n`);
+   - сохраняет score/DDL type-этапа в result-store;
+   - выбирает top-N (`sequential_top_n`) через `result_store.get_top_type_variants(...)`;
    - Stage B: для DDL лучших type-вариантов прогоняет `indexes`-варианты;
-   - возвращает объединенный список результатов.
+   - сохраняет index-результаты в result-store.
+
+`run(...)` больше не возвращает массив результатов, а возвращает только `benchmark_run_id`.
 
 Сортировка top-N:
 - больше `score` = лучше;
@@ -403,9 +406,19 @@ Data + metrics:
 5. `TableBenchmarkPlan`
 6. `VariantJob`
 7. `BenchmarkVariantResult`
+8. `StoredBenchmarkResult`
+9. `TopTypeVariant`
 
 `VariantJob` и `BenchmarkVariantResult` содержат `benchmark_run_id` (целое > 0),
 общее для всех benchmark'ов, выполняемых в рамках одного запуска конфига.
+
+### Result store
+
+1. `BenchmarkResultStore`
+   - `store_result(job, result)`
+   - `get_top_type_variants(benchmark_run_id, benchmark_id, source_database, source_table, top_n)`
+2. `InMemoryBenchmarkResultStore`
+   - тестовая in-memory реализация; в production рекомендуется DB-backed реализация.
 
 ### Metadata abstraction
 
@@ -467,11 +480,11 @@ Data + metrics:
 
 ### `BenchmarkRunner`
 
-1. `__init__(engine, execution_adapter)`
+1. `__init__(engine, execution_adapter, result_store, run_id_provider=None)`
 2. `run(benchmark_ids=None, benchmark_run_id=None)`
 3. `_run_sequential(table_plan)`
-4. `_pick_top_scored(jobs_with_results, top_n)`
-5. `_next_run_id()`
+4. `_next_run_id()`
+5. `_execute_and_store(job)`
 
 ## 14. Как запускать
 
@@ -511,11 +524,21 @@ Data + metrics:
 5. Для serial run id из БД:
 
 ```python
-from benchmark_engine import BenchmarkRunner, MaxIdBenchmarkRunIdProvider
+from benchmark_engine import (
+    BenchmarkRunner,
+    MaxIdBenchmarkRunIdProvider,
+    InMemoryBenchmarkResultStore,
+)
 
 provider = MaxIdBenchmarkRunIdProvider(
     max_id_getter=lambda: fetch_max_run_id_from_db(),  # верни int | None
 )
-runner = BenchmarkRunner(engine=engine, execution_adapter=adapter, run_id_provider=provider)
-results = runner.run()
+result_store = InMemoryBenchmarkResultStore()  # в проде: ваш DB-backed store
+runner = BenchmarkRunner(
+    engine=engine,
+    execution_adapter=adapter,
+    result_store=result_store,
+    run_id_provider=provider,
+)
+run_id = runner.run()
 ```

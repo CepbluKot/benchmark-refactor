@@ -115,7 +115,8 @@ class BenchmarkVariantResult(_FrozenModel):
     """
     Результат выполнения одного `VariantJob`.
 
-    Заполняется execution-адаптером и возвращается наружу через `BenchmarkRunner.run`.
+    Заполняется execution-адаптером и передаётся в result-store для персистентного
+    сохранения (например, в БД).
     """
 
     benchmark_run_id: int
@@ -126,6 +127,151 @@ class BenchmarkVariantResult(_FrozenModel):
     variant_index: int
     score: Optional[float] = None
     payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class StoredBenchmarkResult(_FrozenModel):
+    """
+    Нормализованная запись результата в persistence-слое.
+
+    Это DTO для result-store, чтобы runner не хранил результаты в оперативной
+    памяти и не зависел от конкретной схемы таблиц в БД.
+    """
+
+    benchmark_run_id: int
+    benchmark_id: str
+    source_database: str
+    source_table: str
+    variant_table: str
+    variant_index: int
+    variant_mode: str
+    score: Optional[float] = None
+    variant_ddl: TableDDL
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class TopTypeVariant(_FrozenModel):
+    """Кандидат из top-N type/codeс этапа для перехода на index-этап."""
+
+    variant_index: int
+    variant_ddl: TableDDL
+    score: Optional[float] = None
+
+
+class BenchmarkResultStore(ABC):
+    """
+    Контракт персистентного хранения результатов.
+
+    В production реализации обычно пишут результаты в БД и читают top-N
+    type-варианты SQL-запросом.
+    """
+
+    @abstractmethod
+    def store_result(
+        self,
+        job: VariantJob,
+        result: BenchmarkVariantResult,
+    ) -> None:
+        """Сохраняет результат выполнения одного `VariantJob`."""
+        pass
+
+    @abstractmethod
+    def get_top_type_variants(
+        self,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        top_n: int,
+    ) -> List[TopTypeVariant]:
+        """
+        Возвращает top-N type/codec DDL для sequential-этапа индексов.
+
+        Ожидаемый порядок: по score убыв., `score=None` в конце.
+        """
+        pass
+
+
+class InMemoryBenchmarkResultStore(BenchmarkResultStore):
+    """
+    In-memory реализация result-store.
+
+    Нужна для тестов и dry-run примеров. Для production следует заменить
+    на DB-backed реализацию.
+    """
+
+    def __init__(self) -> None:
+        self._records: List[StoredBenchmarkResult] = []
+
+    @property
+    def records(self) -> List[StoredBenchmarkResult]:
+        """Возвращает копию сохранённых записей (удобно в тестах)."""
+        return list(self._records)
+
+    def store_result(
+        self,
+        job: VariantJob,
+        result: BenchmarkVariantResult,
+    ) -> None:
+        """Сохраняет результат и снимок variant DDL в памяти."""
+        if result.benchmark_run_id != job.benchmark_run_id:
+            raise ValueError(
+                "result.benchmark_run_id не совпадает с job.benchmark_run_id"
+            )
+        if result.benchmark_id != job.benchmark_id:
+            raise ValueError("result.benchmark_id не совпадает с job.benchmark_id")
+
+        self._records.append(
+            StoredBenchmarkResult(
+                benchmark_run_id=job.benchmark_run_id,
+                benchmark_id=job.benchmark_id,
+                source_database=job.source_database,
+                source_table=job.source_table,
+                variant_table=job.variant_table,
+                variant_index=job.variant_meta.global_index,
+                variant_mode=job.variant_meta.mode,
+                score=result.score,
+                variant_ddl=job.variant_ddl.copy(),
+                payload=dict(result.payload),
+            )
+        )
+
+    def get_top_type_variants(
+        self,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        top_n: int,
+    ) -> List[TopTypeVariant]:
+        """Ранжирует сохранённые type-варианты и отдаёт top-N."""
+        if top_n <= 0:
+            return []
+
+        candidates = [
+            record
+            for record in self._records
+            if record.benchmark_run_id == benchmark_run_id
+            and record.benchmark_id == benchmark_id
+            and record.source_database == source_database
+            and record.source_table == source_table
+            and record.variant_mode == "types"
+        ]
+        ranked = sorted(
+            candidates,
+            key=lambda record: (
+                record.score is None,
+                -(record.score if record.score is not None else 0.0),
+                record.variant_index,
+            ),
+        )
+        return [
+            TopTypeVariant(
+                variant_index=record.variant_index,
+                variant_ddl=record.variant_ddl.copy(),
+                score=record.score,
+            )
+            for record in ranked[:top_n]
+        ]
 
 
 class MetadataProvider(ABC):
@@ -647,48 +793,49 @@ class BenchmarkRunner:
         self,
         engine: BenchmarkEngine,
         execution_adapter: BenchmarkExecutionAdapter,
+        result_store: BenchmarkResultStore,
         run_id_provider: Optional[BenchmarkRunIdProvider] = None,
     ) -> None:
-        """Сохраняет engine и адаптер выполнения."""
+        """Сохраняет engine, адаптер выполнения и persistence-хранилище."""
         self._engine = engine
         self._execution_adapter = execution_adapter
+        self._result_store = result_store
         self._run_id_provider = run_id_provider or InMemoryBenchmarkRunIdProvider()
 
     def run(
         self,
         benchmark_ids: Optional[Sequence[str]] = None,
         benchmark_run_id: Optional[int] = None,
-    ) -> List[BenchmarkVariantResult]:
+    ) -> int:
         """
-        Выполняет все VariantJob и возвращает список результатов.
+        Выполняет все VariantJob и возвращает run-level `benchmark_run_id`.
 
         Для `mode="sequential"` используется двухфазный алгоритм:
           1) прогон type/codec-вариантов;
-          2) выбор top-N по score и прогон индексных вариантов на их DDL.
+          2) выбор top-N через result-store и прогон индексных вариантов на их DDL.
         """
         run_id = benchmark_run_id if benchmark_run_id is not None else self._next_run_id()
         if run_id <= 0:
             raise ValueError(f"benchmark_run_id должен быть > 0, получено: {run_id}")
 
-        results: List[BenchmarkVariantResult] = []
         for table_plan in self._engine.iter_table_plans(benchmark_ids=benchmark_ids):
             if table_plan.mode != "sequential":
                 for job in self._engine.iter_variant_jobs_for_table_plan(
                     table_plan,
                     benchmark_run_id=run_id,
                 ):
-                    results.append(self._execution_adapter.execute_variant(job))
+                    self._execute_and_store(job)
                 continue
 
-            results.extend(self._run_sequential(table_plan, benchmark_run_id=run_id))
-        return results
+            self._run_sequential(table_plan, benchmark_run_id=run_id)
+        return run_id
 
     def _run_sequential(
         self,
         table_plan: TableBenchmarkPlan,
         benchmark_run_id: int,
-    ) -> List[BenchmarkVariantResult]:
-        """Адаптивный sequential: types -> score -> top-N -> indexes на лучших types."""
+    ) -> None:
+        """Адаптивный sequential: types -> persist -> top-N select -> indexes."""
         source_ddl, raw_query_plan = self._engine.prepare_table_context(table_plan)
 
         type_total = total_variants(
@@ -699,8 +846,6 @@ class BenchmarkRunner:
             column_order=table_plan.rules.column_order,
             max_iterations=table_plan.max_iterations,
         )
-        type_jobs_with_results: List[Tuple[VariantJob, BenchmarkVariantResult]] = []
-        all_results: List[BenchmarkVariantResult] = []
 
         for variant_ddl, variant_meta in iter_variants(
             table=source_ddl,
@@ -719,19 +864,25 @@ class BenchmarkRunner:
                 benchmark_run_id=benchmark_run_id,
                 job_mode="sequential",
             )
-            result = self._execution_adapter.execute_variant(job)
-            type_jobs_with_results.append((job, result))
-            all_results.append(result)
+            self._execute_and_store(job)
 
-        if not type_jobs_with_results:
-            return all_results
+        if type_total <= 0:
+            return
 
-        top_n = min(table_plan.sequential_top_n, len(type_jobs_with_results))
-        top_jobs = self._pick_top_scored(type_jobs_with_results, top_n=top_n)
-        next_global_index = len(type_jobs_with_results)
+        top_n = min(table_plan.sequential_top_n, type_total)
+        top_variants = self._result_store.get_top_type_variants(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=table_plan.benchmark_id,
+            source_database=table_plan.database,
+            source_table=table_plan.table,
+            top_n=top_n,
+        )
+        if not top_variants:
+            return
+        next_global_index = type_total
 
-        for type_job, _ in top_jobs:
-            base_ddl = type_job.variant_ddl.copy()
+        for type_variant in top_variants:
+            base_ddl = type_variant.variant_ddl.copy()
             index_total = total_variants(
                 table=base_ddl,
                 mode="indexes",
@@ -760,30 +911,13 @@ class BenchmarkRunner:
                     benchmark_run_id=benchmark_run_id,
                     job_mode="sequential",
                 )
-                all_results.append(self._execution_adapter.execute_variant(index_job))
-
-        return all_results
-
-    @staticmethod
-    def _pick_top_scored(
-        jobs_with_results: List[Tuple[VariantJob, BenchmarkVariantResult]],
-        top_n: int,
-    ) -> List[Tuple[VariantJob, BenchmarkVariantResult]]:
-        """
-        Возвращает top-N вариантов по score (чем больше score, тем лучше).
-
-        Если score отсутствует (`None`), вариант опускается в конец сортировки.
-        """
-        ranked = sorted(
-            jobs_with_results,
-            key=lambda item: (
-                item[1].score is not None,
-                item[1].score if item[1].score is not None else float("-inf"),
-            ),
-            reverse=True,
-        )
-        return ranked[:top_n]
+                self._execute_and_store(index_job)
 
     def _next_run_id(self) -> int:
         """Берёт следующий serial benchmark run id у configured provider."""
         return self._run_id_provider.next_benchmark_run_id()
+
+    def _execute_and_store(self, job: VariantJob) -> None:
+        """Выполняет вариант и сразу персистит результат в result-store."""
+        result = self._execution_adapter.execute_variant(job)
+        self._result_store.store_result(job, result)
