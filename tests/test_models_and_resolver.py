@@ -43,6 +43,19 @@ class ModelsValidationTests(unittest.TestCase):
                 ],
             )
 
+    def test_benchmark_config_rejects_benchmark_level_celery(self) -> None:
+        with self.assertRaises(ValidationError):
+            BenchmarkConfig.model_validate(
+                {
+                    "id": "bench",
+                    "connection_id": "conn",
+                    "mode": "types",
+                    "databases": ["analytics"],
+                    "tables": ["events"],
+                    "celery": {"workers": 2, "threads_per_worker": 1},
+                }
+            )
+
     def test_benchmark_project_requires_exactly_one_benchmarks_source(self) -> None:
         with self.assertRaises(ValidationError):
             BenchmarkProjectConfig(

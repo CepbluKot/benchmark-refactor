@@ -261,7 +261,6 @@ class BenchmarkConfig(_Base):
     sequential_top_n: int = Field(default=1, gt=0)
     queries: QueriesConfig = Field(default_factory=QueriesConfig)
     table_rules: List[TableRuleConfig] = Field(default_factory=list)
-    celery: Optional[CeleryConfig] = None
 
     @model_validator(mode="after")
     def validate_selectors(self) -> "BenchmarkConfig":

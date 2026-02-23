@@ -38,10 +38,6 @@
           }
         ]
       },
-      "celery": {
-        "workers": 6,
-        "threads_per_worker": 3
-      },
       "table_rules": [
         {
           "database": "analytics",

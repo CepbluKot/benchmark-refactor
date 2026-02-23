@@ -88,7 +88,7 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
    - `sequential_top_n`;
    - `column_order_mode`;
    - `queries`;
-   - `celery`.
+   - глобальный `celery` из root-конфига.
 6. Формируется `TableBenchmarkPlan`.
 
 ### 2.3 Генерация заданий на выполнение
@@ -176,6 +176,7 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
    - метод: `check_manual_has_queries()`
 3. `CeleryConfig`
    - поля: `workers`, `threads_per_worker`
+   - используется только на уровне `BenchmarkRootConfig` (внутри `BenchmarkConfig` не задаётся)
 
 ### 4.4 Модели benchmark-проекта
 
@@ -186,7 +187,7 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
    - поля: `id`, `dbms`, `credential_type`, `host`, `port`, `login`, `password`
    - метод: `normalize_tokens(...)`
 3. `BenchmarkConfig`
-   - поля: `id`, `connection_id`, `mode`, `global_rules`, `column_order_mode`, `databases`, `tables`, `max_iterations`, `sequential_top_n`, `queries`, `table_rules`, `celery`
+   - поля: `id`, `connection_id`, `mode`, `global_rules`, `column_order_mode`, `databases`, `tables`, `max_iterations`, `sequential_top_n`, `queries`, `table_rules`
    - метод: `validate_selectors()`
 4. `BenchmarkRootConfig`
    - поля: `connections`, `benchmarks`, `rule_banks`, `default_rule_banks`, `celery`

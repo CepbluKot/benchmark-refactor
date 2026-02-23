@@ -70,7 +70,7 @@ class TableBenchmarkPlan(_FrozenModel):
       - global/table max_iterations,
       - global/table column_order_mode,
       - global/table queries,
-      - benchmark-level Celery override.
+      - глобальный celery-конфиг запуска.
     """
 
     benchmark_id: str
@@ -473,7 +473,7 @@ class BenchmarkPlanner:
       - выбор целевых таблиц;
       - merge global/local rules;
       - выбор mode/max_iterations/queries с учетом table override;
-      - привязка celery-конфига.
+      - привязка глобального celery-конфига.
     """
 
     def __init__(
@@ -565,7 +565,6 @@ class BenchmarkPlanner:
                     if table_rule and table_rule.queries is not None
                     else benchmark.queries
                 )
-                celery = benchmark.celery or self._config.celery
 
                 yield TableBenchmarkPlan(
                     benchmark_id=benchmark.id,
@@ -579,7 +578,7 @@ class BenchmarkPlanner:
                     column_order_mode=column_order_mode,
                     rules=resolved_rules,
                     queries=queries,
-                    celery=celery,
+                    celery=self._config.celery,
                 )
 
     @staticmethod

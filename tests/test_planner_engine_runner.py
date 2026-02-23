@@ -231,29 +231,6 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(len(plan.rules.column_rules), 1)
         self.assertEqual(plan.rules.column_rules[0].by_type, "Nullable")
 
-    def test_planner_prefers_benchmark_celery_over_root(self) -> None:
-        benchmark = BenchmarkConfig(
-            id="bench_celery_override",
-            connection_id="prod_ch",
-            mode="types",
-            databases=["analytics"],
-            tables=["events"],
-            global_rules=RulesConfig(
-                column_rules=[
-                    ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
-                ]
-            ),
-            celery=CeleryConfig(workers=2, threads_per_worker=1),
-        )
-        planner = BenchmarkPlanner(
-            config=self._root(benchmark),
-            providers_by_connection_id={"prod_ch": self.provider},
-        )
-
-        plan = next(planner.iter_table_plans())
-        self.assertEqual(plan.celery.workers, 2)
-        self.assertEqual(plan.celery.threads_per_worker, 1)
-
     def test_planner_raises_when_no_rules_can_be_resolved(self) -> None:
         benchmark = BenchmarkConfig(
             id="bench_no_rules",
