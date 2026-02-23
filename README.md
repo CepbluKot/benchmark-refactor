@@ -513,13 +513,13 @@ Data + metrics:
 ### 14.1 Обычное демо
 
 ```bash
-./venv/bin/python example.py
+./venv/bin/python examples/example.py
 ```
 
 ### 14.2 Демо нового sequential top-N
 
 ```bash
-./venv/bin/python example_sequential_topn.py
+./venv/bin/python examples/example_sequential_topn.py
 ```
 
 ### 14.3 Тесты
@@ -530,13 +530,13 @@ Data + metrics:
 
 ## 15. Примеры конфигов
 
-1. `benchmark.project.example.json`  
+1. `configs/benchmark.project.example.json`  
    Базовый mixed пример (`types`, `combined`, table overrides).
-2. `benchmark.project.sequential_topn.example.json`  
+2. `configs/benchmark.project.sequential_topn.example.json`  
    Пример двухфазного `sequential` с `sequential_top_n` и локальными override.
-3. `connections.example.json`
-4. `rule_banks.example.json`
-5. `rule_banks.clickhouse_baseline.json`  
+3. `configs/connections.example.json`
+4. `configs/rule_banks.example.json`
+5. `configs/rule_banks.clickhouse_baseline.json`  
    Отдельный большой универсальный baseline bank для ClickHouse (только `by_type`).
 
 ## 16. Важные практические детали
@@ -546,7 +546,7 @@ Data + metrics:
 3. Если у варианта `score=None`, он почти всегда проиграет ранжирование top-N.
 4. Если `sequential_top_n` больше количества type-вариантов, фактически берутся все.
 5. Автоподстановки builtin rule bank больше нет: если нужны дефолтные правила, укажи `default_rule_banks` в своем JSON.
-6. Готовый baseline для ClickHouse вынесен в `rule_banks.clickhouse_baseline.json`.
+6. Готовый baseline для ClickHouse вынесен в `configs/rule_banks.clickhouse_baseline.json`.
 7. `by_type` матчится строго по полному типу: `LowCardinality(String)` и `LowCardinality` — это разные значения.
 8. `column_order_mode="compressed_size_desc"` автоматически расставляет приоритет колонок по убыванию `data_compressed_bytes` в исходной таблице.
 9. Для serial run id из БД:

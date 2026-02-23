@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from loader import load_config, parse_config
+from loader import load_config, parse_config, parse_config_parts
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -177,7 +177,113 @@ class LoaderTests(unittest.TestCase):
             config = parse_config(project_raw, base_dir=base)
             self.assertEqual(config.benchmarks[0].id, "bench_inline")
 
+    def test_parse_config_parts_with_inline_benchmarks(self) -> None:
+        config = parse_config_parts(
+            celery_raw={
+                "workers": 3,
+                "threads_per_worker": 1,
+            },
+            connections_raw={
+                "connections": [
+                    {
+                        "id": "prod_ch",
+                        "dbms": "clickhouse",
+                        "credential_type": "password",
+                        "host": "localhost",
+                        "port": 9000,
+                        "login": "user",
+                        "password": "pass",
+                    }
+                ]
+            },
+            rule_banks_raw={"rule_banks": {}, "default_rule_banks": {}},
+            benchmarks_raw={
+                "benchmarks": [
+                    {
+                        "id": "bench_inline_parts",
+                        "connection_id": "prod_ch",
+                        "mode": "types",
+                        "databases": ["analytics"],
+                        "tables": ["events"],
+                        "global_rules": {
+                            "column_rules": [
+                                {
+                                    "by_type": "UInt64",
+                                    "types": ["UInt64", "UInt32"],
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+        )
+        self.assertEqual(config.benchmarks[0].id, "bench_inline_parts")
+        self.assertEqual(config.celery.workers, 3)
+
+    def test_parse_config_parts_requires_valid_benchmarks_config(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Ошибки в benchmarks-конфиге"):
+            parse_config_parts(
+                celery_raw={"workers": 2, "threads_per_worker": 1},
+                connections_raw={
+                    "connections": [
+                        {
+                            "id": "prod_ch",
+                            "dbms": "clickhouse",
+                            "credential_type": "password",
+                            "host": "localhost",
+                            "port": 9000,
+                            "login": "user",
+                            "password": "pass",
+                        }
+                    ]
+                },
+                rule_banks_raw={"rule_banks": {}, "default_rule_banks": {}},
+                benchmarks_raw={},
+            )
+
+    def test_parse_config_parts_supports_split_configs(self) -> None:
+        config = parse_config_parts(
+            celery_raw={"workers": 2, "threads_per_worker": 1},
+            connections_raw={
+                "connections": [
+                    {
+                        "id": "prod_ch",
+                        "dbms": "clickhouse",
+                        "credential_type": "password",
+                        "host": "localhost",
+                        "port": 9000,
+                        "login": "user",
+                        "password": "pass",
+                    }
+                ]
+            },
+            rule_banks_raw={
+                "rule_banks": {},
+                "default_rule_banks": {},
+            },
+            benchmarks_raw={
+                "benchmarks": [
+                    {
+                        "id": "bench_env_parts",
+                        "connection_id": "prod_ch",
+                        "mode": "types",
+                        "databases": ["analytics"],
+                        "tables": ["events"],
+                        "global_rules": {
+                            "column_rules": [
+                                {
+                                    "by_type": "UInt64",
+                                    "types": ["UInt64", "UInt32"],
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+        )
+        self.assertEqual(config.celery.workers, 2)
+        self.assertEqual(config.benchmarks[0].id, "bench_env_parts")
+
 
 if __name__ == "__main__":
     unittest.main()
-
