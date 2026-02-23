@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 BenchmarkMode = Literal["types", "indexes", "sequential", "combined"]
+ColumnOrderMode = Literal["compressed_size_desc"]
 DatabasesSelector = Union[Literal["*"], List[str]]
 TableListSelector = Union[Literal["*"], List[str]]
 TablesSelector = Union[Literal["*"], List[str], Dict[str, TableListSelector]]
@@ -187,6 +188,7 @@ class TableRuleConfig(_Base):
 
     Может переопределять:
       - rules;
+      - column_order_mode;
       - max_iterations;
       - sequential_top_n;
       - mode;
@@ -196,6 +198,7 @@ class TableRuleConfig(_Base):
     database: str
     table: str
     rules: RulesConfig = Field(default_factory=RulesConfig)
+    column_order_mode: Optional[ColumnOrderMode] = None
     queries: Optional[QueriesConfig] = None
     max_iterations: Optional[int] = Field(default=None, gt=0)
     sequential_top_n: Optional[int] = Field(default=None, gt=0)
@@ -240,6 +243,7 @@ class BenchmarkConfig(_Base):
       - какое подключение использовать (`connection_id`);
       - какие БД/таблицы включить;
       - глобальные правила и table-level override;
+      - режим вычисления `column_order` (опционально);
       - ограничение по итерациям и режим комбинатора.
       - `sequential_top_n` для двухфазного режима sequential.
     """
@@ -248,6 +252,7 @@ class BenchmarkConfig(_Base):
     connection_id: str
     mode: BenchmarkMode
     global_rules: RulesConfig = Field(default_factory=RulesConfig)
+    column_order_mode: Optional[ColumnOrderMode] = None
 
     databases: DatabasesSelector = "*"
     tables: TablesSelector = "*"

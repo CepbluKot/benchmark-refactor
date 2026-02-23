@@ -75,6 +75,7 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
    - `mode`;
    - `max_iterations`;
    - `sequential_top_n`;
+   - `column_order_mode`;
    - `queries`;
    - `celery`.
 6. Формируется `TableBenchmarkPlan`.
@@ -168,13 +169,13 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
 ### 4.4 Модели benchmark-проекта
 
 1. `TableRuleConfig`
-   - поля: `database`, `table`, `rules`, `queries`, `max_iterations`, `sequential_top_n`, `mode`
+   - поля: `database`, `table`, `rules`, `column_order_mode`, `queries`, `max_iterations`, `sequential_top_n`, `mode`
    - метод: `non_empty_table_target(...)`
 2. `ConnectionConfig`
    - поля: `id`, `dbms`, `credential_type`, `host`, `port`, `login`, `password`
    - метод: `normalize_tokens(...)`
 3. `BenchmarkConfig`
-   - поля: `id`, `connection_id`, `mode`, `global_rules`, `databases`, `tables`, `max_iterations`, `sequential_top_n`, `queries`, `table_rules`, `celery`
+   - поля: `id`, `connection_id`, `mode`, `global_rules`, `column_order_mode`, `databases`, `tables`, `max_iterations`, `sequential_top_n`, `queries`, `table_rules`, `celery`
    - метод: `validate_selectors()`
 4. `BenchmarkRootConfig`
    - поля: `connections`, `benchmarks`, `rule_banks`, `default_rule_banks`, `celery`
@@ -547,7 +548,8 @@ Data + metrics:
 5. Автоподстановки builtin rule bank больше нет: если нужны дефолтные правила, укажи `default_rule_banks` в своем JSON.
 6. Готовый baseline для ClickHouse вынесен в `rule_banks.clickhouse_baseline.json`.
 7. `by_type` матчится строго по полному типу: `LowCardinality(String)` и `LowCardinality` — это разные значения.
-8. Для serial run id из БД:
+8. `column_order_mode="compressed_size_desc"` автоматически расставляет приоритет колонок по убыванию `data_compressed_bytes` в исходной таблице.
+9. Для serial run id из БД:
 
 ```python
 from benchmark_engine import (

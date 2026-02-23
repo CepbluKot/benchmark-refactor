@@ -3,6 +3,10 @@
   1) прогон вариантов types/codecs;
   2) отбор top-N по score;
   3) прогон index-вариантов только на DDL лучших type-вариантов.
+
+В примере показаны оба варианта приоритизации колонок:
+  - manual `rules.column_order` для `analytics.user_events`;
+  - auto `column_order_mode="compressed_size_desc"` для `analytics.partner_stats`.
 """
 
 from __future__ import annotations
@@ -52,8 +56,13 @@ ORDER BY (partner_id, stat_date)
 
 
 class InMemoryMetadataProvider(MetadataProvider):
-    def __init__(self, ddl_by_db_table: Dict[str, Dict[str, str]]) -> None:
+    def __init__(
+        self,
+        ddl_by_db_table: Dict[str, Dict[str, str]],
+        column_sizes_by_db_table: Dict[str, Dict[str, Dict[str, int]]],
+    ) -> None:
         self._ddl_by_db_table = ddl_by_db_table
+        self._column_sizes_by_db_table = column_sizes_by_db_table
 
     def list_databases(self) -> List[str]:
         return sorted(self._ddl_by_db_table.keys())
@@ -63,6 +72,9 @@ class InMemoryMetadataProvider(MetadataProvider):
 
     def fetch_table_ddl(self, database: str, table: str) -> TableDDL:
         return TableDDL.from_ddl(self._ddl_by_db_table[database][table])
+
+    def fetch_column_sizes(self, database: str, table: str) -> Dict[str, int]:
+        return dict(self._column_sizes_by_db_table.get(database, {}).get(table, {}))
 
 
 class SequentialTopNDemoAdapter(BenchmarkExecutionAdapter):
@@ -140,13 +152,40 @@ def main() -> None:
                 "user_events": USER_EVENTS_DDL,
                 "partner_stats": PARTNER_STATS_DDL,
             }
-        }
+        },
+        column_sizes_by_db_table={
+            "analytics": {
+                "user_events": {
+                    "event_time": 50_000_000,
+                    "user_id": 15_000_000,
+                    "event_type": 8_000_000,
+                    "country": 7_000_000,
+                    "revenue": 3_000_000,
+                },
+                "partner_stats": {
+                    "stat_date": 40_000_000,
+                    "partner_id": 20_000_000,
+                    "impressions": 9_000_000,
+                    "clicks": 6_000_000,
+                    "spend": 4_000_000,
+                },
+            }
+        },
     )
 
     planner = BenchmarkPlanner(
         config=config,
         providers_by_connection_id={"prod_ch": provider},
     )
+    print("=== Column-order strategy by table ===")
+    for table_plan in planner.iter_table_plans(benchmark_ids=["bench_sequential_topn"]):
+        mode = table_plan.column_order_mode or "manual_or_bank"
+        print(
+            f"  {table_plan.database}.{table_plan.table}: "
+            f"column_order_mode={mode}, "
+            f"column_order={table_plan.rules.column_order}"
+        )
+
     engine = BenchmarkEngine(planner=planner)
     result_store = InMemoryBenchmarkResultStore()
     runner = BenchmarkRunner(

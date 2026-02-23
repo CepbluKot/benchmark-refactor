@@ -20,10 +20,6 @@
       "max_iterations": 20,
       "sequential_top_n": 2,
       "global_rules": {
-        "column_order": {
-          "user_id": 1,
-          "event_time": 2
-        },
         "column_rules": [
           {
             "by_type": "UInt64",
@@ -101,10 +97,20 @@
           "database": "analytics",
           "table": "user_events",
           "sequential_top_n": 1,
-          "max_iterations": 12
+          "max_iterations": 12,
+          "rules": {
+            "column_order": {
+              "user_id": 1,
+              "event_time": 2
+            }
+          }
+        },
+        {
+          "database": "analytics",
+          "table": "partner_stats",
+          "column_order_mode": "compressed_size_desc"
         }
       ]
     }
   ]
 }
-

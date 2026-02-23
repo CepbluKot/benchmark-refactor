@@ -52,11 +52,16 @@ ORDER BY (session_id, started_at)
 
 
 class StaticMetadataProvider(MetadataProvider):
-    def __init__(self, ddl_by_db_table: Dict[str, Dict[str, str]]) -> None:
+    def __init__(
+        self,
+        ddl_by_db_table: Dict[str, Dict[str, str]],
+        column_sizes_by_db_table: Dict[str, Dict[str, Dict[str, int]]] | None = None,
+    ) -> None:
         self._tables = {
             db: {tbl: TableDDL.from_ddl(ddl) for tbl, ddl in tables.items()}
             for db, tables in ddl_by_db_table.items()
         }
+        self._column_sizes = column_sizes_by_db_table or {}
 
     def list_databases(self) -> List[str]:
         return sorted(self._tables.keys())
@@ -66,6 +71,9 @@ class StaticMetadataProvider(MetadataProvider):
 
     def fetch_table_ddl(self, database: str, table: str) -> TableDDL:
         return self._tables[database][table].copy()
+
+    def fetch_column_sizes(self, database: str, table: str) -> Dict[str, int]:
+        return dict(self._column_sizes.get(database, {}).get(table, {}))
 
 
 class RecordingExecutionAdapter(BenchmarkExecutionAdapter):
@@ -308,6 +316,61 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertIn(job.variant_table, job.query_plan.test_queries[0].query)
         self.assertNotIn("{table}", job.query_plan.warmup_queries[0])
         self.assertNotIn("{table}", job.query_plan.test_queries[0].query)
+
+    def test_engine_auto_column_order_uses_compressed_size_desc(self) -> None:
+        provider = StaticMetadataProvider(
+            {"analytics": {"events": EVENTS_DDL}},
+            column_sizes_by_db_table={
+                "analytics": {
+                    "events": {
+                        "event_time": 10_000,
+                        "user_id": 100,
+                        "revenue": 10,
+                    }
+                }
+            },
+        )
+        benchmark = BenchmarkConfig(
+            id="bench_auto_column_order",
+            connection_id="prod_ch",
+            mode="types",
+            column_order_mode="compressed_size_desc",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=4,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    ),
+                    ColumnRuleConfig(
+                        by_type="DateTime",
+                        by_name="event_time",
+                        types=["DateTime", "Date32"],
+                    ),
+                ]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+
+        jobs = list(engine.iter_variant_jobs())
+        self.assertEqual(len(jobs), 4)
+
+        # При порядке event_time -> user_id второй вариант меняет user_id,
+        # а event_time ещё остаётся исходным.
+        second = jobs[1].variant_ddl
+        self.assertEqual(second.column("event_time").type, "DateTime")
+        self.assertEqual(second.column("user_id").type, "UInt32")
+
+        third = jobs[2].variant_ddl
+        self.assertEqual(third.column("event_time").type, "Date32")
+        self.assertEqual(third.column("user_id").type, "UInt64")
 
     def test_runner_passes_jobs_to_execution_adapter(self) -> None:
         benchmark = BenchmarkConfig(

@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import time
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from models import ConnectionConfig
 from clickhouse_ddl import TableDDL
@@ -208,6 +208,28 @@ class Fetcher:
     def fetch_table_ddl(self, database: str, table: str) -> TableDDL:
         """Alias для нового интерфейса MetadataProvider."""
         return self.fetch_ddl(database, table)
+
+    def fetch_column_sizes(self, database: str, table: str) -> Dict[str, int]:
+        """
+        Возвращает размерность колонок таблицы по сжатым байтам.
+
+        Используется для авто-вычисления `column_order`:
+        больше `data_compressed_bytes` -> выше приоритет перебора.
+        """
+        rows = self._execute(
+            """
+            SELECT
+                column,
+                sum(data_compressed_bytes) AS compressed_bytes
+            FROM system.parts_columns
+            WHERE database = %(db)s
+              AND table = %(tbl)s
+              AND active = 1
+            GROUP BY column
+            """,
+            {"db": database, "tbl": table},
+        )
+        return {str(column): int(size or 0) for column, size in rows}
 
     def create_table(self, table_ddl: TableDDL) -> None:
         """Создаёт таблицу по TableDDL-объекту."""

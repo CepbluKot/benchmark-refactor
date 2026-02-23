@@ -21,6 +21,7 @@ from models import (
     BenchmarkMode,
     BenchmarkRootConfig,
     CeleryConfig,
+    ColumnOrderMode,
     ConnectionConfig,
     QueriesConfig,
     TableRuleConfig,
@@ -67,6 +68,7 @@ class TableBenchmarkPlan(_FrozenModel):
     Этот объект уже учитывает merge:
       - global/table rules,
       - global/table max_iterations,
+      - global/table column_order_mode,
       - global/table queries,
       - benchmark-level Celery override.
     """
@@ -79,6 +81,7 @@ class TableBenchmarkPlan(_FrozenModel):
     mode: BenchmarkMode
     max_iterations: int
     sequential_top_n: int
+    column_order_mode: Optional[ColumnOrderMode]
     rules: ResolvedRules
     queries: QueriesConfig
     celery: CeleryConfig
@@ -297,6 +300,15 @@ class MetadataProvider(ABC):
         """Читает и парсит DDL исходной таблицы в `TableDDL`."""
         pass
 
+    def fetch_column_sizes(self, database: str, table: str) -> Dict[str, int]:
+        """
+        Возвращает map `column_name -> compressed_bytes` для исходной таблицы.
+
+        Базовая реализация возвращает пустой словарь; backend может переопределить
+        метод для поддержки авто-вычисления `column_order`.
+        """
+        return {}
+
 
 class FetcherMetadataProvider(MetadataProvider):
     """Адаптер над существующим `Fetcher` для контракта `MetadataProvider`."""
@@ -316,6 +328,13 @@ class FetcherMetadataProvider(MetadataProvider):
     def fetch_table_ddl(self, database: str, table: str) -> TableDDL:
         """Проксирует получение DDL таблицы из fetcher."""
         return self._fetcher.fetch_ddl(database, table)
+
+    def fetch_column_sizes(self, database: str, table: str) -> Dict[str, int]:
+        """Проксирует получение размерности колонок из fetcher."""
+        fetch_method = getattr(self._fetcher, "fetch_column_sizes", None)
+        if fetch_method is None:
+            return {}
+        return fetch_method(database, table)
 
 
 class TableSelector:
@@ -535,6 +554,11 @@ class BenchmarkPlanner:
                     if table_rule and table_rule.sequential_top_n is not None
                     else benchmark.sequential_top_n
                 )
+                column_order_mode = (
+                    table_rule.column_order_mode
+                    if table_rule and table_rule.column_order_mode is not None
+                    else benchmark.column_order_mode
+                )
                 queries = (
                     table_rule.queries
                     if table_rule and table_rule.queries is not None
@@ -551,6 +575,7 @@ class BenchmarkPlanner:
                     mode=mode,
                     max_iterations=max_iterations,
                     sequential_top_n=sequential_top_n,
+                    column_order_mode=column_order_mode,
                     rules=resolved_rules,
                     queries=queries,
                     celery=celery,
@@ -607,6 +632,44 @@ class BenchmarkEngine:
         raw_query_plan = self._query_builder.build(source_ddl, table_plan.queries)
         return source_ddl, raw_query_plan
 
+    def resolve_column_order(
+        self,
+        table_plan: TableBenchmarkPlan,
+        source_ddl: TableDDL,
+    ) -> Dict[str, int]:
+        """
+        Возвращает эффективный `column_order` для текущей таблицы.
+
+        Если включён `column_order_mode="compressed_size_desc"`, порядок колонок
+        строится автоматически по убыванию сжатого размера колонки в исходной
+        таблице (`provider.fetch_column_sizes`). Иначе используется order из правил.
+        """
+        configured_order = dict(table_plan.rules.column_order)
+        if table_plan.column_order_mode != "compressed_size_desc":
+            return configured_order
+
+        provider = self._planner.provider_for_connection(table_plan.connection_id)
+        column_sizes = provider.fetch_column_sizes(
+            database=table_plan.database,
+            table=table_plan.table,
+        )
+        if not column_sizes:
+            return configured_order
+
+        matched_columns: List[str] = []
+        for column in source_ddl.columns:
+            if any(rule.matches(column) for rule in table_plan.rules.column_rules):
+                matched_columns.append(column.name)
+
+        if not matched_columns:
+            return configured_order
+
+        ranked_columns = sorted(
+            matched_columns,
+            key=lambda name: (-int(column_sizes.get(name, 0)), name),
+        )
+        return {name: idx + 1 for idx, name in enumerate(ranked_columns)}
+
     def build_variant_job(
         self,
         table_plan: TableBenchmarkPlan,
@@ -661,6 +724,7 @@ class BenchmarkEngine:
         Индексная стадия зависит от score и оркестрируется в `BenchmarkRunner`.
         """
         source_ddl, raw_query_plan = self.prepare_table_context(table_plan)
+        effective_column_order = self.resolve_column_order(table_plan, source_ddl)
         variant_mode: BenchmarkMode = (
             "types" if table_plan.mode == "sequential" else table_plan.mode
         )
@@ -669,7 +733,7 @@ class BenchmarkEngine:
             mode=variant_mode,
             column_rules=table_plan.rules.column_rules,
             index_rules=table_plan.rules.index_rules,
-            column_order=table_plan.rules.column_order,
+            column_order=effective_column_order,
             max_iterations=table_plan.max_iterations,
         )
 
@@ -678,7 +742,7 @@ class BenchmarkEngine:
             mode=variant_mode,
             column_rules=table_plan.rules.column_rules,
             index_rules=table_plan.rules.index_rules,
-            column_order=table_plan.rules.column_order,
+            column_order=effective_column_order,
             max_iterations=table_plan.max_iterations,
         ):
             yield self.build_variant_job(
@@ -837,13 +901,17 @@ class BenchmarkRunner:
     ) -> None:
         """Адаптивный sequential: types -> persist -> top-N select -> indexes."""
         source_ddl, raw_query_plan = self._engine.prepare_table_context(table_plan)
+        effective_column_order = self._engine.resolve_column_order(
+            table_plan=table_plan,
+            source_ddl=source_ddl,
+        )
 
         type_total = total_variants(
             table=source_ddl,
             mode="types",
             column_rules=table_plan.rules.column_rules,
             index_rules=table_plan.rules.index_rules,
-            column_order=table_plan.rules.column_order,
+            column_order=effective_column_order,
             max_iterations=table_plan.max_iterations,
         )
 
@@ -852,7 +920,7 @@ class BenchmarkRunner:
             mode="types",
             column_rules=table_plan.rules.column_rules,
             index_rules=table_plan.rules.index_rules,
-            column_order=table_plan.rules.column_order,
+            column_order=effective_column_order,
             max_iterations=table_plan.max_iterations,
         ):
             job = self._engine.build_variant_job(
@@ -888,7 +956,7 @@ class BenchmarkRunner:
                 mode="indexes",
                 column_rules=table_plan.rules.column_rules,
                 index_rules=table_plan.rules.index_rules,
-                column_order=table_plan.rules.column_order,
+                column_order=effective_column_order,
                 max_iterations=table_plan.max_iterations,
             )
 
@@ -897,7 +965,7 @@ class BenchmarkRunner:
                 mode="indexes",
                 column_rules=table_plan.rules.column_rules,
                 index_rules=table_plan.rules.index_rules,
-                column_order=table_plan.rules.column_order,
+                column_order=effective_column_order,
                 max_iterations=table_plan.max_iterations,
             ):
                 index_meta.global_index = next_global_index
