@@ -56,6 +56,19 @@ class ModelsValidationTests(unittest.TestCase):
                 }
             )
 
+    def test_benchmark_config_rejects_unknown_rules_mode(self) -> None:
+        with self.assertRaises(ValidationError):
+            BenchmarkConfig.model_validate(
+                {
+                    "id": "bench",
+                    "connection_id": "conn",
+                    "mode": "types",
+                    "databases": ["analytics"],
+                    "tables": ["events"],
+                    "column_rules_mode": "unknown_mode",
+                }
+            )
+
     def test_benchmark_project_requires_exactly_one_benchmarks_source(self) -> None:
         with self.assertRaises(ValidationError):
             BenchmarkProjectConfig(
@@ -156,6 +169,110 @@ class RuleResolverTests(unittest.TestCase):
         self.assertEqual(resolved.column_rules, [])
         self.assertEqual(resolved.index_rules, [])
         self.assertEqual(resolved.column_order, {})
+
+    def test_global_bank_only_mode_ignores_inline_rules(self) -> None:
+        resolver = RuleResolver(
+            banks={"bank_a": self._bank()},
+            default_rule_banks={"clickhouse": "bank_a"},
+        )
+        global_rules = RulesConfig(rule_bank="bank_a")
+        merged = RulesConfig(
+            column_rules=[ColumnRuleConfig(by_type="DateTime", codecs=["CODEC(ZSTD(1))"])],
+            index_rules=[
+                IndexRuleConfig(
+                    by_type="DateTime",
+                    indexes=[IndexConfig(type="minmax", granularity=8)],
+                )
+            ],
+            column_order={},
+        )
+
+        resolved = resolver.resolve(
+            merged,
+            dbms="clickhouse",
+            column_rules_mode="global_bank_only",
+            index_rules_mode="global_bank_only",
+            global_rules=global_rules,
+        )
+
+        self.assertEqual(len(resolved.column_rules), 1)
+        self.assertEqual(resolved.column_rules[0].by_type, "UInt64")
+        self.assertEqual(len(resolved.index_rules), 1)
+        self.assertEqual(resolved.index_rules[0].by_type, "UInt64")
+
+    def test_global_bank_with_inline_priority_prepends_inline(self) -> None:
+        resolver = RuleResolver(
+            banks={"bank_a": self._bank()},
+            default_rule_banks={"clickhouse": "bank_a"},
+        )
+        global_rules = RulesConfig(rule_bank="bank_a")
+        merged = RulesConfig(
+            column_rules=[ColumnRuleConfig(by_type="DateTime", codecs=["CODEC(ZSTD(1))"])],
+            index_rules=[
+                IndexRuleConfig(
+                    by_type="DateTime",
+                    indexes=[IndexConfig(type="minmax", granularity=8)],
+                )
+            ],
+            column_order={},
+        )
+
+        resolved = resolver.resolve(
+            merged,
+            dbms="clickhouse",
+            column_rules_mode="global_bank_with_inline_priority",
+            index_rules_mode="global_bank_with_inline_priority",
+            global_rules=global_rules,
+        )
+
+        self.assertEqual([rule.by_type for rule in resolved.column_rules], ["DateTime", "UInt64"])
+        self.assertEqual([rule.by_type for rule in resolved.index_rules], ["DateTime", "UInt64"])
+
+    def test_inline_only_mode_uses_only_inline_rules(self) -> None:
+        resolver = RuleResolver(
+            banks={"bank_a": self._bank()},
+            default_rule_banks={"clickhouse": "bank_a"},
+        )
+        global_rules = RulesConfig(rule_bank="bank_a")
+        merged = RulesConfig(
+            column_rules=[ColumnRuleConfig(by_type="DateTime", codecs=["CODEC(ZSTD(1))"])],
+            index_rules=[
+                IndexRuleConfig(
+                    by_type="DateTime",
+                    indexes=[IndexConfig(type="minmax", granularity=8)],
+                )
+            ],
+            column_order={},
+        )
+
+        resolved = resolver.resolve(
+            merged,
+            dbms="clickhouse",
+            column_rules_mode="inline_only",
+            index_rules_mode="inline_only",
+            global_rules=global_rules,
+        )
+
+        self.assertEqual(len(resolved.column_rules), 1)
+        self.assertEqual(resolved.column_rules[0].by_type, "DateTime")
+        self.assertEqual(len(resolved.index_rules), 1)
+        self.assertEqual(resolved.index_rules[0].by_type, "DateTime")
+
+    def test_global_bank_mode_raises_when_global_bank_is_missing(self) -> None:
+        resolver = RuleResolver(banks={"bank_a": self._bank()}, default_rule_banks={})
+        merged = RulesConfig(
+            column_rules=[ColumnRuleConfig(by_type="DateTime", codecs=["CODEC(ZSTD(1))"])],
+            column_order={},
+        )
+
+        with self.assertRaisesRegex(ValueError, "требующий глобальный rule bank"):
+            resolver.resolve(
+                merged,
+                dbms="clickhouse",
+                column_rules_mode="global_bank_only",
+                index_rules_mode="inline_only",
+                global_rules=RulesConfig(),
+            )
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ from models import (
     IndexConfig,
     IndexRuleConfig,
     QueriesConfig,
+    RuleBankConfig,
     RulesConfig,
     TableRuleConfig,
     TestQueryConfig as QueryConfigItem,
@@ -230,6 +231,68 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(plan.celery.threads_per_worker, 5)
         self.assertEqual(len(plan.rules.column_rules), 1)
         self.assertEqual(plan.rules.column_rules[0].by_type, "Nullable")
+
+    def test_planner_applies_rule_modes_from_benchmark(self) -> None:
+        benchmark = BenchmarkConfig(
+            id="bench_rule_modes",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["events"],
+            column_rules_mode="global_bank_with_inline_priority",
+            index_rules_mode="global_bank_only",
+            global_rules=RulesConfig(rule_bank="bank_a"),
+            table_rules=[
+                TableRuleConfig(
+                    database="analytics",
+                    table="events",
+                    rules=RulesConfig(
+                        column_rules=[
+                            ColumnRuleConfig(
+                                by_type="DateTime",
+                                codecs=["CODEC(DoubleDelta, ZSTD(3))"],
+                            )
+                        ],
+                        index_rules=[
+                            IndexRuleConfig(
+                                by_type="DateTime",
+                                indexes=[IndexConfig(type="minmax", granularity=8)],
+                            )
+                        ],
+                    ),
+                )
+            ],
+        )
+        root = BenchmarkRootConfig(
+            connections=[self.connection],
+            benchmarks=[benchmark],
+            rule_banks={
+                "bank_a": RuleBankConfig(
+                    column_rules=[
+                        ColumnRuleConfig(
+                            by_type="UInt64",
+                            types=["UInt64", "UInt32"],
+                        )
+                    ],
+                    index_rules=[
+                        IndexRuleConfig(
+                            by_type="UInt64",
+                            indexes=[IndexConfig(type="minmax", granularity=4)],
+                        )
+                    ],
+                )
+            },
+            default_rule_banks={},
+            celery=CeleryConfig(workers=9, threads_per_worker=5),
+        )
+        planner = BenchmarkPlanner(
+            config=root,
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+
+        plan = next(planner.iter_table_plans())
+        self.assertEqual([rule.by_type for rule in plan.rules.column_rules], ["DateTime", "UInt64"])
+        self.assertEqual([rule.by_type for rule in plan.rules.index_rules], ["UInt64"])
 
     def test_planner_raises_when_no_rules_can_be_resolved(self) -> None:
         benchmark = BenchmarkConfig(

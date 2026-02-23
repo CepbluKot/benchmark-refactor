@@ -14,7 +14,7 @@ from typing import Any, Dict
 # Редактируй пути здесь:
 CELERY_JSON_PATH: Path = Path("configs/celery.example.json")
 CONNECTIONS_JSON_PATH: Path = Path("configs/connections.example.json")
-RULE_BANKS_JSON_PATH: Path = Path("configs/rule_banks.example.json")
+RULE_BANKS_JSON_PATH: Path = Path("configs/rule_banks.clickhouse_baseline.json")
 BENCHMARKS_JSON_PATH: Path = Path("configs/benchmarks.example.json")
 
 
@@ -49,10 +49,10 @@ def main() -> None:
     rule_banks_data = _read_json_file(_resolve_path(RULE_BANKS_JSON_PATH))
     benchmarks_data = _read_json_file(_resolve_path(BENCHMARKS_JSON_PATH))
 
-    print("export BENCH_CELERY_CONFIG_B64='" + _json_to_base64(celery_data) + "'")
-    print("export BENCH_CONNECTIONS_CONFIG_B64='" + _json_to_base64(connections_data) + "'")
-    print("export BENCH_RULE_BANKS_CONFIG_B64='" + _json_to_base64(rule_banks_data) + "'")
-    print("export BENCH_BENCHMARKS_CONFIG_B64='" + _json_to_base64(benchmarks_data) + "'")
+    print("BENCH_CELERY_CONFIG_B64='" + _json_to_base64(celery_data) + "'")
+    print("BENCH_CONNECTIONS_CONFIG_B64='" + _json_to_base64(connections_data) + "'")
+    print("BENCH_RULE_BANKS_CONFIG_B64='" + _json_to_base64(rule_banks_data) + "'")
+    print("BENCH_BENCHMARKS_CONFIG_B64='" + _json_to_base64(benchmarks_data) + "'")
 
 
 if __name__ == "__main__":

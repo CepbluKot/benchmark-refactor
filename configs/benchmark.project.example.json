@@ -10,6 +10,8 @@
       "id": "bench_default_rules_auto_discovery",
       "connection_id": "prod_ch",
       "mode": "types",
+      "column_rules_mode": "global_bank_only",
+      "index_rules_mode": "global_bank_only",
       "databases": "*",
       "tables": "*",
       "max_iterations": 3,
@@ -21,6 +23,8 @@
       "id": "bench_mixed_selectors",
       "connection_id": "prod_ch",
       "mode": "combined",
+      "column_rules_mode": "global_bank_with_inline_priority",
+      "index_rules_mode": "global_bank_with_inline_priority",
       "databases": [
         "analytics",
         "marketing"

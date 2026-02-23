@@ -4,6 +4,8 @@
       "id": "bench_default_rules_auto_discovery",
       "connection_id": "prod_ch",
       "mode": "types",
+      "column_rules_mode": "global_bank_only",
+      "index_rules_mode": "global_bank_only",
       "databases": "*",
       "tables": "*",
       "max_iterations": 3,
@@ -15,6 +17,8 @@
       "id": "bench_mixed_selectors",
       "connection_id": "prod_ch",
       "mode": "combined",
+      "column_rules_mode": "global_bank_with_inline_priority",
+      "index_rules_mode": "global_bank_with_inline_priority",
       "databases": [
         "analytics",
         "marketing"
@@ -27,7 +31,7 @@
       },
       "max_iterations": 5,
       "global_rules": {
-        "rule_bank": "aggressive_zstd"
+        "rule_bank": "clickhouse_universal_baseline"
       },
       "queries": {
         "mode": "auto_with_manual",
@@ -42,7 +46,8 @@
         {
           "database": "analytics",
           "table": "user_events",
-          "max_iterations": 2,
+          "max_iterations": 22,
+          "sequential_top_n": 3,
           "mode": "sequential",
           "rules": {
             "column_rules": [

@@ -187,8 +187,13 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
    - поля: `id`, `dbms`, `credential_type`, `host`, `port`, `login`, `password`
    - метод: `normalize_tokens(...)`
 3. `BenchmarkConfig`
-   - поля: `id`, `connection_id`, `mode`, `global_rules`, `column_order_mode`, `databases`, `tables`, `max_iterations`, `sequential_top_n`, `queries`, `table_rules`
+   - поля: `id`, `connection_id`, `mode`, `global_rules`, `column_rules_mode`, `index_rules_mode`, `column_order_mode`, `databases`, `tables`, `max_iterations`, `sequential_top_n`, `queries`, `table_rules`
    - метод: `validate_selectors()`
+   - режимы `column_rules_mode`/`index_rules_mode`:
+     - `global_bank_only` — брать только правила из глобального bank;
+     - `global_bank_with_inline_priority` — inline-правила ставятся первыми, затем добавляются bank-правила;
+     - `inline_only` — использовать только inline-правила из конфига benchmark/table.
+   - задаются отдельно для каждого элемента в `benchmarks[]` (нет общего root-поля для этих режимов).
 4. `BenchmarkRootConfig`
    - поля: `connections`, `benchmarks`, `rule_banks`, `default_rule_banks`, `celery`
    - методы: `normalize_default_rule_banks(...)`, `validate_uniqueness()`
@@ -618,3 +623,4 @@ run_id = runner.run()
 11. Для production-интеграции обычно заменяют:
     - `StubMetadataProvider` -> `FetcherMetadataProvider` (или свой provider),
     - `NoopExecutionAdapter` -> рабочий adapter с реальными замерами.
+12. Если выбран `global_bank_only` или `global_bank_with_inline_priority`, должен быть доступен глобальный bank (`global_rules.rule_bank` или `default_rule_banks` для текущего DBMS), иначе planner завершится с ошибкой.

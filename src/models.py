@@ -17,6 +17,11 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 BenchmarkMode = Literal["types", "indexes", "sequential", "combined"]
 ColumnOrderMode = Literal["compressed_size_desc"]
+RuleSourceMode = Literal[
+    "global_bank_only",
+    "global_bank_with_inline_priority",
+    "inline_only",
+]
 DatabasesSelector = Union[Literal["*"], List[str]]
 TableListSelector = Union[Literal["*"], List[str]]
 TablesSelector = Union[Literal["*"], List[str], Dict[str, TableListSelector]]
@@ -243,6 +248,7 @@ class BenchmarkConfig(_Base):
       - какое подключение использовать (`connection_id`);
       - какие БД/таблицы включить;
       - глобальные правила и table-level override;
+      - режим резолвинга column/index правил относительно глобального rule bank;
       - режим вычисления `column_order` (опционально);
       - ограничение по итерациям и режим комбинатора.
       - `sequential_top_n` для двухфазного режима sequential.
@@ -259,6 +265,8 @@ class BenchmarkConfig(_Base):
 
     max_iterations: int = Field(default=100, gt=0)
     sequential_top_n: int = Field(default=1, gt=0)
+    column_rules_mode: Optional[RuleSourceMode] = None
+    index_rules_mode: Optional[RuleSourceMode] = None
     queries: QueriesConfig = Field(default_factory=QueriesConfig)
     table_rules: List[TableRuleConfig] = Field(default_factory=list)
 

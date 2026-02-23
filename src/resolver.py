@@ -9,11 +9,17 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from column_rules import ColumnAlternatives, ColumnRule
 from index_rules import IndexAlternatives, IndexRule, IndexVariant
-from models import ColumnRuleConfig, IndexRuleConfig, RuleBankConfig, RulesConfig
+from models import (
+    ColumnRuleConfig,
+    IndexRuleConfig,
+    RuleBankConfig,
+    RuleSourceMode,
+    RulesConfig,
+)
 
 
 def _column_rule_from_config(cfg: ColumnRuleConfig) -> ColumnRule:
@@ -106,38 +112,98 @@ class RuleResolver:
             return global_rules.model_copy(deep=True)
         return local_rules.merged_over(global_rules)
 
-    def resolve(self, rules_config: RulesConfig, dbms: Optional[str] = None) -> ResolvedRules:
+    def resolve(
+        self,
+        rules_config: RulesConfig,
+        dbms: Optional[str] = None,
+        column_rules_mode: Optional[RuleSourceMode] = None,
+        index_rules_mode: Optional[RuleSourceMode] = None,
+        global_rules: Optional[RulesConfig] = None,
+    ) -> ResolvedRules:
         """
         Резолвит `RulesConfig` в финальные runtime-правила.
 
         Для каждого блока правил (`column_rules`, `index_rules`, `column_order`)
         выбирает inline значение, а если его нет — берёт из выбранного банка.
+
+        Если заданы `column_rules_mode`/`index_rules_mode`, поведение становится
+        явным и опирается на benchmark-level (глобальный) bank:
+          - `global_bank_only`
+          - `global_bank_with_inline_priority`
+          - `inline_only`
         """
         source_bank = None
-        bank = self._pick_bank(rules_config, dbms)
-        if bank is not None:
-            source_bank = self._resolve_bank_name(rules_config, dbms)
+        bank_name: Optional[str]
+        bank: Optional[RuleBankConfig]
 
-        if rules_config.column_rules is not None:
-            column_rules = [_column_rule_from_config(r) for r in rules_config.column_rules]
-        elif bank is not None:
-            column_rules = [_column_rule_from_config(r) for r in bank.column_rules]
-        else:
-            column_rules = []
+        # Legacy path: поведение 1:1 как раньше.
+        if column_rules_mode is None and index_rules_mode is None:
+            bank = self._pick_bank(rules_config, dbms)
+            bank_name = self._resolve_bank_name(rules_config, dbms) if bank is not None else None
 
-        if rules_config.index_rules is not None:
-            index_rules = [_index_rule_from_config(r) for r in rules_config.index_rules]
-        elif bank is not None:
-            index_rules = [_index_rule_from_config(r) for r in bank.index_rules]
-        else:
-            index_rules = []
+            if rules_config.column_rules is not None:
+                column_rules = [_column_rule_from_config(r) for r in rules_config.column_rules]
+            elif bank is not None:
+                column_rules = [_column_rule_from_config(r) for r in bank.column_rules]
+            else:
+                column_rules = []
+
+            if rules_config.index_rules is not None:
+                index_rules = [_index_rule_from_config(r) for r in rules_config.index_rules]
+            elif bank is not None:
+                index_rules = [_index_rule_from_config(r) for r in bank.index_rules]
+            else:
+                index_rules = []
+
+            if rules_config.column_order is not None:
+                column_order = dict(rules_config.column_order)
+            elif bank is not None:
+                column_order = dict(bank.column_order)
+            else:
+                column_order = {}
+
+            source_bank = bank_name
+            return ResolvedRules(
+                column_rules=column_rules,
+                index_rules=index_rules,
+                column_order=column_order,
+                source_bank=source_bank,
+            )
+
+        bank_name, bank = self._pick_global_bank(global_rules, dbms)
+        requires_global_bank = (
+            column_rules_mode in ("global_bank_only", "global_bank_with_inline_priority")
+            or index_rules_mode in ("global_bank_only", "global_bank_with_inline_priority")
+        )
+        if requires_global_bank and bank is None:
+            raise ValueError(
+                "Выбран rules_mode, требующий глобальный rule bank, "
+                "но global_rules.rule_bank не задан и default_rule_banks для DBMS не найден"
+            )
+
+        column_rules, column_used_bank = self._resolve_column_rules(
+            mode=column_rules_mode,
+            inline_rules=rules_config.column_rules,
+            bank=bank,
+        )
+        index_rules, index_used_bank = self._resolve_index_rules(
+            mode=index_rules_mode,
+            inline_rules=rules_config.index_rules,
+            bank=bank,
+        )
 
         if rules_config.column_order is not None:
             column_order = dict(rules_config.column_order)
+            column_order_used_bank = False
         elif bank is not None:
             column_order = dict(bank.column_order)
+            column_order_used_bank = True
         else:
             column_order = {}
+            column_order_used_bank = False
+
+        if bank_name is not None and (column_used_bank or index_used_bank or column_order_used_bank):
+            source_bank = bank_name
 
         return ResolvedRules(
             column_rules=column_rules,
@@ -145,6 +211,90 @@ class RuleResolver:
             column_order=column_order,
             source_bank=source_bank,
         )
+
+    def _pick_global_bank(
+        self,
+        global_rules: Optional[RulesConfig],
+        dbms: Optional[str],
+    ) -> Tuple[Optional[str], Optional[RuleBankConfig]]:
+        """
+        Возвращает банк правил benchmark-level (глобальный для данного benchmark).
+
+        Приоритет:
+          1) explicit `global_rules.rule_bank`;
+          2) `default_rule_banks[dbms]`.
+        """
+        bank_id: Optional[str] = None
+        if global_rules is not None and global_rules.rule_bank is not None:
+            bank_id = global_rules.rule_bank
+        else:
+            dbms_key = (dbms or "").lower()
+            if dbms_key and dbms_key in self._default_rule_banks:
+                bank_id = self._default_rule_banks[dbms_key]
+
+        if bank_id is None:
+            return None, None
+        return bank_id, self._banks[bank_id]
+
+    @staticmethod
+    def _resolve_column_rules(
+        mode: Optional[RuleSourceMode],
+        inline_rules: Optional[List[ColumnRuleConfig]],
+        bank: Optional[RuleBankConfig],
+    ) -> Tuple[List[ColumnRule], bool]:
+        """Собирает итоговый список column_rules и признак использования bank."""
+        inline = (
+            [_column_rule_from_config(rule) for rule in inline_rules]
+            if inline_rules is not None
+            else []
+        )
+        bank_rules = (
+            [_column_rule_from_config(rule) for rule in bank.column_rules]
+            if bank is not None
+            else []
+        )
+
+        if mode == "global_bank_only":
+            return bank_rules, bank is not None
+        if mode == "global_bank_with_inline_priority":
+            return inline + bank_rules, bank is not None
+        if mode == "inline_only":
+            return inline, False
+
+        # mode=None — legacy fallback.
+        if inline_rules is not None:
+            return inline, False
+        return bank_rules, bank is not None
+
+    @staticmethod
+    def _resolve_index_rules(
+        mode: Optional[RuleSourceMode],
+        inline_rules: Optional[List[IndexRuleConfig]],
+        bank: Optional[RuleBankConfig],
+    ) -> Tuple[List[IndexRule], bool]:
+        """Собирает итоговый список index_rules и признак использования bank."""
+        inline = (
+            [_index_rule_from_config(rule) for rule in inline_rules]
+            if inline_rules is not None
+            else []
+        )
+        bank_rules = (
+            [_index_rule_from_config(rule) for rule in bank.index_rules]
+            if bank is not None
+            else []
+        )
+
+        if mode == "global_bank_only":
+            return bank_rules, bank is not None
+        if mode == "global_bank_with_inline_priority":
+            return inline + bank_rules, bank is not None
+        if mode == "inline_only":
+            return inline, False
+
+        # mode=None — legacy fallback.
+        if inline_rules is not None:
+            return inline, False
+        return bank_rules, bank is not None
 
     def _pick_bank(
         self, rules_config: RulesConfig, dbms: Optional[str]
@@ -178,6 +328,9 @@ def resolve(
     banks: Dict[str, RuleBankConfig],
     default_rule_banks: Optional[Dict[str, str]] = None,
     dbms: Optional[str] = None,
+    column_rules_mode: Optional[RuleSourceMode] = None,
+    index_rules_mode: Optional[RuleSourceMode] = None,
+    global_rules: Optional[RulesConfig] = None,
 ) -> ResolvedRules:
     """
     Функциональная обёртка над `RuleResolver` для обратной совместимости.
@@ -188,4 +341,10 @@ def resolve(
         banks=banks,
         default_rule_banks=default_rule_banks,
     )
-    return resolver.resolve(rules_config, dbms=dbms)
+    return resolver.resolve(
+        rules_config,
+        dbms=dbms,
+        column_rules_mode=column_rules_mode,
+        index_rules_mode=index_rules_mode,
+        global_rules=global_rules,
+    )
