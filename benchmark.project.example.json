@@ -1,0 +1,90 @@
+{
+  "celery": {
+    "workers": 4,
+    "threads_per_worker": 2
+  },
+  "connections_file": "connections.example.json",
+  "rule_banks_file": "rule_banks.example.json",
+  "benchmarks": [
+    {
+      "id": "bench_default_rules_auto_discovery",
+      "connection_id": "prod_ch",
+      "mode": "types",
+      "databases": "*",
+      "tables": "*",
+      "max_iterations": 3,
+      "queries": {
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "bench_mixed_selectors",
+      "connection_id": "prod_ch",
+      "mode": "combined",
+      "databases": [
+        "analytics",
+        "marketing"
+      ],
+      "tables": {
+        "analytics": [
+          "user_events"
+        ],
+        "marketing": "*"
+      },
+      "max_iterations": 5,
+      "global_rules": {
+        "rule_bank": "aggressive_zstd"
+      },
+      "queries": {
+        "mode": "auto_with_manual",
+        "test_queries": [
+          {
+            "query": "SELECT count() FROM {table} WHERE event_time >= now() - INTERVAL 1 DAY",
+            "weight": 2.0
+          }
+        ]
+      },
+      "celery": {
+        "workers": 6,
+        "threads_per_worker": 3
+      },
+      "table_rules": [
+        {
+          "database": "analytics",
+          "table": "user_events",
+          "max_iterations": 2,
+          "mode": "sequential",
+          "rules": {
+            "column_rules": [
+              {
+                "by_name": "revenue",
+                "by_type": "Nullable",
+                "types": [
+                  "Nullable(Decimal(18,4))",
+                  "Nullable(Float64)"
+                ],
+                "codecs": [
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(5))"
+                ]
+              }
+            ]
+          },
+          "queries": {
+            "mode": "manual",
+            "warmup_queries": [
+              "SELECT count() FROM {table}"
+            ],
+            "test_queries": [
+              {
+                "query": "SELECT sum(revenue) FROM {table}",
+                "weight": 1.0
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
+

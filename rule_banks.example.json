@@ -1,0 +1,48 @@
+{
+  "rule_banks": {
+    "aggressive_zstd": {
+      "column_order": {
+        "revenue": 1,
+        "event_time": 2
+      },
+      "column_rules": [
+        {
+          "by_type": "UInt64",
+          "types": [
+            "UInt64",
+            "UInt32"
+          ],
+          "codecs": [
+            "CODEC(Delta(8), ZSTD(3))",
+            "CODEC(T64, ZSTD(3))"
+          ]
+        },
+        {
+          "by_type": "DateTime",
+          "codecs": [
+            "CODEC(DoubleDelta, ZSTD(3))"
+          ]
+        }
+      ],
+      "index_rules": [
+        {
+          "by_type": "UInt64",
+          "indexes": [
+            {
+              "type": "minmax",
+              "granularity": 4
+            },
+            {
+              "type": "bloom_filter(0.01)",
+              "granularity": 2
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "default_rule_banks": {
+    "clickhouse": "aggressive_zstd"
+  }
+}
+

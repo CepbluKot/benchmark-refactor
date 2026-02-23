@@ -1,0 +1,14 @@
+{
+  "connections": [
+    {
+      "id": "prod_ch",
+      "dbms": "clickhouse",
+      "credential_type": "password",
+      "host": "ch-prod.internal",
+      "port": 9000,
+      "login": "bench_user",
+      "password": "secret"
+    }
+  ]
+}
+
