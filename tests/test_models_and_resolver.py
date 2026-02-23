@@ -91,6 +91,30 @@ class ModelsValidationTests(unittest.TestCase):
                 benchmarks_file="benchmarks.json",
             )
 
+    def test_insert_rows_limit_must_be_positive_when_set(self) -> None:
+        """Проверяет, что insert rows limit must be positive when set."""
+        with self.assertRaises(ValidationError):
+            BenchmarkConfig(
+                id="bench",
+                connection_id="conn",
+                mode="types",
+                databases=["analytics"],
+                tables=["events"],
+                global_rules=RulesConfig(
+                    column_rules=[
+                        ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
+                    ]
+                ),
+                insert_rows_limit=0,
+            )
+
+        with self.assertRaises(ValidationError):
+            TableRuleConfig(
+                database="analytics",
+                table="events",
+                insert_rows_limit=0,
+            )
+
 
 class RuleResolverTests(unittest.TestCase):
     @staticmethod

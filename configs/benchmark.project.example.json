@@ -15,6 +15,7 @@
       "databases": "*",
       "tables": "*",
       "max_iterations": 3,
+      "insert_rows_limit": 1000000,
       "queries": {
         "mode": "auto"
       }
@@ -36,6 +37,7 @@
         "marketing": "*"
       },
       "max_iterations": 5,
+      "insert_rows_limit": 5000000,
       "global_rules": {
         "rule_bank": "aggressive_zstd"
       },
@@ -53,6 +55,7 @@
           "database": "analytics",
           "table": "user_events",
           "max_iterations": 2,
+          "insert_rows_limit": 250000,
           "mode": "sequential",
           "rules": {
             "column_rules": [

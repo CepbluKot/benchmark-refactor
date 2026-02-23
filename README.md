@@ -86,6 +86,7 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
    - `mode`;
    - `max_iterations`;
    - `sequential_top_n`;
+   - `insert_rows_limit`;
    - `column_order_mode`;
    - `queries`;
    - глобальный `celery` из root-конфига.
@@ -182,13 +183,13 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
 ### 4.4 Модели benchmark-проекта
 
 1. `TableRuleConfig`
-   - поля: `database`, `table`, `rules`, `column_order_mode`, `queries`, `max_iterations`, `sequential_top_n`, `mode`
+   - поля: `database`, `table`, `rules`, `column_order_mode`, `queries`, `max_iterations`, `sequential_top_n`, `insert_rows_limit`, `mode`
    - метод: `non_empty_table_target(...)`
 2. `ConnectionConfig`
    - поля: `id`, `dbms`, `credential_type`, `host`, `port`, `login`, `password`
    - метод: `normalize_tokens(...)`
 3. `BenchmarkConfig`
-   - поля: `id`, `connection_id`, `mode`, `global_rules`, `column_rules_mode`, `index_rules_mode`, `column_order_mode`, `databases`, `tables`, `max_iterations`, `sequential_top_n`, `queries`, `table_rules`
+   - поля: `id`, `connection_id`, `mode`, `global_rules`, `column_rules_mode`, `index_rules_mode`, `column_order_mode`, `databases`, `tables`, `max_iterations`, `sequential_top_n`, `insert_rows_limit`, `queries`, `table_rules`
    - метод: `validate_selectors()`
    - режимы `column_rules_mode`/`index_rules_mode`:
      - `global_bank_only` — брать только правила из глобального bank;
@@ -483,6 +484,8 @@ Data + metrics:
 
 `VariantJob` и `BenchmarkVariantResult` содержат `benchmark_run_id` (целое > 0),
 общее для всех benchmark'ов, выполняемых в рамках одного запуска конфига.
+`VariantJob.insert_rows_limit` задаёт лимит строк для копирования из source в variant
+перед замерами (если ваш execution adapter это поддерживает).
 
 ### Result store
 
@@ -677,3 +680,4 @@ run_id = runner.run()
     - `StubMetadataProvider` -> `FetcherMetadataProvider` (или свой provider),
     - `NoopExecutionAdapter` -> рабочий adapter с реальными замерами.
 12. Если выбран `global_bank_only` или `global_bank_with_inline_priority`, должен быть доступен глобальный bank (`global_rules.rule_bank` или `default_rule_banks` для текущего DBMS), иначе planner завершится с ошибкой.
+13. `insert_rows_limit` можно задать на benchmark-уровне и переопределить в `table_rules`; итоговое значение передаётся в `VariantJob` и используется вашим execution adapter для `INSERT ... SELECT ... LIMIT N`.

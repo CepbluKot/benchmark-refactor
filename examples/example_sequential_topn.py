@@ -131,7 +131,8 @@ class SequentialTopNDemoAdapter(BenchmarkExecutionAdapter):
         print(
             f"[run={job.benchmark_run_id}][{job.benchmark_id}] {job.source_database}.{job.source_table} "
             f"stage={stage} idx={job.variant_meta.global_index} "
-            f"table={job.variant_table} score={score}"
+            f"table={job.variant_table} score={score} "
+            f"insert_rows_limit={job.insert_rows_limit}"
         )
 
         return BenchmarkVariantResult(

@@ -118,7 +118,8 @@ class DemoExecutionAdapter(BenchmarkExecutionAdapter):
         print(
             f"  celery: workers={job.celery.workers}, "
             f"threads_per_worker={job.celery.threads_per_worker}, "
-            f"queries={len(job.query_plan.test_queries)}"
+            f"queries={len(job.query_plan.test_queries)}, "
+            f"insert_rows_limit={job.insert_rows_limit}"
         )
         return BenchmarkVariantResult(
             benchmark_run_id=job.benchmark_run_id,

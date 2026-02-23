@@ -215,6 +215,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             databases=["analytics"],
             tables=["events"],
             max_iterations=10,
+            insert_rows_limit=1_000_000,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -230,6 +231,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                     table="events",
                     mode="sequential",
                     max_iterations=2,
+                    insert_rows_limit=25_000,
                     rules=RulesConfig(
                         column_rules=[
                             ColumnRuleConfig(
@@ -264,6 +266,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         plan = table_plans[0]
         self.assertEqual(plan.mode, "sequential")
         self.assertEqual(plan.max_iterations, 2)
+        self.assertEqual(plan.insert_rows_limit, 25_000)
         self.assertEqual(plan.queries.mode, "manual")
         self.assertEqual(plan.celery.workers, 9)
         self.assertEqual(plan.celery.threads_per_worker, 5)
@@ -420,6 +423,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             databases=["analytics"],
             tables=["events"],
             max_iterations=1,
+            insert_rows_limit=777,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -451,6 +455,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(job.benchmark_run_id, 1)
         self.assertEqual(job.total_variants, 1)
         self.assertEqual(job.variant_meta.global_index, 0)
+        self.assertEqual(job.insert_rows_limit, 777)
         self.assertTrue(job.variant_table.startswith("events__bench__bench_types__"))
         self.assertEqual(job.variant_ddl.name, f"analytics.{job.variant_table}")
         self.assertIn(job.variant_table, job.query_plan.warmup_queries[0])

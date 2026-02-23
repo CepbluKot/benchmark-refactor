@@ -196,6 +196,7 @@ class TableRuleConfig(_Base):
       - column_order_mode;
       - max_iterations;
       - sequential_top_n;
+      - insert_rows_limit;
       - mode;
       - queries.
     """
@@ -207,6 +208,7 @@ class TableRuleConfig(_Base):
     queries: Optional[QueriesConfig] = None
     max_iterations: Optional[int] = Field(default=None, gt=0)
     sequential_top_n: Optional[int] = Field(default=None, gt=0)
+    insert_rows_limit: Optional[int] = Field(default=None, gt=0)
     mode: Optional[BenchmarkMode] = None
 
     @field_validator("database", "table")
@@ -252,6 +254,7 @@ class BenchmarkConfig(_Base):
       - режим вычисления `column_order` (опционально);
       - ограничение по итерациям и режим комбинатора.
       - `sequential_top_n` для двухфазного режима sequential.
+      - `insert_rows_limit` — сколько строк копировать из source-таблицы в variant.
     """
 
     id: str
@@ -265,6 +268,7 @@ class BenchmarkConfig(_Base):
 
     max_iterations: int = Field(default=100, gt=0)
     sequential_top_n: int = Field(default=1, gt=0)
+    insert_rows_limit: Optional[int] = Field(default=None, gt=0)
     column_rules_mode: Optional[RuleSourceMode] = None
     index_rules_mode: Optional[RuleSourceMode] = None
     queries: QueriesConfig = Field(default_factory=QueriesConfig)

@@ -69,6 +69,7 @@ class TableBenchmarkPlan(_FrozenModel):
       - global/table rules,
       - global/table max_iterations,
       - global/table column_order_mode,
+      - global/table insert_rows_limit,
       - global/table queries,
       - глобальный celery-конфиг запуска.
     """
@@ -81,6 +82,7 @@ class TableBenchmarkPlan(_FrozenModel):
     mode: BenchmarkMode
     max_iterations: int
     sequential_top_n: int
+    insert_rows_limit: Optional[int]
     column_order_mode: Optional[ColumnOrderMode]
     rules: ResolvedRules
     queries: QueriesConfig
@@ -94,7 +96,7 @@ class VariantJob(_FrozenModel):
     Содержит всё, что нужно execution-слою:
       - DDL variant-таблицы;
       - query-план;
-      - runtime-параметры (mode, max_iterations, celery);
+      - runtime-параметры (mode, max_iterations, insert_rows_limit, celery);
       - метаданные варианта (индекс, total и т.д.).
     """
 
@@ -108,6 +110,7 @@ class VariantJob(_FrozenModel):
     variant_meta: VariantMeta
     mode: BenchmarkMode
     max_iterations: int
+    insert_rows_limit: Optional[int]
     total_variants: int
     variant_ddl: TableDDL
     query_plan: QueryPlan
@@ -558,6 +561,11 @@ class BenchmarkPlanner:
                     if table_rule and table_rule.sequential_top_n is not None
                     else benchmark.sequential_top_n
                 )
+                insert_rows_limit = (
+                    table_rule.insert_rows_limit
+                    if table_rule and table_rule.insert_rows_limit is not None
+                    else benchmark.insert_rows_limit
+                )
                 column_order_mode = (
                     table_rule.column_order_mode
                     if table_rule and table_rule.column_order_mode is not None
@@ -578,6 +586,7 @@ class BenchmarkPlanner:
                     mode=mode,
                     max_iterations=max_iterations,
                     sequential_top_n=sequential_top_n,
+                    insert_rows_limit=insert_rows_limit,
                     column_order_mode=column_order_mode,
                     rules=resolved_rules,
                     queries=queries,
@@ -715,6 +724,7 @@ class BenchmarkEngine:
             variant_meta=variant_meta,
             mode=job_mode if job_mode is not None else table_plan.mode,
             max_iterations=table_plan.max_iterations,
+            insert_rows_limit=table_plan.insert_rows_limit,
             total_variants=total_variants,
             variant_ddl=prepared_ddl,
             query_plan=rendered_query_plan,
