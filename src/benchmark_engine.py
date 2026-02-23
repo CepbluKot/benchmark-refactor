@@ -514,8 +514,9 @@ class BenchmarkPlanner:
         дальше engine работает уже только с `TableBenchmarkPlan`.
         """
         benchmark_filter = set(benchmark_ids) if benchmark_ids else None
+        ordered_benchmarks = sorted(self._config.benchmarks, key=lambda b: b.id)
 
-        for benchmark in self._config.benchmarks:
+        for benchmark in ordered_benchmarks:
             if benchmark_filter and benchmark.id not in benchmark_filter:
                 continue
 
@@ -923,6 +924,8 @@ class BenchmarkRunner:
             column_order=effective_column_order,
             max_iterations=table_plan.max_iterations,
         ):
+            ddl_txt = variant_ddl.to_ddl()
+            print(ddl_txt)
             job = self._engine.build_variant_job(
                 table_plan=table_plan,
                 raw_query_plan=raw_query_plan,

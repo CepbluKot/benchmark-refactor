@@ -449,6 +449,58 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertTrue(run1_rows)
         self.assertTrue(run2_rows)
 
+    def test_runner_executes_benchmarks_in_lexicographic_id_order(self) -> None:
+        benchmark_z = BenchmarkConfig(
+            id="bench_z",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
+                ]
+            ),
+        )
+        benchmark_a = BenchmarkConfig(
+            id="bench_a",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
+                ]
+            ),
+        )
+        root = BenchmarkRootConfig(
+            connections=[self.connection],
+            benchmarks=[benchmark_z, benchmark_a],  # специально не по алфавиту
+            rule_banks={},
+            default_rule_banks={},
+            celery=CeleryConfig(workers=2, threads_per_worker=1),
+        )
+        planner = BenchmarkPlanner(
+            config=root,
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = RecordingExecutionAdapter()
+        result_store = InMemoryBenchmarkResultStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+        )
+
+        runner.run()
+
+        executed_benchmark_ids = [job.benchmark_id for job in adapter.executed_jobs]
+        self.assertEqual(executed_benchmark_ids, ["bench_a", "bench_z"])
+
     def test_runner_uses_max_id_provider_as_source_of_run_ids(self) -> None:
         benchmark = BenchmarkConfig(
             id="bench_run_id_from_max",
