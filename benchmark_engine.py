@@ -47,18 +47,17 @@ class TableTarget(_FrozenModel):
     table: str
 
 
-class WeightedQuery(_FrozenModel):
-    """Тестовый запрос и его вес в метрике итогового score."""
+class Query(_FrozenModel):
+    """Тестовый SQL-запрос."""
 
     query: str
-    weight: float = 1.0
 
 
 class QueryPlan(_FrozenModel):
     """Готовый набор warmup/test запросов для одной variant-таблицы."""
 
     warmup_queries: List[str]
-    test_queries: List[WeightedQuery]
+    test_queries: List[Query]
 
 
 class TableBenchmarkPlan(_FrozenModel):
@@ -79,6 +78,7 @@ class TableBenchmarkPlan(_FrozenModel):
     table: str
     mode: BenchmarkMode
     max_iterations: int
+    sequential_top_n: int
     rules: ResolvedRules
     queries: QueriesConfig
     celery: CeleryConfig
@@ -266,10 +266,8 @@ class QueryPlanBuilder:
         mode = queries_config.mode
         warmups = list(queries_config.warmup_queries)
 
-        auto_queries = [WeightedQuery(query=q.query, weight=1.0) for q in generate_queries(table_ddl)]
-        manual_queries = [
-            WeightedQuery(query=q.query, weight=q.weight) for q in queries_config.test_queries
-        ]
+        auto_queries = [Query(query=q.query) for q in generate_queries(table_ddl)]
+        manual_queries = [Query(query=q.query) for q in queries_config.test_queries]
 
         if mode == "auto":
             tests = auto_queries
@@ -294,11 +292,8 @@ class QueryPlanBuilder:
         full_table_name = f"`{database}`.`{table}`"
         warmups = [query.replace("{table}", full_table_name) for query in plan.warmup_queries]
         tests = [
-            WeightedQuery(
-                query=weighted.query.replace("{table}", full_table_name),
-                weight=weighted.weight,
-            )
-            for weighted in plan.test_queries
+            Query(query=planned.query.replace("{table}", full_table_name))
+            for planned in plan.test_queries
         ]
         return QueryPlan(warmup_queries=warmups, test_queries=tests)
 
@@ -387,6 +382,11 @@ class BenchmarkPlanner:
                     if table_rule and table_rule.max_iterations is not None
                     else benchmark.max_iterations
                 )
+                sequential_top_n = (
+                    table_rule.sequential_top_n
+                    if table_rule and table_rule.sequential_top_n is not None
+                    else benchmark.sequential_top_n
+                )
                 queries = (
                     table_rule.queries
                     if table_rule and table_rule.queries is not None
@@ -402,6 +402,7 @@ class BenchmarkPlanner:
                     table=target.table,
                     mode=mode,
                     max_iterations=max_iterations,
+                    sequential_top_n=sequential_top_n,
                     rules=resolved_rules,
                     queries=queries,
                     celery=celery,
@@ -438,64 +439,112 @@ class BenchmarkEngine:
         self._planner = planner
         self._query_builder = query_builder or QueryPlanBuilder()
 
+    def iter_table_plans(
+        self,
+        benchmark_ids: Optional[Sequence[str]] = None,
+    ) -> Iterator[TableBenchmarkPlan]:
+        """Проксирует table-level планы из planner для runner-оркестрации."""
+        yield from self._planner.iter_table_plans(benchmark_ids=benchmark_ids)
+
+    def prepare_table_context(
+        self,
+        table_plan: TableBenchmarkPlan,
+    ) -> Tuple[TableDDL, QueryPlan]:
+        """Загружает исходный DDL и строит query-plan c placeholder'ом `{table}`."""
+        provider = self._planner.provider_for_connection(table_plan.connection_id)
+        source_ddl = provider.fetch_table_ddl(
+            database=table_plan.database,
+            table=table_plan.table,
+        )
+        raw_query_plan = self._query_builder.build(source_ddl, table_plan.queries)
+        return source_ddl, raw_query_plan
+
+    def build_variant_job(
+        self,
+        table_plan: TableBenchmarkPlan,
+        raw_query_plan: QueryPlan,
+        variant_ddl: TableDDL,
+        variant_meta: VariantMeta,
+        total_variants: int,
+        job_mode: Optional[BenchmarkMode] = None,
+    ) -> VariantJob:
+        """Собирает `VariantJob` из уже подготовленного variant DDL и meta."""
+        variant_table = variant_table_name(
+            original_table=table_plan.table,
+            benchmark_id=table_plan.benchmark_id,
+            variant_index=variant_meta.global_index,
+        )
+        prepared_ddl = variant_ddl.copy()
+        prepared_ddl.name = f"{table_plan.database}.{variant_table}"
+
+        rendered_query_plan = self._query_builder.render_for_table(
+            plan=raw_query_plan,
+            database=table_plan.database,
+            table=variant_table,
+        )
+
+        return VariantJob(
+            benchmark_id=table_plan.benchmark_id,
+            connection_id=table_plan.connection_id,
+            connection_dbms=table_plan.connection_dbms,
+            source_database=table_plan.database,
+            source_table=table_plan.table,
+            variant_table=variant_table,
+            variant_meta=variant_meta,
+            mode=job_mode if job_mode is not None else table_plan.mode,
+            max_iterations=table_plan.max_iterations,
+            total_variants=total_variants,
+            variant_ddl=prepared_ddl,
+            query_plan=rendered_query_plan,
+            celery=table_plan.celery,
+        )
+
+    def iter_variant_jobs_for_table_plan(
+        self,
+        table_plan: TableBenchmarkPlan,
+    ) -> Iterator[VariantJob]:
+        """
+        Генерирует VariantJob для одного `TableBenchmarkPlan`.
+
+        Для `sequential` здесь отдаётся только type/codec стадия.
+        Индексная стадия зависит от score и оркестрируется в `BenchmarkRunner`.
+        """
+        source_ddl, raw_query_plan = self.prepare_table_context(table_plan)
+        variant_mode: BenchmarkMode = (
+            "types" if table_plan.mode == "sequential" else table_plan.mode
+        )
+        capped_total = total_variants(
+            table=source_ddl,
+            mode=variant_mode,
+            column_rules=table_plan.rules.column_rules,
+            index_rules=table_plan.rules.index_rules,
+            column_order=table_plan.rules.column_order,
+            max_iterations=table_plan.max_iterations,
+        )
+
+        for variant_ddl, variant_meta in iter_variants(
+            table=source_ddl,
+            mode=variant_mode,
+            column_rules=table_plan.rules.column_rules,
+            index_rules=table_plan.rules.index_rules,
+            column_order=table_plan.rules.column_order,
+            max_iterations=table_plan.max_iterations,
+        ):
+            yield self.build_variant_job(
+                table_plan=table_plan,
+                raw_query_plan=raw_query_plan,
+                variant_ddl=variant_ddl,
+                variant_meta=variant_meta,
+                total_variants=capped_total,
+            )
+
     def iter_variant_jobs(
         self,
         benchmark_ids: Optional[Sequence[str]] = None,
     ) -> Iterator[VariantJob]:
         """Итерирует fully prepared задания на выполнение каждого варианта."""
-        for table_plan in self._planner.iter_table_plans(benchmark_ids=benchmark_ids):
-            provider = self._planner.provider_for_connection(table_plan.connection_id)
-            source_ddl = provider.fetch_table_ddl(
-                database=table_plan.database,
-                table=table_plan.table,
-            )
-            raw_query_plan = self._query_builder.build(source_ddl, table_plan.queries)
-            capped_total = total_variants(
-                table=source_ddl,
-                mode=table_plan.mode,
-                column_rules=table_plan.rules.column_rules,
-                index_rules=table_plan.rules.index_rules,
-                column_order=table_plan.rules.column_order,
-                max_iterations=table_plan.max_iterations,
-            )
-
-            for variant_ddl, variant_meta in iter_variants(
-                table=source_ddl,
-                mode=table_plan.mode,
-                column_rules=table_plan.rules.column_rules,
-                index_rules=table_plan.rules.index_rules,
-                column_order=table_plan.rules.column_order,
-                max_iterations=table_plan.max_iterations,
-            ):
-                variant_table = variant_table_name(
-                    original_table=table_plan.table,
-                    benchmark_id=table_plan.benchmark_id,
-                    variant_index=variant_meta.global_index,
-                )
-                prepared_ddl = variant_ddl.copy()
-                prepared_ddl.name = f"{table_plan.database}.{variant_table}"
-
-                rendered_query_plan = self._query_builder.render_for_table(
-                    plan=raw_query_plan,
-                    database=table_plan.database,
-                    table=variant_table,
-                )
-
-                yield VariantJob(
-                    benchmark_id=table_plan.benchmark_id,
-                    connection_id=table_plan.connection_id,
-                    connection_dbms=table_plan.connection_dbms,
-                    source_database=table_plan.database,
-                    source_table=table_plan.table,
-                    variant_table=variant_table,
-                    variant_meta=variant_meta,
-                    mode=table_plan.mode,
-                    max_iterations=table_plan.max_iterations,
-                    total_variants=capped_total,
-                    variant_ddl=prepared_ddl,
-                    query_plan=rendered_query_plan,
-                    celery=table_plan.celery,
-                )
+        for table_plan in self.iter_table_plans(benchmark_ids=benchmark_ids):
+            yield from self.iter_variant_jobs_for_table_plan(table_plan)
 
 
 class BenchmarkExecutionAdapter(ABC):
@@ -548,8 +597,117 @@ class BenchmarkRunner:
         self,
         benchmark_ids: Optional[Sequence[str]] = None,
     ) -> List[BenchmarkVariantResult]:
-        """Выполняет все VariantJob и возвращает список результатов."""
+        """
+        Выполняет все VariantJob и возвращает список результатов.
+
+        Для `mode="sequential"` используется двухфазный алгоритм:
+          1) прогон type/codec-вариантов;
+          2) выбор top-N по score и прогон индексных вариантов на их DDL.
+        """
         results: List[BenchmarkVariantResult] = []
-        for job in self._engine.iter_variant_jobs(benchmark_ids=benchmark_ids):
-            results.append(self._execution_adapter.execute_variant(job))
+        for table_plan in self._engine.iter_table_plans(benchmark_ids=benchmark_ids):
+            if table_plan.mode != "sequential":
+                for job in self._engine.iter_variant_jobs_for_table_plan(table_plan):
+                    results.append(self._execution_adapter.execute_variant(job))
+                continue
+
+            results.extend(self._run_sequential(table_plan))
         return results
+
+    def _run_sequential(
+        self,
+        table_plan: TableBenchmarkPlan,
+    ) -> List[BenchmarkVariantResult]:
+        """Адаптивный sequential: types -> score -> top-N -> indexes на лучших types."""
+        source_ddl, raw_query_plan = self._engine.prepare_table_context(table_plan)
+
+        type_total = total_variants(
+            table=source_ddl,
+            mode="types",
+            column_rules=table_plan.rules.column_rules,
+            index_rules=table_plan.rules.index_rules,
+            column_order=table_plan.rules.column_order,
+            max_iterations=table_plan.max_iterations,
+        )
+        type_jobs_with_results: List[Tuple[VariantJob, BenchmarkVariantResult]] = []
+        all_results: List[BenchmarkVariantResult] = []
+
+        for variant_ddl, variant_meta in iter_variants(
+            table=source_ddl,
+            mode="types",
+            column_rules=table_plan.rules.column_rules,
+            index_rules=table_plan.rules.index_rules,
+            column_order=table_plan.rules.column_order,
+            max_iterations=table_plan.max_iterations,
+        ):
+            job = self._engine.build_variant_job(
+                table_plan=table_plan,
+                raw_query_plan=raw_query_plan,
+                variant_ddl=variant_ddl,
+                variant_meta=variant_meta,
+                total_variants=type_total,
+                job_mode="sequential",
+            )
+            result = self._execution_adapter.execute_variant(job)
+            type_jobs_with_results.append((job, result))
+            all_results.append(result)
+
+        if not type_jobs_with_results:
+            return all_results
+
+        top_n = min(table_plan.sequential_top_n, len(type_jobs_with_results))
+        top_jobs = self._pick_top_scored(type_jobs_with_results, top_n=top_n)
+        next_global_index = len(type_jobs_with_results)
+
+        for type_job, _ in top_jobs:
+            base_ddl = type_job.variant_ddl.copy()
+            index_total = total_variants(
+                table=base_ddl,
+                mode="indexes",
+                column_rules=table_plan.rules.column_rules,
+                index_rules=table_plan.rules.index_rules,
+                column_order=table_plan.rules.column_order,
+                max_iterations=table_plan.max_iterations,
+            )
+
+            for variant_ddl, index_meta in iter_variants(
+                table=base_ddl,
+                mode="indexes",
+                column_rules=table_plan.rules.column_rules,
+                index_rules=table_plan.rules.index_rules,
+                column_order=table_plan.rules.column_order,
+                max_iterations=table_plan.max_iterations,
+            ):
+                index_meta.global_index = next_global_index
+                next_global_index += 1
+                index_job = self._engine.build_variant_job(
+                    table_plan=table_plan,
+                    raw_query_plan=raw_query_plan,
+                    variant_ddl=variant_ddl,
+                    variant_meta=index_meta,
+                    total_variants=index_total,
+                    job_mode="sequential",
+                )
+                all_results.append(self._execution_adapter.execute_variant(index_job))
+
+        return all_results
+
+    @staticmethod
+    def _pick_top_scored(
+        jobs_with_results: List[Tuple[VariantJob, BenchmarkVariantResult]],
+        top_n: int,
+    ) -> List[Tuple[VariantJob, BenchmarkVariantResult]]:
+        """
+        Возвращает top-N вариантов по score (чем больше score, тем лучше).
+
+        Если score отсутствует (`None`), вариант опускается в конец сортировки.
+        """
+        ranked = sorted(
+            jobs_with_results,
+            key=lambda item: (
+                item[1].score is not None,
+                item[1].score if item[1].score is not None else float("-inf"),
+            ),
+            reverse=True,
+        )
+        return ranked[:top_n]

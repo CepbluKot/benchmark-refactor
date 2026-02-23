@@ -1,0 +1,110 @@
+{
+  "celery": {
+    "workers": 4,
+    "threads_per_worker": 2
+  },
+  "connections_file": "connections.example.json",
+  "rule_banks_file": "rule_banks.example.json",
+  "benchmarks": [
+    {
+      "id": "bench_sequential_topn",
+      "connection_id": "prod_ch",
+      "mode": "sequential",
+      "databases": [
+        "analytics"
+      ],
+      "tables": [
+        "user_events",
+        "partner_stats"
+      ],
+      "max_iterations": 20,
+      "sequential_top_n": 2,
+      "global_rules": {
+        "column_order": {
+          "user_id": 1,
+          "event_time": 2
+        },
+        "column_rules": [
+          {
+            "by_type": "UInt64",
+            "types": [
+              "UInt64",
+              "UInt32"
+            ],
+            "codecs": [
+              "CODEC(Delta(8), LZ4)",
+              "CODEC(T64, ZSTD(1))"
+            ]
+          },
+          {
+            "by_type": "UInt32",
+            "types": [
+              "UInt32",
+              "UInt16"
+            ],
+            "codecs": [
+              "CODEC(Delta(4), LZ4)",
+              "CODEC(T64, ZSTD(1))"
+            ]
+          },
+          {
+            "by_type": "DateTime",
+            "codecs": [
+              "CODEC(DoubleDelta, LZ4)",
+              "CODEC(DoubleDelta, ZSTD(1))"
+            ]
+          }
+        ],
+        "index_rules": [
+          {
+            "by_type": "UInt64",
+            "indexes": [
+              {
+                "type": "minmax",
+                "granularity": 4
+              },
+              {
+                "type": "bloom_filter(0.01)",
+                "granularity": 2
+              }
+            ]
+          },
+          {
+            "by_type": "UInt32",
+            "indexes": [
+              {
+                "type": "minmax",
+                "granularity": 4
+              },
+              {
+                "type": "bloom_filter(0.01)",
+                "granularity": 2
+              }
+            ]
+          },
+          {
+            "by_type": "DateTime",
+            "indexes": [
+              {
+                "type": "minmax",
+                "granularity": 4
+              }
+            ]
+          }
+        ]
+      },
+      "queries": {
+        "mode": "auto"
+      },
+      "table_rules": [
+        {
+          "database": "analytics",
+          "table": "user_events",
+          "sequential_top_n": 1,
+          "max_iterations": 12
+        }
+      ]
+    }
+  ]
+}
+

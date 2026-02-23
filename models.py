@@ -188,6 +188,7 @@ class TableRuleConfig(_Base):
     Может переопределять:
       - rules;
       - max_iterations;
+      - sequential_top_n;
       - mode;
       - queries.
     """
@@ -197,6 +198,7 @@ class TableRuleConfig(_Base):
     rules: RulesConfig = Field(default_factory=RulesConfig)
     queries: Optional[QueriesConfig] = None
     max_iterations: Optional[int] = Field(default=None, gt=0)
+    sequential_top_n: Optional[int] = Field(default=None, gt=0)
     mode: Optional[BenchmarkMode] = None
 
     @field_validator("database", "table")
@@ -239,6 +241,7 @@ class BenchmarkConfig(_Base):
       - какие БД/таблицы включить;
       - глобальные правила и table-level override;
       - ограничение по итерациям и режим комбинатора.
+      - `sequential_top_n` для двухфазного режима sequential.
     """
 
     id: str
@@ -250,6 +253,7 @@ class BenchmarkConfig(_Base):
     tables: TablesSelector = "*"
 
     max_iterations: int = Field(default=100, gt=0)
+    sequential_top_n: int = Field(default=1, gt=0)
     queries: QueriesConfig = Field(default_factory=QueriesConfig)
     table_rules: List[TableRuleConfig] = Field(default_factory=list)
     celery: Optional[CeleryConfig] = None
