@@ -4,6 +4,7 @@ from typing import Dict, List
 from benchmark_engine import (
     BenchmarkEngine,
     BenchmarkExecutionAdapter,
+    MaxIdBenchmarkRunIdProvider,
     BenchmarkPlanner,
     BenchmarkRunner,
     BenchmarkVariantResult,
@@ -73,6 +74,7 @@ class RecordingExecutionAdapter(BenchmarkExecutionAdapter):
     def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
         self.executed_jobs.append(job)
         return BenchmarkVariantResult(
+            benchmark_run_id=job.benchmark_run_id,
             benchmark_id=job.benchmark_id,
             source_database=job.source_database,
             source_table=job.source_table,
@@ -97,6 +99,7 @@ class SequentialScoringAdapter(BenchmarkExecutionAdapter):
             score = 0.5
 
         return BenchmarkVariantResult(
+            benchmark_run_id=job.benchmark_run_id,
             benchmark_id=job.benchmark_id,
             source_database=job.source_database,
             source_table=job.source_table,
@@ -295,6 +298,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(len(jobs), 1)
 
         job = jobs[0]
+        self.assertEqual(job.benchmark_run_id, 1)
         self.assertEqual(job.total_variants, 1)
         self.assertEqual(job.variant_meta.global_index, 0)
         self.assertTrue(job.variant_table.startswith("events__bench__bench_types__"))
@@ -330,8 +334,81 @@ class PlannerEngineRunnerTests(unittest.TestCase):
 
         self.assertEqual(len(results), 1)
         self.assertEqual(len(adapter.executed_jobs), 1)
+        self.assertEqual(results[0].benchmark_run_id, 1)
+        self.assertEqual(adapter.executed_jobs[0].benchmark_run_id, 1)
         self.assertEqual(results[0].variant_table, adapter.executed_jobs[0].variant_table)
         self.assertEqual(results[0].score, 1.0)
+
+    def test_runner_assigns_single_serial_run_id_per_run(self) -> None:
+        benchmark = BenchmarkConfig(
+            id="bench_run_id_serial",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
+                ]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = RecordingExecutionAdapter()
+        runner = BenchmarkRunner(engine=engine, execution_adapter=adapter)
+
+        run1 = runner.run()
+        run2 = runner.run()
+
+        self.assertTrue(run1)
+        self.assertTrue(run2)
+        self.assertTrue(all(r.benchmark_run_id == 1 for r in run1))
+        self.assertTrue(all(r.benchmark_run_id == 2 for r in run2))
+
+    def test_runner_uses_max_id_provider_as_source_of_run_ids(self) -> None:
+        benchmark = BenchmarkConfig(
+            id="bench_run_id_from_max",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
+                ]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = RecordingExecutionAdapter()
+
+        observed_max = {"value": 10}
+
+        def max_id_getter() -> int:
+            return observed_max["value"]
+
+        provider = MaxIdBenchmarkRunIdProvider(max_id_getter=max_id_getter)
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            run_id_provider=provider,
+        )
+
+        run1 = runner.run()
+        self.assertTrue(all(r.benchmark_run_id == 11 for r in run1))
+
+        # Имитируем, что в БД уже появились записи для run_id=11.
+        observed_max["value"] = 11
+        run2 = runner.run()
+        self.assertTrue(all(r.benchmark_run_id == 12 for r in run2))
 
     def test_sequential_mode_runs_indexes_for_top_n_type_variants(self) -> None:
         benchmark = BenchmarkConfig(
@@ -381,6 +458,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         # Stage 2: top-1 (UInt32) gets 3 index variants (None + 2 indexes)
         self.assertEqual(len(results), 5)
         self.assertEqual(len(adapter.executed_jobs), 5)
+        self.assertTrue(all(r.benchmark_run_id == 1 for r in results))
+        self.assertTrue(all(j.benchmark_run_id == 1 for j in adapter.executed_jobs))
 
         stages = [job.variant_meta.mode for job in adapter.executed_jobs]
         self.assertEqual(stages[:2], ["types", "types"])

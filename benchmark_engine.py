@@ -10,7 +10,7 @@ Core orchestration слоя бенчмарка (planner -> engine -> runner).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -95,6 +95,7 @@ class VariantJob(_FrozenModel):
       - метаданные варианта (индекс, total и т.д.).
     """
 
+    benchmark_run_id: int
     benchmark_id: str
     connection_id: str
     connection_dbms: str
@@ -117,6 +118,7 @@ class BenchmarkVariantResult(_FrozenModel):
     Заполняется execution-адаптером и возвращается наружу через `BenchmarkRunner.run`.
     """
 
+    benchmark_run_id: int
     benchmark_id: str
     source_database: str
     source_table: str
@@ -466,6 +468,7 @@ class BenchmarkEngine:
         variant_ddl: TableDDL,
         variant_meta: VariantMeta,
         total_variants: int,
+        benchmark_run_id: int,
         job_mode: Optional[BenchmarkMode] = None,
     ) -> VariantJob:
         """Собирает `VariantJob` из уже подготовленного variant DDL и meta."""
@@ -484,6 +487,7 @@ class BenchmarkEngine:
         )
 
         return VariantJob(
+            benchmark_run_id=benchmark_run_id,
             benchmark_id=table_plan.benchmark_id,
             connection_id=table_plan.connection_id,
             connection_dbms=table_plan.connection_dbms,
@@ -502,6 +506,7 @@ class BenchmarkEngine:
     def iter_variant_jobs_for_table_plan(
         self,
         table_plan: TableBenchmarkPlan,
+        benchmark_run_id: int = 1,
     ) -> Iterator[VariantJob]:
         """
         Генерирует VariantJob для одного `TableBenchmarkPlan`.
@@ -536,15 +541,20 @@ class BenchmarkEngine:
                 variant_ddl=variant_ddl,
                 variant_meta=variant_meta,
                 total_variants=capped_total,
+                benchmark_run_id=benchmark_run_id,
             )
 
     def iter_variant_jobs(
         self,
         benchmark_ids: Optional[Sequence[str]] = None,
+        benchmark_run_id: int = 1,
     ) -> Iterator[VariantJob]:
         """Итерирует fully prepared задания на выполнение каждого варианта."""
         for table_plan in self.iter_table_plans(benchmark_ids=benchmark_ids):
-            yield from self.iter_variant_jobs_for_table_plan(table_plan)
+            yield from self.iter_variant_jobs_for_table_plan(
+                table_plan,
+                benchmark_run_id=benchmark_run_id,
+            )
 
 
 class BenchmarkExecutionAdapter(ABC):
@@ -567,6 +577,7 @@ class NoopExecutionAdapter(BenchmarkExecutionAdapter):
     def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
         """Возвращает технический результат без фактического выполнения SQL."""
         return BenchmarkVariantResult(
+            benchmark_run_id=job.benchmark_run_id,
             benchmark_id=job.benchmark_id,
             source_database=job.source_database,
             source_table=job.source_table,
@@ -575,6 +586,54 @@ class NoopExecutionAdapter(BenchmarkExecutionAdapter):
             score=None,
             payload={"status": "planned_only"},
         )
+
+
+class BenchmarkRunIdProvider(ABC):
+    """
+    Источник run-level benchmark id.
+
+    Контракт: вернуть целое число > 0, общее для всего текущего запуска конфига.
+    """
+
+    @abstractmethod
+    def next_benchmark_run_id(self) -> int:
+        """Возвращает следующий run id (обычно max(existing)+1)."""
+        pass
+
+
+class InMemoryBenchmarkRunIdProvider(BenchmarkRunIdProvider):
+    """Простой serial run id provider в памяти процесса (1, 2, 3, ...)."""
+
+    def __init__(self, start_from: int = 0) -> None:
+        self._last_run_id = start_from
+
+    def next_benchmark_run_id(self) -> int:
+        self._last_run_id += 1
+        return self._last_run_id
+
+
+class MaxIdBenchmarkRunIdProvider(BenchmarkRunIdProvider):
+    """
+    Provider, который строит следующий run id из `max(existing_id)` в хранилище.
+
+    `max_id_getter` должен вернуть максимальный уже сохранённый id или `None`,
+    если записей ещё нет.
+    """
+
+    def __init__(self, max_id_getter: Callable[[], Optional[int]]) -> None:
+        self._max_id_getter = max_id_getter
+        self._reserved_last_id = 0
+
+    def next_benchmark_run_id(self) -> int:
+        observed_max = self._max_id_getter()
+        observed = int(observed_max) if observed_max is not None else 0
+        if observed < 0:
+            raise ValueError(
+                f"max_id_getter вернул отрицательный benchmark id: {observed}"
+            )
+        next_id = max(observed, self._reserved_last_id) + 1
+        self._reserved_last_id = next_id
+        return next_id
 
 
 class BenchmarkRunner:
@@ -588,14 +647,17 @@ class BenchmarkRunner:
         self,
         engine: BenchmarkEngine,
         execution_adapter: BenchmarkExecutionAdapter,
+        run_id_provider: Optional[BenchmarkRunIdProvider] = None,
     ) -> None:
         """Сохраняет engine и адаптер выполнения."""
         self._engine = engine
         self._execution_adapter = execution_adapter
+        self._run_id_provider = run_id_provider or InMemoryBenchmarkRunIdProvider()
 
     def run(
         self,
         benchmark_ids: Optional[Sequence[str]] = None,
+        benchmark_run_id: Optional[int] = None,
     ) -> List[BenchmarkVariantResult]:
         """
         Выполняет все VariantJob и возвращает список результатов.
@@ -604,19 +666,27 @@ class BenchmarkRunner:
           1) прогон type/codec-вариантов;
           2) выбор top-N по score и прогон индексных вариантов на их DDL.
         """
+        run_id = benchmark_run_id if benchmark_run_id is not None else self._next_run_id()
+        if run_id <= 0:
+            raise ValueError(f"benchmark_run_id должен быть > 0, получено: {run_id}")
+
         results: List[BenchmarkVariantResult] = []
         for table_plan in self._engine.iter_table_plans(benchmark_ids=benchmark_ids):
             if table_plan.mode != "sequential":
-                for job in self._engine.iter_variant_jobs_for_table_plan(table_plan):
+                for job in self._engine.iter_variant_jobs_for_table_plan(
+                    table_plan,
+                    benchmark_run_id=run_id,
+                ):
                     results.append(self._execution_adapter.execute_variant(job))
                 continue
 
-            results.extend(self._run_sequential(table_plan))
+            results.extend(self._run_sequential(table_plan, benchmark_run_id=run_id))
         return results
 
     def _run_sequential(
         self,
         table_plan: TableBenchmarkPlan,
+        benchmark_run_id: int,
     ) -> List[BenchmarkVariantResult]:
         """Адаптивный sequential: types -> score -> top-N -> indexes на лучших types."""
         source_ddl, raw_query_plan = self._engine.prepare_table_context(table_plan)
@@ -646,6 +716,7 @@ class BenchmarkRunner:
                 variant_ddl=variant_ddl,
                 variant_meta=variant_meta,
                 total_variants=type_total,
+                benchmark_run_id=benchmark_run_id,
                 job_mode="sequential",
             )
             result = self._execution_adapter.execute_variant(job)
@@ -686,6 +757,7 @@ class BenchmarkRunner:
                     variant_ddl=variant_ddl,
                     variant_meta=index_meta,
                     total_variants=index_total,
+                    benchmark_run_id=benchmark_run_id,
                     job_mode="sequential",
                 )
                 all_results.append(self._execution_adapter.execute_variant(index_job))
@@ -711,3 +783,7 @@ class BenchmarkRunner:
             reverse=True,
         )
         return ranked[:top_n]
+
+    def _next_run_id(self) -> int:
+        """Берёт следующий serial benchmark run id у configured provider."""
+        return self._run_id_provider.next_benchmark_run_id()

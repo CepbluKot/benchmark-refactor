@@ -104,7 +104,7 @@ class DemoExecutionAdapter(BenchmarkExecutionAdapter):
         """Dry-run выполнение: печатает план и возвращает псевдо-score."""
         pseudo_score = round(1.0 / (1 + job.variant_meta.global_index), 6)
         print(
-            f"[{job.benchmark_id}] {job.source_database}.{job.source_table} "
+            f"[run={job.benchmark_run_id}][{job.benchmark_id}] {job.source_database}.{job.source_table} "
             f"-> {job.variant_table} "
             f"(mode={job.mode}, idx={job.variant_meta.global_index}, total={job.total_variants})"
         )
@@ -114,6 +114,7 @@ class DemoExecutionAdapter(BenchmarkExecutionAdapter):
             f"queries={len(job.query_plan.test_queries)}"
         )
         return BenchmarkVariantResult(
+            benchmark_run_id=job.benchmark_run_id,
             benchmark_id=job.benchmark_id,
             source_database=job.source_database,
             source_table=job.source_table,

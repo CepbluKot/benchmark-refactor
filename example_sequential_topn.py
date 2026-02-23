@@ -110,12 +110,13 @@ class SequentialTopNDemoAdapter(BenchmarkExecutionAdapter):
             score = round(0.1 * len(job.variant_ddl.indexes), 4)
 
         print(
-            f"[{job.benchmark_id}] {job.source_database}.{job.source_table} "
+            f"[run={job.benchmark_run_id}][{job.benchmark_id}] {job.source_database}.{job.source_table} "
             f"stage={stage} idx={job.variant_meta.global_index} "
             f"table={job.variant_table} score={score}"
         )
 
         return BenchmarkVariantResult(
+            benchmark_run_id=job.benchmark_run_id,
             benchmark_id=job.benchmark_id,
             source_database=job.source_database,
             source_table=job.source_table,
@@ -163,4 +164,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
