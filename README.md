@@ -142,11 +142,13 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
 
 1. `ColumnRuleConfig`
    - поля: `by_type`, `by_name`, `types`, `codecs`
+   - `by_type` матчится строго по полной строке типа (без префиксного матчинга)
    - метод: `check_matchers()`
 2. `IndexConfig`
    - поля: `type`, `granularity`
 3. `IndexRuleConfig`
    - поля: `by_type`, `by_name`, `indexes`
+   - `by_type` матчится строго по полной строке типа (без префиксного матчинга)
    - метод: `check_matchers()`
 4. `RuleBankConfig`
    - поля: `column_rules`, `index_rules`, `column_order`

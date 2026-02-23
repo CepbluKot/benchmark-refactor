@@ -72,9 +72,5 @@ class IndexRule(BaseModel):
     def matches(self, col: ColumnDef) -> bool:
         """Проверяет, подходит ли правило к колонке по by_type/by_name."""
         name_ok = self.by_name is None or col.name == self.by_name
-        type_ok = (
-            self.by_type is None
-            or col.type == self.by_type
-            or col.type.startswith(self.by_type + "(")
-        )
+        type_ok = self.by_type is None or col.type == self.by_type
         return name_ok and type_ok

@@ -47,9 +47,10 @@ class ColumnRule(BaseModel):
       - Незаданный матчер (None) считается совпавшим автоматически.
       - by_name без by_type запрещён (гарантируется в config/loader.py).
 
-    by_type поддерживает префиксный матч параметрических типов:
-      'Nullable'       → Nullable(String), Nullable(UInt32), ...
-      'LowCardinality' → LowCardinality(String), ...
+    by_type матчится строго по полной строке типа.
+    Примеры:
+      'LowCardinality(String)' совпадёт только с 'LowCardinality(String)'
+      'LowCardinality' не совпадёт с 'LowCardinality(String)'
     """
     alternatives: ColumnAlternatives
     by_type: Optional[str] = None
@@ -58,9 +59,5 @@ class ColumnRule(BaseModel):
     def matches(self, col: ColumnDef) -> bool:
         """Проверяет, подходит ли правило к конкретной колонке таблицы."""
         name_ok = self.by_name is None or col.name == self.by_name
-        type_ok = (
-            self.by_type is None
-            or col.type == self.by_type
-            or col.type.startswith(self.by_type + "(")
-        )
+        type_ok = self.by_type is None or col.type == self.by_type
         return name_ok and type_ok
