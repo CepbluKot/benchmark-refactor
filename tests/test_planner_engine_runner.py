@@ -1407,6 +1407,90 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         variant_tables = [job.variant_table for job in adapter.executed_jobs]
         self.assertEqual(len(variant_tables), len(set(variant_tables)))
 
+    def test_sequential_mode_uses_stage_limits_with_table_override(self) -> None:
+        """Проверяет, что sequential mode uses stage limits with table override."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_stage_limits_override",
+            connection_id="prod_ch",
+            mode="combined",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            sequential_top_n=1,
+            insert_rows_limit=999,
+            insert_rows_limits=InsertRowsLimitsConfig(
+                types=111,
+                indexes=222,
+                combined=444,
+                sequential=333,
+            ),
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                        codecs=["CODEC(Delta(8), LZ4)"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt32",
+                        by_name="user_id",
+                        indexes=[
+                            IndexConfig(type="minmax", granularity=4),
+                            IndexConfig(type="bloom_filter(0.01)", granularity=2),
+                        ],
+                    )
+                ],
+            ),
+            table_rules=[
+                TableRuleConfig(
+                    database="analytics",
+                    table="events",
+                    mode="sequential",
+                    insert_rows_limits=InsertRowsLimitsConfig(indexes=777),
+                )
+            ],
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}")],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = SequentialScoringAdapter()
+        result_store = InMemoryBenchmarkResultStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual(len(adapter.executed_jobs), 5)
+        self.assertTrue(
+            all(
+                job.insert_rows_limit == 111
+                for job in adapter.executed_jobs
+                if job.variant_meta.mode == "types"
+            )
+        )
+        self.assertTrue(
+            all(
+                job.insert_rows_limit == 777
+                for job in adapter.executed_jobs
+                if job.variant_meta.mode == "indexes"
+            )
+        )
+        self.assertTrue(
+            all(job.insert_rows_limit in {111, 777} for job in adapter.executed_jobs)
+        )
+
     def test_sequential_mode_stops_after_type_stage_when_top_variants_empty(self) -> None:
         """Проверяет, что sequential mode stops after type stage when top variants empty."""
         benchmark = BenchmarkConfig(

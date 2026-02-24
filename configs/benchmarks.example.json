@@ -37,6 +37,8 @@
       "max_iterations": 5,
       "insert_rows_limit": 5000000,
       "insert_rows_limits": {
+        "types": 900000,
+        "indexes": 350000,
         "combined": 5500000,
         "sequential": 1200000
       },
@@ -61,7 +63,8 @@
           "insert_rows_limit": 250000,
           "insert_rows_limits": {
             "types": 300000,
-            "indexes": 120000
+            "indexes": 120000,
+            "sequential": 180000
           },
           "mode": "sequential",
           "rules": {

@@ -120,9 +120,11 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
    - сразу сохраняет результат в `result_store.store_result(job, result)`.
 3. Для `mode == "sequential"` используется `SequentialTopNTableExecutionStrategy`:
    - Stage A: прогоняет только `types`-варианты;
+   - для Stage A лимит вставки берётся из `insert_rows_limits.types` (если задан);
    - сохраняет score/DDL type-этапа в result-store;
    - выбирает top-N (`sequential_top_n`) через `result_store.get_top_type_variants(...)`;
    - Stage B: для DDL лучших type-вариантов прогоняет `indexes`-варианты;
+   - для Stage B лимит вставки берётся из `insert_rows_limits.indexes` (если задан);
    - сохраняет index-результаты в result-store.
 
 `run(...)` больше не возвращает массив результатов, а возвращает только `benchmark_run_id`.
@@ -493,6 +495,10 @@ Data + metrics:
 При наличии `insert_rows_limits` в конфиге лимит выбирается по mode/stage
 (`types`, `indexes`, `combined`, `sequential`) и только затем применяется fallback
 на `insert_rows_limit`.
+Для `mode="sequential"` это даёт отдельные stage-лимиты без изменения интерфейса:
+- этап типов/кодеков (`variant_meta.mode="types"`) -> `insert_rows_limits.types`;
+- этап индексов (`variant_meta.mode="indexes"`) -> `insert_rows_limits.indexes`;
+- если stage-ключ не задан, fallback: `insert_rows_limits.sequential`, затем `insert_rows_limit`.
 
 ### Result store
 
@@ -646,6 +652,8 @@ Data + metrics:
 2. `configs/connections.example.json`
 3. `configs/rule_banks.example.json`
 4. `configs/benchmarks.example.json`
+   Включает пример `sequential` с отдельными `insert_rows_limits.types` и
+   `insert_rows_limits.indexes`, а также table-level override для конкретной таблицы.
 5. `configs/rule_banks.clickhouse_baseline.json`  
    Отдельный большой универсальный baseline bank для ClickHouse (только `by_type`).
 6. `configs/benchmark.project.example.json`  
@@ -694,3 +702,30 @@ run_id = runner.run()
     - `insert_rows_limits[variant_meta.mode]`;
     - затем `insert_rows_limits[job.mode]`;
     - затем fallback `insert_rows_limit`.
+15. Для `mode="sequential"` можно управлять лимитами этапов отдельно, без новых полей в JSON:
+
+```json
+{
+  "mode": "sequential",
+  "insert_rows_limit": 1000000,
+  "insert_rows_limits": {
+    "types": 800000,
+    "indexes": 300000,
+    "sequential": 500000
+  },
+  "table_rules": [
+    {
+      "database": "analytics",
+      "table": "user_events",
+      "mode": "sequential",
+      "insert_rows_limits": {
+        "indexes": 120000
+      }
+    }
+  ]
+}
+```
+
+Для примера выше:
+- для всех таблиц в `sequential`: type-stage = `800000`, index-stage = `300000`;
+- для `analytics.user_events`: index-stage переопределён в `120000`, type-stage остаётся `800000`.
