@@ -72,200 +72,68 @@
 <a id="layers"></a>
 ## Слои системы (человеческим языком)
 
-Ниже не про “академическую архитектуру”, а про то, как реально движутся данные.
+Ниже не “академическая архитектура”, а реальный путь данных от JSON до результата.
 
-### Слой 1. Описание формата конфига
+### Визуальная схема потока
 
-Что делает:
-1. Описывает все поля JSON и правила валидации.
-2. Отсекает кривые значения на входе.
+```mermaid
+flowchart LR
+    A["JSON конфиги<br/>connections/rule_banks/benchmarks/celery"] --> B["models.py<br/>валидация полей"]
+    B --> C["loader.py<br/>сборка BenchmarkRootConfig"]
+    C --> D["BenchmarkPlanner<br/>selectors + merge override + rules"]
+    D --> E["BenchmarkEngine<br/>TableBenchmarkPlan -> VariantJob"]
+    E --> F["BenchmarkRunner<br/>выбор TableExecutionStrategy"]
+    F --> G["BenchmarkExecutionAdapter<br/>реальный SQL запуск"]
+    G --> H["BenchmarkResultStore<br/>store_result + top-N"]
 
-Где:
-1. `src/models.py`
+    D -. metadata .-> M["MetadataProvider"]
+    D -. rule resolving .-> R["resolver.py"]
+    E -. variant generation .-> V["variant_generation/*<br/>+ combiner.py facade"]
+    F -. run id .-> I["BenchmarkRunIdProvider"]
+    H -. sequential top-N .-> F
+```
 
-На входе:
-1. Сырые JSON-объекты.
+### Слои по порядку
 
-На выходе:
-1. Валидные Pydantic-модели (`BenchmarkConfig`, `BenchmarkRootConfig` и др.).
+1. Контракт конфигов (`src/models.py`):
+Фиксирует структуру JSON и валидирует значения до запуска.
 
-### Слой 2. Сборка конфига из файлов/секций
+2. Сборка root-конфига (`src/loader.py`, `validate_json_config.py`):
+Склеивает секции и проверяет кросс-ссылки (`connection_id`, `rule_bank`, `default_rule_banks`).
 
-Что делает:
-1. Склеивает `connections/rule_banks/benchmarks/celery`.
-2. Проверяет ссылки между секциями (`connection_id`, `rule_bank`, `default_rule_banks`).
+3. Резолв правил (`src/resolver.py`):
+Собирает итоговые правила из global/table override, bank и inline.
 
-Где:
-1. `src/loader.py`
-2. `validate_json_config.py` (CLI-проверка)
-3. `settings.py` + `main.py` (вариант через env base64)
+4. Метаданные (`src/benchmark_runtime/contracts/metadata.py` + implementations):
+Дает список БД/таблиц, исходный DDL и размеры колонок (если нужны).
 
-На входе:
-1. `benchmark.project.json` или 4 JSON-секции.
+5. Планирование таблиц (`TableSelector`, `BenchmarkPlanner` в `src/benchmark_engine.py`):
+Раскрывает selectors и строит `TableBenchmarkPlan` с effective `strategy`, лимитами и queries.
 
-На выходе:
-1. Готовый `BenchmarkRootConfig`.
+6. Генерация DDL-вариантов (`src/variant_generation/*`, фасад `src/combiner.py`):
+По внутреннему mode (`types/indexes/combined/sequential`) выдает `(variant_ddl, VariantMeta)` и `total_variants`.
 
-### Слой 3. Резолвинг правил
+7. Подготовка execution jobs (`BenchmarkEngine`):
+Делает `VariantJob`, рендерит SQL с variant-таблицей и вычисляет итоговый `insert_rows_limit`.
 
-Что делает:
-1. Сливает global + table override.
-2. Подтягивает `rule_bank` и `default_rule_banks`.
-3. Превращает config-правила в runtime-правила генератора.
+8. Оркестрация выполнения (`BenchmarkRunner` + `TableExecutionStrategy`):
+Выбирает table strategy по `benchmark.strategy`.
+Для `sequential_topn_strategy` запускает 2 стадии: `types -> top-N -> indexes`.
 
-Где:
-1. `src/resolver.py`
+9. Фактическое выполнение SQL (`BenchmarkExecutionAdapter`):
+Создает/запускает варианты и возвращает `BenchmarkVariantResult` (score + payload).
 
-На входе:
-1. `RulesConfig` + DBMS + режимы источника правил.
+10. Хранилище результатов (`BenchmarkResultStore`):
+Сразу сохраняет каждый результат и отдает top type-варианты для sequential стадии индексов.
 
-На выходе:
-1. `ResolvedRules` (`column_rules`, `index_rules`, `column_order`).
+11. Управление run-id (`BenchmarkRunIdProvider`):
+Выдает единый `benchmark_run_id` на весь запуск.
 
-### Слой 4. Получение метаданных из источника
+### Главное о границах ответственности
 
-Что делает:
-1. Дает список БД/таблиц.
-2. Возвращает исходный DDL таблицы.
-3. Опционально возвращает размеры колонок для `column_order_mode="compressed_size_desc"`.
-
-Где:
-1. Контракт: `src/benchmark_runtime/contracts/metadata.py`
-2. Реализация под fetcher: `src/benchmark_runtime/implementations/fetcher/metadata.py`
-3. Demo-реализации: `main.py`, `examples/*`
-
-На входе:
-1. `connection_id`, `database`, `table`.
-
-На выходе:
-1. `TableDDL` и metadata для планирования.
-
-### Слой 5. Планирование по таблицам
-
-Что делает:
-1. Раскрывает selectors (`databases`, `tables`).
-2. Для каждой таблицы собирает единый план с override.
-3. Вшивает `strategy`, внутренний `mode`, лимиты, queries, celery.
-
-Где:
-1. `TableSelector` и `BenchmarkPlanner` в `src/benchmark_engine.py`
-
-На входе:
-1. `BenchmarkRootConfig` + `MetadataProvider`.
-
-На выходе:
-1. Поток `TableBenchmarkPlan`.
-
-### Слой 6. Генерация вариантов DDL
-
-Что делает:
-1. Генерирует DDL-варианты по mode (`types`, `indexes`, `combined`, `sequential`).
-2. Считает `total_variants`.
-
-Где:
-1. `src/variant_generation/contracts/` и `src/variant_generation/implementations/`
-2. `src/variant_generation/registry.py`
-3. `src/combiner.py` (backward-compatible фасад)
-4. Доменные генераторы: `src/column_variants.py`, `src/index_variants.py`
-
-На входе:
-1. `TableDDL` + runtime rules + mode.
-
-На выходе:
-1. `(variant_ddl, VariantMeta)`.
-
-### Слой 7. Сборка job-ов для исполнения
-
-Что делает:
-1. Превращает variant DDL в `VariantJob`.
-2. Рендерит SQL-запросы с именем variant-таблицы.
-3. Вычисляет итоговый `insert_rows_limit` по приоритету.
-
-Где:
-1. `BenchmarkEngine` в `src/benchmark_engine.py`
-2. `src/query_generator.py`
-3. `src/naming.py`
-
-На входе:
-1. `TableBenchmarkPlan` + source DDL + варианты из combiner.
-
-На выходе:
-1. Поток `VariantJob`.
-
-### Слой 8. Оркестрация исполнения
-
-Что делает:
-1. Берет `TableBenchmarkPlan` и выбирает table strategy по `strategy`.
-2. Для `types_strategy/indexes_strategy/combined_strategy` просто прогоняет jobs.
-3. Для `sequential_topn_strategy` делает 2 стадии: types -> top-N -> indexes.
-
-Где:
-1. `BenchmarkRunner` в `src/benchmark_engine.py`
-2. Контракт стратегии: `src/benchmark_runtime/contracts/table_strategy.py`
-3. Реализации: `src/benchmark_runtime/implementations/table_strategy/*`
-
-На входе:
-1. `TableBenchmarkPlan`.
-
-На выходе:
-1. Вызовы execution adapter + сохраненные результаты.
-
-### Слой 9. Фактическое выполнение SQL
-
-Что делает:
-1. Создает variant-таблицу.
-2. Копирует данные, гоняет warmup/test.
-3. Считает `score`.
-
-Где:
-1. Контракт: `src/benchmark_runtime/contracts/execution.py`
-2. Встроенный demo: `src/benchmark_runtime/implementations/noop/execution.py`
-3. Реальный прод-адаптер — ваша реализация.
-
-На входе:
-1. `VariantJob`.
-
-На выходе:
-1. `BenchmarkVariantResult`.
-
-### Слой 10. Хранилище результатов и top-N
-
-Что делает:
-1. Сохраняет результат каждого варианта сразу (без большого списка в памяти).
-2. Возвращает `top type variants` для sequential index-стадии.
-
-Где:
-1. Контракт: `src/benchmark_runtime/contracts/result_store.py`
-2. In-memory: `src/benchmark_runtime/implementations/inmemory/result_store.py`
-
-На входе:
-1. `VariantJob` + `BenchmarkVariantResult`.
-
-На выходе:
-1. Персистентные записи + top-N выборки.
-
-### Слой 11. Run ID и запуск run-а
-
-Что делает:
-1. Выдает единый `benchmark_run_id` на весь запуск.
-2. Позволяет serial запуск в памяти или от `max(existing_id)+1`.
-
-Где:
-1. Контракт: `src/benchmark_runtime/contracts/run_id.py`
-2. Реализации: `src/benchmark_runtime/implementations/inmemory/run_id.py`, `src/benchmark_runtime/implementations/run_id/max_id.py`
-
-На входе:
-1. Сигнал запуска.
-
-На выходе:
-1. Корректный `benchmark_run_id`.
-
-### Что важно помнить про слои
-
-1. `combiner` отвечает только за генерацию вариантов, не за исполнение и не за score.
-2. `runner` отвечает за оркестрацию исполнения, в том числе за sequential top-N.
+1. `variant_generation`/`combiner` только генерирует варианты, не исполняет их.
+2. `BenchmarkRunner` управляет порядком исполнения и sequential top-N.
 3. Контракты и реализации разделены: `contracts/` и `implementations/`.
-4. Старые импорты сохранены через re-export, чтобы не ломать совместимость.
 
 <a id="checklist"></a>
 ## Чек-лист перед первым запуском
