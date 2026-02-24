@@ -951,6 +951,73 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             adapter.executed_jobs[0].variant_table,
         )
         self.assertEqual(result_store.records[0].score, 1.0)
+        self.assertEqual(
+            result_store.records[0].variant_params["mode"],
+            adapter.executed_jobs[0].variant_meta.mode,
+        )
+        self.assertEqual(
+            result_store.records[0].variant_params["global_index"],
+            adapter.executed_jobs[0].variant_meta.global_index,
+        )
+        self.assertIn("column_choices", result_store.records[0].variant_params)
+        self.assertTrue(
+            result_store.records[0].tested_table_ddl.startswith("CREATE TABLE")
+        )
+
+    def test_result_store_prefers_worker_variant_params_and_ddl_when_provided(self) -> None:
+        """Проверяет, что result store сохраняет worker-side variant params/DDL."""
+        benchmark = BenchmarkConfig(
+            id="bench_result_store_worker_params",
+            connection_id="prod_ch",
+            strategy="types_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            global_rules=RulesConfig(
+                column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        job = next(engine.iter_variant_jobs())
+        store = InMemoryBenchmarkResultStore()
+
+        store.store_result(
+            job,
+            BenchmarkVariantResult(
+                benchmark_run_id=job.benchmark_run_id,
+                benchmark_id=job.benchmark_id,
+                source_database=job.source_database,
+                source_table=job.source_table,
+                variant_table=job.variant_table,
+                variant_index=job.variant_meta.global_index,
+                variant_params={"worker_variant_key": "worker_variant_value"},
+                source_table_ddl="CREATE TABLE analytics.events (...)",
+                tested_table_ddl="CREATE TABLE analytics.events__v (...)",
+                score=0.42,
+            ),
+        )
+
+        self.assertEqual(len(store.records), 1)
+        row = store.records[0]
+        self.assertEqual(row.source_db_name, "analytics")
+        self.assertEqual(row.source_table_name, "events")
+        self.assertIsNotNone(row.id)
+        self.assertEqual(
+            row.variant_params,
+            {"worker_variant_key": "worker_variant_value"},
+        )
+        self.assertEqual(
+            row.source_table_ddl,
+            "CREATE TABLE analytics.events (...)",
+        )
+        self.assertEqual(
+            row.tested_table_ddl,
+            "CREATE TABLE analytics.events__v (...)",
+        )
 
     def test_runner_allows_missing_result_store_for_non_sequential_strategies(self) -> None:
         """Проверяет, что result_store опционален для non-sequential стратегий."""

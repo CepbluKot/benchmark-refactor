@@ -27,6 +27,7 @@ from .types import (
     TableTarget,
     TopTypeVariant,
     VariantJob,
+    build_variant_params,
 )
 
 __all__ = [
@@ -55,4 +56,5 @@ __all__ = [
     "TableTarget",
     "TopTypeVariant",
     "VariantJob",
+    "build_variant_params",
 ]

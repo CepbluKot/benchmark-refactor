@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -40,6 +41,7 @@ from src.benchmark_runtime.types import (
     TableBenchmarkPlan,
     TopTypeVariant,
     VariantJob,
+    build_variant_params,
 )
 from src.clickhouse_ddl import TableDDL
 from src.column_rules import ColumnRule
@@ -210,11 +212,28 @@ class DebugResultStore(BenchmarkResultStore):
             benchmark_run_id=job.benchmark_run_id,
             benchmark_started_at=job.benchmark_started_at,
             benchmark_id=job.benchmark_id,
-            source_database=job.source_database,
-            source_table=job.source_table,
+            source_db_name=job.source_database,
+            source_table_name=job.source_table,
             variant_table=job.variant_table,
             variant_index=job.variant_meta.global_index,
             variant_mode=job.variant_meta.mode,
+            variant_params=(
+                dict(result.variant_params)
+                if result.variant_params
+                else build_variant_params(job.variant_meta)
+            ),
+            source_table_ddl=result.source_table_ddl,
+            tested_table_ddl=result.tested_table_ddl or job.variant_ddl.to_ddl(),
+            index_params=json.dumps(
+                (
+                    dict(result.variant_params)
+                    if result.variant_params
+                    else build_variant_params(job.variant_meta)
+                ).get("index_choices", {}),
+                ensure_ascii=False,
+                default=str,
+            ),
+            extra_json=json.dumps(dict(result.payload), ensure_ascii=False, default=str),
             score=result.score,
             variant_ddl=job.variant_ddl.copy(),
             payload=dict(result.payload),

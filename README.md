@@ -208,6 +208,13 @@ Runner не пишет результаты в store. Сохранение вы�
 `VariantJob` + `BenchmarkVariantResult`.
 Что уходит:
 Сохраненные записи и выборки top type-вариантов.
+Что именно сохраняется в `StoredBenchmarkResult`:
+- run-метаданные: `benchmark_run_id`, `benchmark_started_at`, `benchmark_id`;
+- идентификация таблицы: `source_db_name`, `source_table_name`, `variant_table`;
+- параметры варианта: `variant_mode`, `variant_index`, `variant_params`;
+- DDL-снимки: `tested_table_ddl` (как минимум), при наличии `source_table_ddl`;
+- метрики combined-схемы (insert/select/compression/indexes) + `extra_json` для расширений;
+- итог: `score` и `payload` (runtime-поля, исключаются из сериализации модели в БД по умолчанию).
 
 11. Управление run-id (`BenchmarkRunIdProvider`).
 Что это:
