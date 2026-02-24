@@ -47,6 +47,7 @@ from src.clickhouse_ddl import TableDDL
 from src.column_rules import ColumnRule
 from src.index_rules import IndexRule
 from src.loader import parse_config_parts
+from src.naming import parse_variant_name
 from src.variant_generation import get_variant_generation_strategy, register_variant_generation_strategy
 from src.variant_generation.contracts import VariantGenerationStrategy
 from src.variant_generation.types import VariantMeta
@@ -141,13 +142,9 @@ class SyntheticExecutionAdapter(BenchmarkExecutionAdapter):
             source_database=job.source_database,
             source_table=job.source_table,
             variant_table=job.variant_table,
-            variant_index=job.variant_meta.global_index,
+            variant_mode=stage,
             score=score,
-            payload={
-                "stage": stage,
-                "mode": job.mode,
-                "indexes_count": len(job.variant_ddl.indexes),
-            },
+            tested_table_indexes_sizes=str(len(job.variant_ddl.indexes)),
         )
         if self._store is not None:
             # В проде это делает Celery-воркер; здесь сохраняем локально для дебага.
@@ -215,8 +212,7 @@ class DebugResultStore(BenchmarkResultStore):
             source_db_name=job.source_database,
             source_table_name=job.source_table,
             variant_table=job.variant_table,
-            variant_index=job.variant_meta.global_index,
-            variant_mode=job.variant_meta.mode,
+            variant_mode=result.variant_mode or job.variant_meta.mode,
             variant_params=(
                 dict(result.variant_params)
                 if result.variant_params
@@ -224,7 +220,8 @@ class DebugResultStore(BenchmarkResultStore):
             ),
             source_table_ddl=result.source_table_ddl,
             tested_table_ddl=result.tested_table_ddl or job.variant_ddl.to_ddl(),
-            index_params=json.dumps(
+            index_params=result.index_params
+            or json.dumps(
                 (
                     dict(result.variant_params)
                     if result.variant_params
@@ -233,10 +230,8 @@ class DebugResultStore(BenchmarkResultStore):
                 ensure_ascii=False,
                 default=str,
             ),
-            extra_json=json.dumps(dict(result.payload), ensure_ascii=False, default=str),
+            extra_json=result.extra_json,
             score=result.score,
-            variant_ddl=job.variant_ddl.copy(),
-            payload=dict(result.payload),
         )
         self._records.append(row)
 
@@ -266,17 +261,24 @@ class DebugResultStore(BenchmarkResultStore):
             key=lambda row: (
                 row.score is None,
                 -(row.score if row.score is not None else 0.0),
-                row.variant_index,
+                _variant_index_from_variant_table(row.variant_table),
             ),
         )
         return [
             TopTypeVariant(
-                variant_index=row.variant_index,
-                variant_ddl=row.variant_ddl.copy(),
+                variant_index=_variant_index_from_variant_table(row.variant_table),
+                variant_ddl=TableDDL.from_ddl(row.tested_table_ddl),
                 score=row.score,
             )
             for row in ranked[:top_n]
         ]
+
+
+def _variant_index_from_variant_table(name: str) -> int:
+    parsed = parse_variant_name(name)
+    if parsed is None:
+        return 0
+    return parsed[2]
 
 
 class DebugRunIdProvider(BenchmarkRunIdProvider):

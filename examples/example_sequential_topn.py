@@ -144,9 +144,8 @@ class SequentialTopNDemoAdapter(BenchmarkExecutionAdapter):
             source_database=job.source_database,
             source_table=job.source_table,
             variant_table=job.variant_table,
-            variant_index=job.variant_meta.global_index,
+            variant_mode=stage,
             score=score,
-            payload={"stage": stage},
         )
         if self._store is not None:
             # В проде это делает Celery-воркер; здесь сохраняем в demo-store.
@@ -214,8 +213,8 @@ def main() -> None:
         if row.benchmark_run_id == run_id and row.benchmark_id == "bench_sequential_topn"
     ]
 
-    type_results = [r for r in results if r.payload.get("stage") == "types"]
-    index_results = [r for r in results if r.payload.get("stage") == "indexes"]
+    type_results = [r for r in results if r.variant_mode == "types"]
+    index_results = [r for r in results if r.variant_mode == "indexes"]
     print(f"Run id: {run_id}")
     print(f"Всего результатов: {len(results)}")
     print(f"  type stage:  {len(type_results)}")

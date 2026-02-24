@@ -26,9 +26,9 @@ class NoopExecutionAdapter(BenchmarkExecutionAdapter):
             source_database=job.source_database,
             source_table=job.source_table,
             variant_table=job.variant_table,
-            variant_index=job.variant_meta.global_index,
+            variant_mode=job.variant_meta.mode,
             score=None,
-            payload={"status": "planned_only"},
+            extra_json='{"status":"planned_only"}',
         )
         if self._store is not None:
             self._store.store_result(job, result)

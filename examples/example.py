@@ -130,9 +130,9 @@ class DemoExecutionAdapter(BenchmarkExecutionAdapter):
             source_database=job.source_database,
             source_table=job.source_table,
             variant_table=job.variant_table,
-            variant_index=job.variant_meta.global_index,
+            variant_mode=job.variant_meta.mode,
             score=pseudo_score,
-            payload={"dry_run": True},
+            extra_json='{"dry_run":true}',
         )
         if self._store is not None:
             # В проде это делает Celery-воркер; здесь сохраняем в demo-store.
@@ -180,9 +180,7 @@ def main() -> None:
     print(f"Всего результатов: {len(run_results)}")
     print("Первые 3 score:")
     for result in run_results[:3]:
-        print(
-            f"  {result.variant_table}: score={result.score}, payload={result.payload}"
-        )
+        print(f"  {result.variant_table}: score={result.score}")
 
 
 if __name__ == "__main__":

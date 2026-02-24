@@ -133,11 +133,11 @@
 Ключевой формат хранения (`StoredBenchmarkResult`):
 
 1. run-метаданные: `benchmark_run_id`, `benchmark_started_at`, `benchmark_id`.
-2. таблица/вариант: `source_db_name`, `source_table_name`, `variant_table`, `variant_mode`, `variant_index`.
+2. таблица/вариант: `source_db_name`, `source_table_name`, `variant_table`, `variant_mode`.
 3. параметры варианта: `variant_params` (нормализованный JSON-словарь из `VariantMeta`).
 4. DDL-снимки: `tested_table_ddl` (обязательный), `source_table_ddl` (опциональный).
 5. extended combined-метрики: insert/select/compression/indexes поля + `extra_json`.
-6. итог: `score`, `payload`, плюс `variant_ddl` для внутренних top-N выборок.
+6. итог: `score`; для top-N DDL восстанавливается из `tested_table_ddl`.
 
 В `src/benchmark_runtime/types.py` есть helper `build_variant_params(...)`,
 который собирает стабильные параметры текущего варианта из `VariantMeta`.

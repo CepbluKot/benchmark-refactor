@@ -103,9 +103,8 @@ class RecordingExecutionAdapter(BenchmarkExecutionAdapter):
             source_database=job.source_database,
             source_table=job.source_table,
             variant_table=job.variant_table,
-            variant_index=job.variant_meta.global_index,
+            variant_mode=job.variant_meta.mode,
             score=1.0,
-            payload={"ok": True},
         )
         if self._store is not None:
             self._store.store_result(job, result)
@@ -135,13 +134,9 @@ class SequentialScoringAdapter(BenchmarkExecutionAdapter):
             source_database=job.source_database,
             source_table=job.source_table,
             variant_table=job.variant_table,
-            variant_index=job.variant_meta.global_index,
+            variant_mode=job.variant_meta.mode,
             score=score,
-            payload={
-                "stage": job.variant_meta.mode,
-                "user_id_type": user_id_type,
-                "indexes_count": len(job.variant_ddl.indexes),
-            },
+            tested_table_indexes_sizes=str(len(job.variant_ddl.indexes)),
         )
         if self._store is not None:
             self._store.store_result(job, result)
@@ -174,9 +169,9 @@ class AsyncSelfPersistingSequentialAdapter(BenchmarkExecutionAdapter):
             source_database=job.source_database,
             source_table=job.source_table,
             variant_table=job.variant_table,
-            variant_index=job.variant_meta.global_index,
+            variant_mode=job.variant_meta.mode,
             score=score,
-            payload={"persisted_by": "worker"},
+            extra_json='{"persisted_by":"worker"}',
         )
         # Эмулируем запись из воркера во внешнее хранилище.
         self._store.store_result(job, worker_result)
@@ -188,9 +183,9 @@ class AsyncSelfPersistingSequentialAdapter(BenchmarkExecutionAdapter):
             source_database=job.source_database,
             source_table=job.source_table,
             variant_table=job.variant_table,
-            variant_index=job.variant_meta.global_index,
             score=None,
-            payload={"status": "dispatched"},
+            variant_mode=job.variant_meta.mode,
+            extra_json='{"status":"dispatched"}',
         )
 
 
@@ -208,9 +203,9 @@ class AsyncDispatchOnlyAdapter(BenchmarkExecutionAdapter):
             source_database=job.source_database,
             source_table=job.source_table,
             variant_table=job.variant_table,
-            variant_index=job.variant_meta.global_index,
             score=None,
-            payload={"status": "dispatched"},
+            variant_mode=job.variant_meta.mode,
+            extra_json='{"status":"dispatched"}',
         )
 
 
@@ -807,7 +802,6 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                     source_database=job.source_database,
                     source_table=job.source_table,
                     variant_table=job.variant_table,
-                    variant_index=job.variant_meta.global_index,
                 ),
             )
 
@@ -823,7 +817,6 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                     source_database=job.source_database,
                     source_table=job.source_table,
                     variant_table=job.variant_table,
-                    variant_index=job.variant_meta.global_index,
                 ),
             )
 
@@ -836,7 +829,6 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                     source_database=job.source_database,
                     source_table=job.source_table,
                     variant_table=job.variant_table,
-                    variant_index=job.variant_meta.global_index,
                 ),
             )
 
@@ -870,7 +862,6 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                 source_database=jobs[0].source_database,
                 source_table=jobs[0].source_table,
                 variant_table=jobs[0].variant_table,
-                variant_index=jobs[0].variant_meta.global_index,
                 score=None,
             ),
         )
@@ -882,7 +873,6 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                 source_database=jobs[1].source_database,
                 source_table=jobs[1].source_table,
                 variant_table=jobs[1].variant_table,
-                variant_index=jobs[1].variant_meta.global_index,
                 score=10.0,
             ),
         )
@@ -993,7 +983,6 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                 source_database=job.source_database,
                 source_table=job.source_table,
                 variant_table=job.variant_table,
-                variant_index=job.variant_meta.global_index,
                 variant_params={"worker_variant_key": "worker_variant_value"},
                 source_table_ddl="CREATE TABLE analytics.events (...)",
                 tested_table_ddl="CREATE TABLE analytics.events__v (...)",
