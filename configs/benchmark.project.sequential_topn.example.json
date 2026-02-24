@@ -20,6 +20,10 @@
       "max_iterations": 20,
       "sequential_top_n": 2,
       "insert_rows_limit": 2000000,
+      "insert_rows_limits": {
+        "types": 2500000,
+        "indexes": 800000
+      },
       "global_rules": {
         "column_rules": [
           {
@@ -100,6 +104,10 @@
           "sequential_top_n": 1,
           "max_iterations": 12,
           "insert_rows_limit": 500000,
+          "insert_rows_limits": {
+            "types": 700000,
+            "indexes": 250000
+          },
           "rules": {
             "column_order": {
               "user_id": 1,

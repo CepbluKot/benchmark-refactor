@@ -10,6 +10,7 @@ Core orchestration слоя бенчмарка (planner -> engine -> runner).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,6 +24,7 @@ from models import (
     CeleryConfig,
     ColumnOrderMode,
     ConnectionConfig,
+    InsertRowsLimitsConfig,
     QueriesConfig,
     TableRuleConfig,
 )
@@ -70,6 +72,7 @@ class TableBenchmarkPlan(_FrozenModel):
       - global/table max_iterations,
       - global/table column_order_mode,
       - global/table insert_rows_limit,
+      - global/table insert_rows_limits,
       - global/table queries,
       - глобальный celery-конфиг запуска.
     """
@@ -83,6 +86,7 @@ class TableBenchmarkPlan(_FrozenModel):
     max_iterations: int
     sequential_top_n: int
     insert_rows_limit: Optional[int]
+    insert_rows_limits: Optional[InsertRowsLimitsConfig]
     column_order_mode: Optional[ColumnOrderMode]
     rules: ResolvedRules
     queries: QueriesConfig
@@ -101,6 +105,7 @@ class VariantJob(_FrozenModel):
     """
 
     benchmark_run_id: int
+    benchmark_started_at: datetime
     benchmark_id: str
     connection_id: str
     connection_dbms: str
@@ -126,6 +131,7 @@ class BenchmarkVariantResult(_FrozenModel):
     """
 
     benchmark_run_id: int
+    benchmark_started_at: Optional[datetime] = None
     benchmark_id: str
     source_database: str
     source_table: str
@@ -144,6 +150,7 @@ class StoredBenchmarkResult(_FrozenModel):
     """
 
     benchmark_run_id: int
+    benchmark_started_at: datetime
     benchmark_id: str
     source_database: str
     source_table: str
@@ -223,12 +230,20 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
             raise ValueError(
                 "result.benchmark_run_id не совпадает с job.benchmark_run_id"
             )
+        if (
+            result.benchmark_started_at is not None
+            and result.benchmark_started_at != job.benchmark_started_at
+        ):
+            raise ValueError(
+                "result.benchmark_started_at не совпадает с job.benchmark_started_at"
+            )
         if result.benchmark_id != job.benchmark_id:
             raise ValueError("result.benchmark_id не совпадает с job.benchmark_id")
 
         self._records.append(
             StoredBenchmarkResult(
                 benchmark_run_id=job.benchmark_run_id,
+                benchmark_started_at=job.benchmark_started_at,
                 benchmark_id=job.benchmark_id,
                 source_database=job.source_database,
                 source_table=job.source_table,
@@ -566,6 +581,12 @@ class BenchmarkPlanner:
                     if table_rule and table_rule.insert_rows_limit is not None
                     else benchmark.insert_rows_limit
                 )
+                insert_rows_limits = self._merge_insert_rows_limits(
+                    benchmark_insert_rows_limits=benchmark.insert_rows_limits,
+                    table_insert_rows_limits=(
+                        table_rule.insert_rows_limits if table_rule else None
+                    ),
+                )
                 column_order_mode = (
                     table_rule.column_order_mode
                     if table_rule and table_rule.column_order_mode is not None
@@ -587,6 +608,7 @@ class BenchmarkPlanner:
                     max_iterations=max_iterations,
                     sequential_top_n=sequential_top_n,
                     insert_rows_limit=insert_rows_limit,
+                    insert_rows_limits=insert_rows_limits,
                     column_order_mode=column_order_mode,
                     rules=resolved_rules,
                     queries=queries,
@@ -602,6 +624,18 @@ class BenchmarkPlanner:
         for table_rule in benchmark.table_rules:
             if table_rule.database == target.database and table_rule.table == target.table:
                 return table_rule
+        return None
+
+    @staticmethod
+    def _merge_insert_rows_limits(
+        benchmark_insert_rows_limits: Optional[InsertRowsLimitsConfig],
+        table_insert_rows_limits: Optional[InsertRowsLimitsConfig],
+    ) -> Optional[InsertRowsLimitsConfig]:
+        """Объединяет table-level mode-лимиты поверх benchmark-level mode-лимитов."""
+        if table_insert_rows_limits is not None:
+            return table_insert_rows_limits.merged_over(benchmark_insert_rows_limits)
+        if benchmark_insert_rows_limits is not None:
+            return benchmark_insert_rows_limits.model_copy(deep=True)
         return None
 
 
@@ -696,6 +730,7 @@ class BenchmarkEngine:
         variant_meta: VariantMeta,
         total_variants: int,
         benchmark_run_id: int,
+        benchmark_started_at: datetime,
         job_mode: Optional[BenchmarkMode] = None,
     ) -> VariantJob:
         """Собирает `VariantJob` из уже подготовленного variant DDL и meta."""
@@ -713,8 +748,15 @@ class BenchmarkEngine:
             table=variant_table,
         )
 
+        effective_insert_rows_limit = self.resolve_insert_rows_limit(
+            table_plan=table_plan,
+            variant_mode=variant_meta.mode,
+            job_mode=job_mode,
+        )
+
         return VariantJob(
             benchmark_run_id=benchmark_run_id,
+            benchmark_started_at=benchmark_started_at,
             benchmark_id=table_plan.benchmark_id,
             connection_id=table_plan.connection_id,
             connection_dbms=table_plan.connection_dbms,
@@ -724,17 +766,47 @@ class BenchmarkEngine:
             variant_meta=variant_meta,
             mode=job_mode if job_mode is not None else table_plan.mode,
             max_iterations=table_plan.max_iterations,
-            insert_rows_limit=table_plan.insert_rows_limit,
+            insert_rows_limit=effective_insert_rows_limit,
             total_variants=total_variants,
             variant_ddl=prepared_ddl,
             query_plan=rendered_query_plan,
             celery=table_plan.celery,
         )
 
+    @staticmethod
+    def resolve_insert_rows_limit(
+        table_plan: TableBenchmarkPlan,
+        variant_mode: str,
+        job_mode: Optional[BenchmarkMode] = None,
+    ) -> Optional[int]:
+        """
+        Возвращает итоговый лимит вставки строк для конкретного variant job.
+
+        Приоритет:
+          1) `insert_rows_limits[variant_mode]`;
+          2) `insert_rows_limits[job_mode or table_plan.mode]`;
+          3) `insert_rows_limit` (legacy/fallback).
+        """
+        mode_limits = table_plan.insert_rows_limits
+        if mode_limits is None:
+            return table_plan.insert_rows_limit
+
+        variant_mode_limit = mode_limits.for_mode(variant_mode)
+        if variant_mode_limit is not None:
+            return variant_mode_limit
+
+        effective_job_mode = job_mode if job_mode is not None else table_plan.mode
+        job_mode_limit = mode_limits.for_mode(effective_job_mode)
+        if job_mode_limit is not None:
+            return job_mode_limit
+
+        return table_plan.insert_rows_limit
+
     def iter_variant_jobs_for_table_plan(
         self,
         table_plan: TableBenchmarkPlan,
         benchmark_run_id: int = 1,
+        benchmark_started_at: Optional[datetime] = None,
     ) -> Iterator[VariantJob]:
         """
         Генерирует VariantJob для одного `TableBenchmarkPlan`.
@@ -742,6 +814,7 @@ class BenchmarkEngine:
         Для `sequential` здесь отдаётся только type/codec стадия.
         Индексная стадия зависит от score и оркестрируется в `BenchmarkRunner`.
         """
+        run_started_at = benchmark_started_at or datetime.now(timezone.utc)
         source_ddl, raw_query_plan = self.prepare_table_context(table_plan)
         effective_column_order = self.resolve_column_order(table_plan, source_ddl)
         variant_mode: BenchmarkMode = (
@@ -771,18 +844,22 @@ class BenchmarkEngine:
                 variant_meta=variant_meta,
                 total_variants=capped_total,
                 benchmark_run_id=benchmark_run_id,
+                benchmark_started_at=run_started_at,
             )
 
     def iter_variant_jobs(
         self,
         benchmark_ids: Optional[Sequence[str]] = None,
         benchmark_run_id: int = 1,
+        benchmark_started_at: Optional[datetime] = None,
     ) -> Iterator[VariantJob]:
         """Итерирует fully prepared задания на выполнение каждого варианта."""
+        run_started_at = benchmark_started_at or datetime.now(timezone.utc)
         for table_plan in self.iter_table_plans(benchmark_ids=benchmark_ids):
             yield from self.iter_variant_jobs_for_table_plan(
                 table_plan,
                 benchmark_run_id=benchmark_run_id,
+                benchmark_started_at=run_started_at,
             )
 
 
@@ -807,6 +884,7 @@ class NoopExecutionAdapter(BenchmarkExecutionAdapter):
         """Возвращает технический результат без фактического выполнения SQL."""
         return BenchmarkVariantResult(
             benchmark_run_id=job.benchmark_run_id,
+            benchmark_started_at=job.benchmark_started_at,
             benchmark_id=job.benchmark_id,
             source_database=job.source_database,
             source_table=job.source_table,
@@ -879,6 +957,7 @@ class TableExecutionStrategy(ABC):
         runner: "BenchmarkRunner",
         table_plan: TableBenchmarkPlan,
         benchmark_run_id: int,
+        benchmark_started_at: datetime,
     ) -> None:
         """Выполняет table_plan целиком и персистит результаты через runner."""
         pass
@@ -892,10 +971,12 @@ class DefaultTableExecutionStrategy(TableExecutionStrategy):
         runner: "BenchmarkRunner",
         table_plan: TableBenchmarkPlan,
         benchmark_run_id: int,
+        benchmark_started_at: datetime,
     ) -> None:
         runner._execute_regular_table(
             table_plan=table_plan,
             benchmark_run_id=benchmark_run_id,
+            benchmark_started_at=benchmark_started_at,
         )
 
 
@@ -912,6 +993,7 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
         runner: "BenchmarkRunner",
         table_plan: TableBenchmarkPlan,
         benchmark_run_id: int,
+        benchmark_started_at: datetime,
     ) -> None:
         source_ddl, raw_query_plan = runner._engine.prepare_table_context(table_plan)
         effective_column_order = runner._engine.resolve_column_order(
@@ -943,6 +1025,7 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
                 variant_meta=variant_meta,
                 total_variants=type_total,
                 benchmark_run_id=benchmark_run_id,
+                benchmark_started_at=benchmark_started_at,
                 job_mode="sequential",
             )
             runner._execute_and_store(job)
@@ -990,6 +1073,7 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
                     variant_meta=index_meta,
                     total_variants=index_total,
                     benchmark_run_id=benchmark_run_id,
+                    benchmark_started_at=benchmark_started_at,
                     job_mode="sequential",
                 )
                 runner._execute_and_store(index_job)
@@ -1009,6 +1093,7 @@ class BenchmarkRunner:
         execution_adapter: BenchmarkExecutionAdapter,
         result_store: BenchmarkResultStore,
         run_id_provider: Optional[BenchmarkRunIdProvider] = None,
+        run_started_at_provider: Optional[Callable[[], datetime]] = None,
         table_execution_strategies: Optional[Dict[str, TableExecutionStrategy]] = None,
         default_table_execution_strategy: Optional[TableExecutionStrategy] = None,
     ) -> None:
@@ -1017,6 +1102,10 @@ class BenchmarkRunner:
         self._execution_adapter = execution_adapter
         self._result_store = result_store
         self._run_id_provider = run_id_provider or InMemoryBenchmarkRunIdProvider()
+        self._run_started_at_provider = (
+            run_started_at_provider or (lambda: datetime.now(timezone.utc))
+        )
+        self._last_benchmark_started_at: Optional[datetime] = None
         self._default_table_execution_strategy = (
             default_table_execution_strategy or DefaultTableExecutionStrategy()
         )
@@ -1064,6 +1153,8 @@ class BenchmarkRunner:
         run_id = benchmark_run_id if benchmark_run_id is not None else self._next_run_id()
         if run_id <= 0:
             raise ValueError(f"benchmark_run_id должен быть > 0, получено: {run_id}")
+        run_started_at = self._next_run_started_at()
+        self._last_benchmark_started_at = run_started_at
 
         for table_plan in self._engine.iter_table_plans(benchmark_ids=benchmark_ids):
             strategy = self._table_execution_strategies.get(
@@ -1074,24 +1165,43 @@ class BenchmarkRunner:
                 runner=self,
                 table_plan=table_plan,
                 benchmark_run_id=run_id,
+                benchmark_started_at=run_started_at,
             )
         return run_id
+
+    @property
+    def last_benchmark_started_at(self) -> Optional[datetime]:
+        """Возвращает стартовое время последнего run-level запуска."""
+        return self._last_benchmark_started_at
 
     def _execute_regular_table(
         self,
         table_plan: TableBenchmarkPlan,
         benchmark_run_id: int,
+        benchmark_started_at: datetime,
     ) -> None:
         """Стандартное выполнение table-plan: прогон всех VariantJob из engine."""
         for job in self._engine.iter_variant_jobs_for_table_plan(
             table_plan,
             benchmark_run_id=benchmark_run_id,
+            benchmark_started_at=benchmark_started_at,
         ):
             self._execute_and_store(job)
 
     def _next_run_id(self) -> int:
         """Берёт следующий serial benchmark run id у configured provider."""
         return self._run_id_provider.next_benchmark_run_id()
+
+    def _next_run_started_at(self) -> datetime:
+        """
+        Возвращает start-time всего run в UTC.
+
+        Если provider вернул naive datetime, трактуем его как UTC.
+        """
+        started_at = self._run_started_at_provider()
+        if started_at.tzinfo is None:
+            return started_at.replace(tzinfo=timezone.utc)
+        return started_at.astimezone(timezone.utc)
 
     def _execute_and_store(self, job: VariantJob) -> None:
         """Выполняет вариант и сразу персистит результат в result-store."""

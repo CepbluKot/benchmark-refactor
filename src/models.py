@@ -187,6 +187,67 @@ class CeleryConfig(_Base):
     threads_per_worker: int = Field(default=2, gt=0)
 
 
+class InsertRowsLimitsConfig(_Base):
+    """
+    Лимиты копирования строк из source в variant по режимам бенчмарка.
+
+    Каждый ключ опционален:
+      - `types`
+      - `indexes`
+      - `combined`
+      - `sequential`
+      - любые дополнительные ключи для будущих mode.
+    """
+
+    model_config = {"extra": "allow"}
+
+    types: Optional[int] = Field(default=None, gt=0)
+    indexes: Optional[int] = Field(default=None, gt=0)
+    combined: Optional[int] = Field(default=None, gt=0)
+    sequential: Optional[int] = Field(default=None, gt=0)
+
+    def merged_over(self, base: Optional["InsertRowsLimitsConfig"]) -> "InsertRowsLimitsConfig":
+        """
+        Объединяет локальные mode-лимиты поверх базовых.
+
+        Локальное не-None значение перезаписывает соответствующий базовый ключ.
+        """
+        if base is None:
+            return self.model_copy(deep=True)
+        merged: Dict[str, int] = dict(base.model_extra or {})
+        merged.update(dict(self.model_extra or {}))
+        payload: Dict[str, Optional[int]] = {
+            "types": self.types if self.types is not None else base.types,
+            "indexes": self.indexes if self.indexes is not None else base.indexes,
+            "combined": self.combined if self.combined is not None else base.combined,
+            "sequential": self.sequential if self.sequential is not None else base.sequential,
+        }
+        payload.update(merged)
+        return InsertRowsLimitsConfig.model_validate(payload)
+
+    def for_mode(self, mode: str) -> Optional[int]:
+        """Возвращает лимит для конкретного mode или `None`, если не задан."""
+        if mode in {"types", "indexes", "combined", "sequential"}:
+            return getattr(self, mode)
+        return (self.model_extra or {}).get(mode)
+
+    @model_validator(mode="after")
+    def validate_future_mode_values(self) -> "InsertRowsLimitsConfig":
+        """
+        Проверяет, что дополнительные mode-ключи имеют целое значение > 0.
+
+        Это нужно, чтобы будущие mode работали так же строго, как встроенные.
+        """
+        for mode, value in (self.model_extra or {}).items():
+            if not mode or not mode.strip():
+                raise ValueError("ключ режима в insert_rows_limits не должен быть пустым")
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(
+                    f"insert_rows_limits[{mode!r}] должен быть целым числом > 0"
+                )
+        return self
+
+
 class TableRuleConfig(_Base):
     """
     Локальные override для конкретной таблицы `database.table`.
@@ -197,6 +258,7 @@ class TableRuleConfig(_Base):
       - max_iterations;
       - sequential_top_n;
       - insert_rows_limit;
+      - insert_rows_limits;
       - mode;
       - queries.
     """
@@ -209,6 +271,7 @@ class TableRuleConfig(_Base):
     max_iterations: Optional[int] = Field(default=None, gt=0)
     sequential_top_n: Optional[int] = Field(default=None, gt=0)
     insert_rows_limit: Optional[int] = Field(default=None, gt=0)
+    insert_rows_limits: Optional[InsertRowsLimitsConfig] = None
     mode: Optional[BenchmarkMode] = None
 
     @field_validator("database", "table")
@@ -255,6 +318,7 @@ class BenchmarkConfig(_Base):
       - ограничение по итерациям и режим комбинатора.
       - `sequential_top_n` для двухфазного режима sequential.
       - `insert_rows_limit` — сколько строк копировать из source-таблицы в variant.
+      - `insert_rows_limits` — лимиты копирования по конкретным mode.
     """
 
     id: str
@@ -269,6 +333,7 @@ class BenchmarkConfig(_Base):
     max_iterations: int = Field(default=100, gt=0)
     sequential_top_n: int = Field(default=1, gt=0)
     insert_rows_limit: Optional[int] = Field(default=None, gt=0)
+    insert_rows_limits: Optional[InsertRowsLimitsConfig] = None
     column_rules_mode: Optional[RuleSourceMode] = None
     index_rules_mode: Optional[RuleSourceMode] = None
     queries: QueriesConfig = Field(default_factory=QueriesConfig)

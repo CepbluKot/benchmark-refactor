@@ -6,6 +6,7 @@ from models import (
     BenchmarkConfig,
     BenchmarkProjectConfig,
     ColumnRuleConfig,
+    InsertRowsLimitsConfig,
     IndexConfig,
     IndexRuleConfig,
     QueriesConfig,
@@ -113,6 +114,71 @@ class ModelsValidationTests(unittest.TestCase):
                 database="analytics",
                 table="events",
                 insert_rows_limit=0,
+            )
+
+    def test_insert_rows_limits_by_mode_must_be_positive_when_set(self) -> None:
+        """Проверяет, что insert rows limits by mode must be positive when set."""
+        with self.assertRaises(ValidationError):
+            BenchmarkConfig(
+                id="bench",
+                connection_id="conn",
+                mode="types",
+                databases=["analytics"],
+                tables=["events"],
+                global_rules=RulesConfig(
+                    column_rules=[
+                        ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
+                    ]
+                ),
+                insert_rows_limits=InsertRowsLimitsConfig(types=0),
+            )
+
+        with self.assertRaises(ValidationError):
+            TableRuleConfig(
+                database="analytics",
+                table="events",
+                insert_rows_limits=InsertRowsLimitsConfig(indexes=0),
+            )
+
+    def test_insert_rows_limits_accepts_future_mode_keys(self) -> None:
+        """Проверяет, что insert rows limits accepts future mode keys."""
+        bench = BenchmarkConfig.model_validate(
+            {
+                "id": "bench_future_insert_limits",
+                "connection_id": "conn",
+                "mode": "types",
+                "databases": ["analytics"],
+                "tables": ["events"],
+                "global_rules": {
+                    "column_rules": [{"by_type": "UInt64", "types": ["UInt64"]}]
+                },
+                "insert_rows_limits": {
+                    "types": 100,
+                    "future_mode_x": 55,
+                },
+            }
+        )
+        self.assertIsNotNone(bench.insert_rows_limits)
+        self.assertEqual(bench.insert_rows_limits.for_mode("types"), 100)
+        self.assertEqual(bench.insert_rows_limits.for_mode("future_mode_x"), 55)
+
+    def test_insert_rows_limits_rejects_invalid_future_mode_values(self) -> None:
+        """Проверяет, что insert rows limits rejects invalid future mode values."""
+        with self.assertRaises(ValidationError):
+            BenchmarkConfig.model_validate(
+                {
+                    "id": "bench_invalid_future_mode_limit",
+                    "connection_id": "conn",
+                    "mode": "types",
+                    "databases": ["analytics"],
+                    "tables": ["events"],
+                    "global_rules": {
+                        "column_rules": [{"by_type": "UInt64", "types": ["UInt64"]}]
+                    },
+                    "insert_rows_limits": {
+                        "future_mode_x": 0,
+                    },
+                }
             )
 
 

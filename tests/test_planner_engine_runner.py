@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timezone
 from typing import Dict, List
 
 from benchmark_engine import (
@@ -14,6 +15,7 @@ from benchmark_engine import (
     FetcherMetadataProvider,
     MetadataProvider,
     QueryPlanBuilder,
+    TableBenchmarkPlan,
     TopTypeVariant,
     TableSelector,
     VariantJob,
@@ -25,6 +27,7 @@ from models import (
     CeleryConfig,
     ColumnRuleConfig,
     ConnectionConfig,
+    InsertRowsLimitsConfig,
     IndexConfig,
     IndexRuleConfig,
     QueriesConfig,
@@ -33,6 +36,7 @@ from models import (
     TableRuleConfig,
     TestQueryConfig as QueryConfigItem,
 )
+from resolver import ResolvedRules
 
 
 EVENTS_DDL = """
@@ -135,8 +139,14 @@ class RecordingTableExecutionStrategy(TableExecutionStrategy):
     def __init__(self) -> None:
         self.calls: List[tuple[str, str, int]] = []
 
-    def execute_table(self, runner, table_plan, benchmark_run_id: int) -> None:
-        del runner
+    def execute_table(
+        self,
+        runner,
+        table_plan,
+        benchmark_run_id: int,
+        benchmark_started_at: datetime,
+    ) -> None:
+        del runner, benchmark_started_at
         self.calls.append((table_plan.benchmark_id, table_plan.table, benchmark_run_id))
 
 
@@ -216,6 +226,11 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             tables=["events"],
             max_iterations=10,
             insert_rows_limit=1_000_000,
+            insert_rows_limits=InsertRowsLimitsConfig(
+                types=400_000,
+                indexes=200_000,
+                combined=800_000,
+            ),
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -232,6 +247,10 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                     mode="sequential",
                     max_iterations=2,
                     insert_rows_limit=25_000,
+                    insert_rows_limits=InsertRowsLimitsConfig(
+                        indexes=50_000,
+                        sequential=70_000,
+                    ),
                     rules=RulesConfig(
                         column_rules=[
                             ColumnRuleConfig(
@@ -267,6 +286,11 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(plan.mode, "sequential")
         self.assertEqual(plan.max_iterations, 2)
         self.assertEqual(plan.insert_rows_limit, 25_000)
+        self.assertIsNotNone(plan.insert_rows_limits)
+        self.assertEqual(plan.insert_rows_limits.types, 400_000)
+        self.assertEqual(plan.insert_rows_limits.indexes, 50_000)
+        self.assertEqual(plan.insert_rows_limits.combined, 800_000)
+        self.assertEqual(plan.insert_rows_limits.sequential, 70_000)
         self.assertEqual(plan.queries.mode, "manual")
         self.assertEqual(plan.celery.workers, 9)
         self.assertEqual(plan.celery.threads_per_worker, 5)
@@ -424,6 +448,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             tables=["events"],
             max_iterations=1,
             insert_rows_limit=777,
+            insert_rows_limits=InsertRowsLimitsConfig(types=123),
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -453,9 +478,11 @@ class PlannerEngineRunnerTests(unittest.TestCase):
 
         job = jobs[0]
         self.assertEqual(job.benchmark_run_id, 1)
+        self.assertIsNotNone(job.benchmark_started_at)
+        self.assertEqual(job.benchmark_started_at.tzinfo, timezone.utc)
         self.assertEqual(job.total_variants, 1)
         self.assertEqual(job.variant_meta.global_index, 0)
-        self.assertEqual(job.insert_rows_limit, 777)
+        self.assertEqual(job.insert_rows_limit, 123)
         self.assertTrue(job.variant_table.startswith("events__bench__bench_types__"))
         self.assertEqual(job.variant_ddl.name, f"analytics.{job.variant_table}")
         self.assertIn(job.variant_table, job.query_plan.warmup_queries[0])
@@ -540,6 +567,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             databases=["analytics"],
             tables=["events"],
             max_iterations=2,
+            insert_rows_limits=InsertRowsLimitsConfig(indexes=222),
             global_rules=RulesConfig(
                 index_rules=[
                     IndexRuleConfig(
@@ -568,6 +596,57 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         second_indexes = [idx.expr for idx in jobs[1].variant_ddl.indexes]
         self.assertEqual(first_indexes, [])
         self.assertEqual(second_indexes, ["user_id"])
+        self.assertTrue(all(job.insert_rows_limit == 222 for job in jobs))
+
+    def test_engine_resolve_insert_rows_limit_supports_future_variant_modes(self) -> None:
+        """Проверяет, что engine resolve insert rows limit supports future variant modes."""
+        table_plan = TableBenchmarkPlan(
+            benchmark_id="bench_future_mode_limits",
+            connection_id="prod_ch",
+            connection_dbms="clickhouse",
+            database="analytics",
+            table="events",
+            mode="types",
+            max_iterations=1,
+            sequential_top_n=1,
+            insert_rows_limit=999,
+            insert_rows_limits=InsertRowsLimitsConfig.model_validate(
+                {
+                    "types": 111,
+                    "future_mode_x": 444,
+                }
+            ),
+            column_order_mode=None,
+            rules=ResolvedRules(
+                column_rules=[],
+                index_rules=[],
+                column_order={},
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[QueryConfigItem(query="SELECT 1 FROM {table}")],
+            ),
+            celery=CeleryConfig(workers=1, threads_per_worker=1),
+        )
+
+        # Извлекаем лимит для нового variant mode напрямую по ключу.
+        self.assertEqual(
+            BenchmarkEngine.resolve_insert_rows_limit(
+                table_plan=table_plan,
+                variant_mode="future_mode_x",
+                job_mode="types",
+            ),
+            444,
+        )
+        # Если ключа для variant mode нет — fallback на job mode.
+        self.assertEqual(
+            BenchmarkEngine.resolve_insert_rows_limit(
+                table_plan=table_plan,
+                variant_mode="unknown_variant_mode",
+                job_mode="types",
+            ),
+            111,
+        )
 
     def test_query_plan_builder_supports_auto_and_auto_with_manual(self) -> None:
         """Проверяет, что query plan builder supports auto and auto with manual."""
@@ -642,6 +721,22 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                 job,
                 BenchmarkVariantResult(
                     benchmark_run_id=job.benchmark_run_id + 1,
+                    benchmark_id=job.benchmark_id,
+                    source_database=job.source_database,
+                    source_table=job.source_table,
+                    variant_table=job.variant_table,
+                    variant_index=job.variant_meta.global_index,
+                ),
+            )
+
+        with self.assertRaisesRegex(ValueError, "benchmark_started_at"):
+            store.store_result(
+                job,
+                BenchmarkVariantResult(
+                    benchmark_run_id=job.benchmark_run_id,
+                    benchmark_started_at=job.benchmark_started_at.replace(
+                        hour=(job.benchmark_started_at.hour + 1) % 24
+                    ),
                     benchmark_id=job.benchmark_id,
                     source_database=job.source_database,
                     source_table=job.source_table,
@@ -766,6 +861,10 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(result_store.records[0].benchmark_run_id, 1)
         self.assertEqual(adapter.executed_jobs[0].benchmark_run_id, 1)
         self.assertEqual(
+            result_store.records[0].benchmark_started_at,
+            adapter.executed_jobs[0].benchmark_started_at,
+        )
+        self.assertEqual(
             result_store.records[0].variant_table,
             adapter.executed_jobs[0].variant_table,
         )
@@ -834,6 +933,66 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         run2_rows = [r for r in result_store.records if r.benchmark_run_id == 2]
         self.assertTrue(run1_rows)
         self.assertTrue(run2_rows)
+
+    def test_runner_assigns_single_run_start_time_per_run(self) -> None:
+        """Проверяет, что runner assigns single run start time per run."""
+        benchmark = BenchmarkConfig(
+            id="bench_run_started_at",
+            connection_id="prod_ch",
+            mode="types",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
+                ]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = RecordingExecutionAdapter()
+        result_store = InMemoryBenchmarkResultStore()
+
+        timestamps = iter(
+            [
+                datetime(2026, 2, 24, 10, 0, 0, tzinfo=timezone.utc),
+                datetime(2026, 2, 24, 10, 5, 0, tzinfo=timezone.utc),
+            ]
+        )
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+            run_started_at_provider=lambda: next(timestamps),
+        )
+
+        run1 = runner.run()
+        run1_jobs = list(adapter.executed_jobs)
+        run1_records = list(result_store.records)
+        run1_started_at = datetime(2026, 2, 24, 10, 0, 0, tzinfo=timezone.utc)
+
+        run2 = runner.run()
+        run2_jobs = adapter.executed_jobs[len(run1_jobs) :]
+        run2_records = result_store.records[len(run1_records) :]
+        run2_started_at = datetime(2026, 2, 24, 10, 5, 0, tzinfo=timezone.utc)
+
+        self.assertEqual(run1, 1)
+        self.assertEqual(run2, 2)
+        self.assertTrue(run1_jobs)
+        self.assertTrue(run2_jobs)
+        self.assertTrue(all(job.benchmark_started_at == run1_started_at for job in run1_jobs))
+        self.assertTrue(all(job.benchmark_started_at == run2_started_at for job in run2_jobs))
+        self.assertTrue(
+            all(record.benchmark_started_at == run1_started_at for record in run1_records)
+        )
+        self.assertTrue(
+            all(record.benchmark_started_at == run2_started_at for record in run2_records)
+        )
+        self.assertEqual(runner.last_benchmark_started_at, run2_started_at)
 
     def test_runner_executes_benchmarks_in_lexicographic_id_order(self) -> None:
         """Проверяет, что runner executes benchmarks in lexicographic id order."""
@@ -1162,6 +1321,12 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             tables=["events"],
             max_iterations=10,
             sequential_top_n=1,
+            insert_rows_limit=999,
+            insert_rows_limits=InsertRowsLimitsConfig(
+                types=111,
+                indexes=222,
+                sequential=333,
+            ),
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -1221,6 +1386,20 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             if job.variant_meta.mode == "indexes"
         ]
         self.assertEqual(indexed_job_types, ["UInt32", "UInt32", "UInt32"])
+        self.assertTrue(
+            all(
+                job.insert_rows_limit == 111
+                for job in adapter.executed_jobs
+                if job.variant_meta.mode == "types"
+            )
+        )
+        self.assertTrue(
+            all(
+                job.insert_rows_limit == 222
+                for job in adapter.executed_jobs
+                if job.variant_meta.mode == "indexes"
+            )
+        )
 
         global_indexes = [job.variant_meta.global_index for job in adapter.executed_jobs]
         self.assertEqual(global_indexes, [0, 1, 2, 3, 4])
@@ -1250,7 +1429,10 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                     IndexRuleConfig(
                         by_type="UInt32",
                         by_name="user_id",
-                        indexes=[IndexConfig(type="minmax", granularity=4)],
+                        indexes=[
+                            IndexConfig(type="minmax", granularity=4),
+                            IndexConfig(type="bloom_filter(0.01)", granularity=2),
+                        ],
                     )
                 ],
             ),
@@ -1279,6 +1461,57 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             [job.variant_meta.mode for job in adapter.executed_jobs],
             ["types", "types"],
         )
+
+    def test_sequential_mode_uses_sequential_insert_rows_limit_fallback(self) -> None:
+        """Проверяет, что sequential mode uses sequential insert rows limit fallback."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_insert_rows_fallback",
+            connection_id="prod_ch",
+            mode="sequential",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            sequential_top_n=1,
+            insert_rows_limit=777,
+            insert_rows_limits=InsertRowsLimitsConfig(sequential=555),
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt32",
+                        by_name="user_id",
+                        indexes=[IndexConfig(type="minmax", granularity=4)],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}")],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = SequentialScoringAdapter()
+        result_store = InMemoryBenchmarkResultStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual(len(adapter.executed_jobs), 4)
+        self.assertTrue(all(job.insert_rows_limit == 555 for job in adapter.executed_jobs))
 
 
 if __name__ == "__main__":

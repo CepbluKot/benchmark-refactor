@@ -16,6 +16,9 @@
       "tables": "*",
       "max_iterations": 3,
       "insert_rows_limit": 1000000,
+      "insert_rows_limits": {
+        "types": 1500000
+      },
       "queries": {
         "mode": "auto"
       }
@@ -38,6 +41,10 @@
       },
       "max_iterations": 5,
       "insert_rows_limit": 5000000,
+      "insert_rows_limits": {
+        "combined": 5500000,
+        "sequential": 1200000
+      },
       "global_rules": {
         "rule_bank": "aggressive_zstd"
       },
@@ -56,6 +63,10 @@
           "table": "user_events",
           "max_iterations": 2,
           "insert_rows_limit": 250000,
+          "insert_rows_limits": {
+            "types": 300000,
+            "indexes": 120000
+          },
           "mode": "sequential",
           "rules": {
             "column_rules": [

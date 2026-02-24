@@ -24,7 +24,7 @@ Python-движок для перебора вариантов DDL (типы/к�
    - сначала тестируются только варианты типов/кодеков;
    - потом из БД выбираются top-N лучших по `score`;
    - и только на этих лучших DDL дополнительно тестируются индексы.
-6. В конце у вас есть `benchmark_run_id` запуска и все результаты в БД, откуда можно сделать отчеты и выбрать лучший DDL для продакшена.
+6. В конце у вас есть `benchmark_run_id`, `benchmark_started_at` (время старта всего запуска) и все результаты в БД, откуда можно сделать отчеты и выбрать лучший DDL для продакшена.
 
 Коротко: это автоматический перебор и сравнение DDL-вариантов, чтобы не угадывать вручную, а опираться на реальные замеры.
 
@@ -87,6 +87,7 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
    - `max_iterations`;
    - `sequential_top_n`;
    - `insert_rows_limit`;
+   - `insert_rows_limits`;
    - `column_order_mode`;
    - `queries`;
    - глобальный `celery` из root-конфига.
@@ -112,6 +113,7 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
 0. Резолвит единый `benchmark_run_id` для всего запуска:
    - из аргумента `run(..., benchmark_run_id=...)`, либо
    - через `BenchmarkRunIdProvider.next_benchmark_run_id()`.
+   Одновременно выставляет единый `benchmark_started_at` (UTC datetime) для всего запуска.
 1. Для каждой таблицы выбирает `TableExecutionStrategy` по `table_plan.mode`.
 2. По умолчанию (`DefaultTableExecutionStrategy`):
    - запускает jobs через `execution_adapter.execute_variant(job)`;
@@ -124,6 +126,7 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
    - сохраняет index-результаты в result-store.
 
 `run(...)` больше не возвращает массив результатов, а возвращает только `benchmark_run_id`.
+Время старта текущего запуска доступно через `runner.last_benchmark_started_at`.
 
 Сортировка top-N:
 - больше `score` = лучше;
@@ -183,13 +186,13 @@ TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter
 ### 4.4 Модели benchmark-проекта
 
 1. `TableRuleConfig`
-   - поля: `database`, `table`, `rules`, `column_order_mode`, `queries`, `max_iterations`, `sequential_top_n`, `insert_rows_limit`, `mode`
+   - поля: `database`, `table`, `rules`, `column_order_mode`, `queries`, `max_iterations`, `sequential_top_n`, `insert_rows_limit`, `insert_rows_limits`, `mode`
    - метод: `non_empty_table_target(...)`
 2. `ConnectionConfig`
    - поля: `id`, `dbms`, `credential_type`, `host`, `port`, `login`, `password`
    - метод: `normalize_tokens(...)`
 3. `BenchmarkConfig`
-   - поля: `id`, `connection_id`, `mode`, `global_rules`, `column_rules_mode`, `index_rules_mode`, `column_order_mode`, `databases`, `tables`, `max_iterations`, `sequential_top_n`, `insert_rows_limit`, `queries`, `table_rules`
+   - поля: `id`, `connection_id`, `mode`, `global_rules`, `column_rules_mode`, `index_rules_mode`, `column_order_mode`, `databases`, `tables`, `max_iterations`, `sequential_top_n`, `insert_rows_limit`, `insert_rows_limits`, `queries`, `table_rules`
    - метод: `validate_selectors()`
    - режимы `column_rules_mode`/`index_rules_mode`:
      - `global_bank_only` — брать только правила из глобального bank;
@@ -482,10 +485,14 @@ Data + metrics:
 8. `StoredBenchmarkResult`
 9. `TopTypeVariant`
 
-`VariantJob` и `BenchmarkVariantResult` содержат `benchmark_run_id` (целое > 0),
-общее для всех benchmark'ов, выполняемых в рамках одного запуска конфига.
+`VariantJob` содержит run-level поля `benchmark_run_id` (целое > 0) и
+`benchmark_started_at` (UTC datetime), общие для всех benchmark'ов внутри
+одного запуска конфига. `StoredBenchmarkResult` сохраняет эти же run-level поля.
 `VariantJob.insert_rows_limit` задаёт лимит строк для копирования из source в variant
 перед замерами (если ваш execution adapter это поддерживает).
+При наличии `insert_rows_limits` в конфиге лимит выбирается по mode/stage
+(`types`, `indexes`, `combined`, `sequential`) и только затем применяется fallback
+на `insert_rows_limit`.
 
 ### Result store
 
@@ -531,9 +538,9 @@ Data + metrics:
 1. `__init__(planner, query_builder=None)`
 2. `iter_table_plans(benchmark_ids=None)`
 3. `prepare_table_context(table_plan)`
-4. `build_variant_job(table_plan, raw_query_plan, variant_ddl, variant_meta, total_variants, job_mode=None)`
-5. `iter_variant_jobs_for_table_plan(table_plan)`
-6. `iter_variant_jobs(benchmark_ids=None)`
+4. `build_variant_job(table_plan, raw_query_plan, variant_ddl, variant_meta, total_variants, benchmark_run_id, benchmark_started_at, job_mode=None)`
+5. `iter_variant_jobs_for_table_plan(table_plan, benchmark_run_id=1, benchmark_started_at=None)`
+6. `iter_variant_jobs(benchmark_ids=None, benchmark_run_id=1, benchmark_started_at=None)`
 
 ### Execution adapter
 
@@ -556,7 +563,7 @@ Data + metrics:
 ### Table execution strategy
 
 1. `TableExecutionStrategy`
-   - `execute_table(runner, table_plan, benchmark_run_id)`
+   - `execute_table(runner, table_plan, benchmark_run_id, benchmark_started_at)`
 2. `DefaultTableExecutionStrategy`
    - обычный проход `VariantJob` из `BenchmarkEngine`.
 3. `SequentialTopNTableExecutionStrategy`
@@ -564,12 +571,14 @@ Data + metrics:
 
 ### `BenchmarkRunner`
 
-1. `__init__(engine, execution_adapter, result_store, run_id_provider=None, table_execution_strategies=None, default_table_execution_strategy=None)`
+1. `__init__(engine, execution_adapter, result_store, run_id_provider=None, run_started_at_provider=None, table_execution_strategies=None, default_table_execution_strategy=None)`
 2. `run(benchmark_ids=None, benchmark_run_id=None)`
 3. `register_table_execution_strategy(mode, strategy, overwrite=False)`
 4. `_next_run_id()`
-5. `_execute_regular_table(table_plan, benchmark_run_id)`
-6. `_execute_and_store(job)`
+5. `_next_run_started_at()`
+6. `last_benchmark_started_at` (property)
+7. `_execute_regular_table(table_plan, benchmark_run_id, benchmark_started_at)`
+8. `_execute_and_store(job)`
 
 ### Расширение режимов
 
@@ -681,3 +690,7 @@ run_id = runner.run()
     - `NoopExecutionAdapter` -> рабочий adapter с реальными замерами.
 12. Если выбран `global_bank_only` или `global_bank_with_inline_priority`, должен быть доступен глобальный bank (`global_rules.rule_bank` или `default_rule_banks` для текущего DBMS), иначе planner завершится с ошибкой.
 13. `insert_rows_limit` можно задать на benchmark-уровне и переопределить в `table_rules`; итоговое значение передаётся в `VariantJob` и используется вашим execution adapter для `INSERT ... SELECT ... LIMIT N`.
+14. `insert_rows_limits` позволяет задать разные лимиты для `types`/`indexes`/`combined`/`sequential` и для будущих custom-mode ключей. Приоритет вычисления лимита для job:
+    - `insert_rows_limits[variant_meta.mode]`;
+    - затем `insert_rows_limits[job.mode]`;
+    - затем fallback `insert_rows_limit`.
