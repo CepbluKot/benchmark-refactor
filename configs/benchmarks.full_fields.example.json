@@ -41,6 +41,7 @@
         }
       },
       "column_order_mode": "compressed_size_desc",
+      "test_database": "benchmark_tmp",
       "databases": [
         "analytics",
         "marketing"
@@ -85,6 +86,7 @@
         {
           "database": "analytics",
           "table": "user_events",
+          "test_database": "benchmark_tmp_user_events",
           "rules": {
             "rule_bank": "clickhouse_universal_baseline",
             "column_rules": [

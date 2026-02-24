@@ -163,7 +163,7 @@ JSON-секции или `benchmark.project.json`.
 Что приходит:
 `TableBenchmarkPlan`, варианты DDL, query-настройки.
 Что уходит:
-`VariantJob` с SQL-запросами, именем variant-таблицы и итоговым `insert_rows_limit`.
+`VariantJob` с SQL-запросами, именем variant-таблицы, `variant_database` и итоговым `insert_rows_limit`.
 
 8. Оркестрация выполнения (`BenchmarkRunner` + `TableExecutionStrategy`).
 Что это:
@@ -331,6 +331,7 @@ Runner не пишет результаты в store. Сохранение вы�
       "strategy": "sequential_topn_strategy",
       "databases": ["analytics"],
       "tables": ["events"],
+      "test_database": "benchmark_tmp",
       "max_iterations": 20,
       "sequential_top_n": 2,
       "insert_rows_limit": 1000000,
@@ -546,11 +547,20 @@ print(run_id)
 Главные поля benchmark:
 - `id`, `connection_id`, `strategy`
 - `databases`, `tables`
+- `test_database` (опционально: отдельная БД для variant-таблиц)
 - `global_rules`, `table_rules`
 - `max_iterations`, `sequential_top_n`
 - `insert_rows_limit`, `insert_rows_limits`
 - `queries`
 - `column_rules_mode`, `index_rules_mode`
+
+`table_rules[]` может локально переопределить:
+- `test_database`
+- `strategy`
+- `rules`
+- `queries`
+- `max_iterations`, `sequential_top_n`
+- `insert_rows_limit`, `insert_rows_limits`
 
 `strategy`:
 - `types_strategy`

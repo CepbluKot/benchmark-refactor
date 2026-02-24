@@ -7,6 +7,7 @@
       "column_rules_mode": "inline_only",
       "index_rules_mode": "inline_only",
       "column_order_mode": "compressed_size_desc",
+      "test_database": "benchmark_tmp",
       "databases": [
         "analytics"
       ],
@@ -39,6 +40,7 @@
         {
           "database": "analytics",
           "table": "user_events",
+          "test_database": "benchmark_tmp_user_events",
           "max_iterations": 22,
           "sequential_top_n": 3,
           "insert_rows_limit": 250000,

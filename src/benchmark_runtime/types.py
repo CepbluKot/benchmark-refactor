@@ -58,6 +58,7 @@ class TableBenchmarkPlan(_FrozenModel):
     connection_id: str
     connection_dbms: str
     database: str
+    test_database: Optional[str] = None
     table: str
     strategy: BenchmarkStrategy
     mode: BenchmarkMode
@@ -80,6 +81,7 @@ class VariantJob(_FrozenModel):
     connection_id: str
     connection_dbms: str
     source_database: str
+    variant_database: str
     source_table: str
     variant_table: str
     variant_meta: VariantMeta

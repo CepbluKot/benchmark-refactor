@@ -300,6 +300,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="combined_strategy",
             databases=["analytics"],
             tables=["events"],
+            test_database="bench_global",
             max_iterations=10,
             insert_rows_limit=1_000_000,
             insert_rows_limits=InsertRowsLimitsConfig(
@@ -320,6 +321,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                 TableRuleConfig(
                     database="analytics",
                     table="events",
+                    test_database="bench_events",
                     strategy="sequential_topn_strategy",
                     max_iterations=2,
                     insert_rows_limit=25_000,
@@ -360,6 +362,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
 
         plan = table_plans[0]
         self.assertEqual(plan.mode, "sequential")
+        self.assertEqual(plan.test_database, "bench_events")
         self.assertEqual(plan.max_iterations, 2)
         self.assertEqual(plan.insert_rows_limit, 25_000)
         self.assertIsNotNone(plan.insert_rows_limits)
@@ -559,12 +562,56 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(job.total_variants, 1)
         self.assertEqual(job.variant_meta.global_index, 0)
         self.assertEqual(job.insert_rows_limit, 123)
+        self.assertEqual(job.variant_database, "analytics")
         self.assertTrue(job.variant_table.startswith("events__bench__bench_types__"))
         self.assertEqual(job.variant_ddl.name, f"analytics.{job.variant_table}")
         self.assertIn(job.variant_table, job.query_plan.warmup_queries[0])
         self.assertIn(job.variant_table, job.query_plan.test_queries[0].query)
         self.assertNotIn("{table}", job.query_plan.warmup_queries[0])
         self.assertNotIn("{table}", job.query_plan.test_queries[0].query)
+
+    def test_engine_uses_test_database_for_variant_tables_and_queries(self) -> None:
+        """Проверяет, что engine использует test_database для variant-таблиц."""
+        benchmark = BenchmarkConfig(
+            id="bench_test_database",
+            connection_id="prod_ch",
+            strategy="types_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            test_database="bench_tmp",
+            max_iterations=1,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    )
+                ]
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                warmup_queries=["SELECT 1 FROM {table}"],
+                test_queries=[
+                    QueryConfigItem(query="SELECT count() FROM {table}", weight=1.0)
+                ],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+
+        jobs = list(engine.iter_variant_jobs())
+        self.assertEqual(len(jobs), 1)
+
+        job = jobs[0]
+        self.assertEqual(job.source_database, "analytics")
+        self.assertEqual(job.variant_database, "bench_tmp")
+        self.assertEqual(job.variant_ddl.name, f"bench_tmp.{job.variant_table}")
+        self.assertIn("`bench_tmp`.", job.query_plan.warmup_queries[0])
+        self.assertIn("`bench_tmp`.", job.query_plan.test_queries[0].query)
 
     def test_engine_auto_column_order_uses_compressed_size_desc(self) -> None:
         """Проверяет, что engine auto column order uses compressed size desc."""

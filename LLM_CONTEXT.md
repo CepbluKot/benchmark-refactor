@@ -130,6 +130,11 @@
 7. `StoredBenchmarkResult`
 8. `TopTypeVariant`
 
+`VariantJob` содержит обе БД:
+1. `source_database` — где лежит исходная таблица;
+2. `variant_database` — где создаётся тестовая variant-таблица
+   (если `test_database` не задан, равен `source_database`).
+
 Ключевой формат хранения (`StoredBenchmarkResult`):
 
 1. run-метаданные: `benchmark_run_id`, `benchmark_started_at`, `benchmark_id`.
@@ -228,13 +233,14 @@
 3. `strategy`
 4. `global_rules`
 5. `databases`, `tables`
-6. `max_iterations`
-7. `sequential_top_n`
-8. `insert_rows_limit`
-9. `insert_rows_limits`
-10. `column_rules_mode`, `index_rules_mode`
-11. `queries`
-12. `table_rules[]` (локальные override, включая `strategy`)
+6. `test_database` (опционально, отдельная БД для variant-таблиц)
+7. `max_iterations`
+8. `sequential_top_n`
+9. `insert_rows_limit`
+10. `insert_rows_limits`
+11. `column_rules_mode`, `index_rules_mode`
+12. `queries`
+13. `table_rules[]` (локальные override, включая `strategy` и `test_database`)
 
 ### 7.2 Контракты верхнего уровня
 
@@ -324,6 +330,7 @@
 6. `insert_rows_limit`
 7. `insert_rows_limits`
 8. `strategy`
+9. `test_database`
 
 ## 11) Entry points
 

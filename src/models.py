@@ -277,12 +277,14 @@ class TableRuleConfig(_Base):
       - sequential_top_n;
       - insert_rows_limit;
       - insert_rows_limits;
+      - test_database;
       - strategy;
       - queries.
     """
 
     database: str
     table: str
+    test_database: Optional[str] = None
     rules: RulesConfig = Field(default_factory=RulesConfig)
     column_order_mode: Optional[ColumnOrderMode] = None
     queries: Optional[QueriesConfig] = None
@@ -300,6 +302,17 @@ class TableRuleConfig(_Base):
         if not value:
             raise ValueError("database/table не должны быть пустыми")
         return value
+
+    @field_validator("test_database")
+    @classmethod
+    def non_empty_test_database(cls, value: Optional[str]) -> Optional[str]:
+        """Проверяет, что test_database не пустой, если задан."""
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("test_database не должен быть пустым")
+        return cleaned
 
 
 class ConnectionConfig(_Base):
@@ -338,6 +351,7 @@ class BenchmarkConfig(_Base):
       - `sequential_top_n` для двухфазного режима sequential.
       - `insert_rows_limit` — сколько строк копировать из source-таблицы в variant.
       - `insert_rows_limits` — лимиты копирования по конкретным mode.
+      - `test_database` — БД для создания variant-таблиц (по умолчанию source БД).
     """
 
     id: str
@@ -348,6 +362,7 @@ class BenchmarkConfig(_Base):
 
     databases: DatabasesSelector = "*"
     tables: TablesSelector = "*"
+    test_database: Optional[str] = None
 
     max_iterations: int = Field(default=100, gt=0)
     sequential_top_n: int = Field(default=1, gt=0)
@@ -357,6 +372,17 @@ class BenchmarkConfig(_Base):
     index_rules_mode: Optional[RuleSourceMode] = None
     queries: QueriesConfig = Field(default_factory=QueriesConfig)
     table_rules: List[TableRuleConfig] = Field(default_factory=list)
+
+    @field_validator("test_database")
+    @classmethod
+    def non_empty_test_database(cls, value: Optional[str]) -> Optional[str]:
+        """Проверяет, что test_database не пустой, если задан."""
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("test_database не должен быть пустым")
+        return cleaned
 
     @model_validator(mode="after")
     def validate_selectors(self) -> "BenchmarkConfig":

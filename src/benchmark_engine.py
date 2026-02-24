@@ -305,12 +305,18 @@ class BenchmarkPlanner:
                     if table_rule and table_rule.queries is not None
                     else benchmark.queries
                 )
+                test_database = (
+                    table_rule.test_database
+                    if table_rule and table_rule.test_database is not None
+                    else benchmark.test_database
+                )
 
                 yield TableBenchmarkPlan(
                     benchmark_id=benchmark.id,
                     connection_id=connection.id,
                     connection_dbms=connection.dbms,
                     database=target.database,
+                    test_database=test_database,
                     table=target.table,
                     strategy=strategy,
                     mode=mode,
@@ -472,17 +478,18 @@ class BenchmarkEngine:
         job_mode: Optional[BenchmarkMode] = None,
     ) -> VariantJob:
         """Собирает `VariantJob` из уже подготовленного variant DDL и meta."""
+        variant_database = table_plan.test_database or table_plan.database
         variant_table = variant_table_name(
             original_table=table_plan.table,
             benchmark_id=table_plan.benchmark_id,
             variant_index=variant_meta.global_index,
         )
         prepared_ddl = variant_ddl.copy()
-        prepared_ddl.name = f"{table_plan.database}.{variant_table}"
+        prepared_ddl.name = f"{variant_database}.{variant_table}"
 
         rendered_query_plan = self._query_builder.render_for_table(
             plan=raw_query_plan,
-            database=table_plan.database,
+            database=variant_database,
             table=variant_table,
         )
 
@@ -499,6 +506,7 @@ class BenchmarkEngine:
             connection_id=table_plan.connection_id,
             connection_dbms=table_plan.connection_dbms,
             source_database=table_plan.database,
+            variant_database=variant_database,
             source_table=table_plan.table,
             variant_table=variant_table,
             variant_meta=variant_meta,
