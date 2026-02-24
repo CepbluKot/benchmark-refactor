@@ -29,6 +29,8 @@ from src.benchmark_runtime.table_strategy import (
     CombinedTableExecutionStrategy,
     DefaultTableExecutionStrategy,
     IndexesTableExecutionStrategy,
+    SequentialTopNDispatchIndexesTableExecutionStrategy,
+    SequentialTopNDispatchTypesTableExecutionStrategy,
     SequentialTopNTableExecutionStrategy,
     TypesTableExecutionStrategy,
 )
@@ -113,6 +115,12 @@ class SyntheticExecutionAdapter(BenchmarkExecutionAdapter):
         "Int64": 64,
     }
 
+    def __init__(self) -> None:
+        self._store: BenchmarkResultStore | None = None
+
+    def bind_result_store(self, result_store: BenchmarkResultStore | None) -> None:
+        self._store = result_store
+
     def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
         # Удобная точка для отладки execute-потока.
         score = self._score(job)
@@ -124,7 +132,7 @@ class SyntheticExecutionAdapter(BenchmarkExecutionAdapter):
             f"insert_rows_limit={job.insert_rows_limit}"
         )
 
-        return BenchmarkVariantResult(
+        result = BenchmarkVariantResult(
             benchmark_run_id=job.benchmark_run_id,
             benchmark_started_at=job.benchmark_started_at,
             benchmark_id=job.benchmark_id,
@@ -139,6 +147,10 @@ class SyntheticExecutionAdapter(BenchmarkExecutionAdapter):
                 "indexes_count": len(job.variant_ddl.indexes),
             },
         )
+        if self._store is not None:
+            # В проде это делает Celery-воркер; здесь сохраняем локально для дебага.
+            self._store.store_result(job, result)
+        return result
 
     @classmethod
     def _score(cls, job: VariantJob) -> float:
@@ -372,6 +384,14 @@ def build_tracing_table_strategies() -> Dict[str, TableExecutionStrategy]:
         "sequential_topn_strategy": TracingTableExecutionStrategy(
             strategy_key="sequential_topn_strategy",
             delegate=SequentialTopNTableExecutionStrategy(),
+        ),
+        "sequential_topn_stage1_dispatch_strategy": TracingTableExecutionStrategy(
+            strategy_key="sequential_topn_stage1_dispatch_strategy",
+            delegate=SequentialTopNDispatchTypesTableExecutionStrategy(),
+        ),
+        "sequential_topn_stage2_dispatch_strategy": TracingTableExecutionStrategy(
+            strategy_key="sequential_topn_stage2_dispatch_strategy",
+            delegate=SequentialTopNDispatchIndexesTableExecutionStrategy(),
         ),
     }
 

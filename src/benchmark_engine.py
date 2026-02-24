@@ -40,6 +40,8 @@ from src.benchmark_runtime.table_strategy import (
     CombinedTableExecutionStrategy,
     DefaultTableExecutionStrategy,
     IndexesTableExecutionStrategy,
+    SequentialTopNDispatchIndexesTableExecutionStrategy,
+    SequentialTopNDispatchTypesTableExecutionStrategy,
     SequentialTopNTableExecutionStrategy,
     TableExecutionStrategy,
     TypesTableExecutionStrategy,
@@ -611,13 +613,18 @@ class BenchmarkRunner:
         self,
         engine: BenchmarkEngine,
         execution_adapter: BenchmarkExecutionAdapter,
-        result_store: BenchmarkResultStore,
+        result_store: Optional[BenchmarkResultStore] = None,
         run_id_provider: Optional[BenchmarkRunIdProvider] = None,
         run_started_at_provider: Optional[Callable[[], datetime]] = None,
         table_execution_strategies: Optional[Dict[str, TableExecutionStrategy]] = None,
         default_table_execution_strategy: Optional[TableExecutionStrategy] = None,
     ) -> None:
-        """Сохраняет engine, адаптер выполнения и persistence-хранилище."""
+        """
+        Сохраняет engine и адаптер выполнения.
+
+        `result_store` опционален. Он нужен стратегиям, которые читают top-N
+        (например, `sequential_topn_strategy` и stage2 dispatch).
+        """
         self._engine = engine
         self._execution_adapter = execution_adapter
         self._result_store = result_store
@@ -626,6 +633,7 @@ class BenchmarkRunner:
             run_started_at_provider or (lambda: datetime.now(timezone.utc))
         )
         self._last_benchmark_started_at: Optional[datetime] = None
+        self._execution_adapter.bind_result_store(result_store)
         self._default_table_execution_strategy = (
             default_table_execution_strategy or DefaultTableExecutionStrategy()
         )
@@ -634,6 +642,12 @@ class BenchmarkRunner:
             "indexes_strategy": IndexesTableExecutionStrategy(),
             "combined_strategy": CombinedTableExecutionStrategy(),
             "sequential_topn_strategy": SequentialTopNTableExecutionStrategy(),
+            "sequential_topn_stage1_dispatch_strategy": (
+                SequentialTopNDispatchTypesTableExecutionStrategy()
+            ),
+            "sequential_topn_stage2_dispatch_strategy": (
+                SequentialTopNDispatchIndexesTableExecutionStrategy()
+            ),
         }
         if table_execution_strategies:
             for strategy_key, strategy in table_execution_strategies.items():
@@ -679,6 +693,11 @@ class BenchmarkRunner:
         Для `strategy="sequential_topn_strategy"` используется двухфазный алгоритм:
           1) прогон type/codec-вариантов;
           2) выбор top-N через result-store и прогон индексных вариантов на их DDL.
+
+        Для асинхронного fire-and-forget потока можно использовать split-стратегии:
+          - `sequential_topn_stage1_dispatch_strategy`
+          - `sequential_topn_stage2_dispatch_strategy`
+        где launcher только dispatch'ит jobs, а store наполняют воркеры.
 
         Для каждого вызова фиксируется единый `benchmark_started_at` (UTC datetime),
         общий для всех benchmark/table/jobs в рамках этого запуска.
@@ -744,6 +763,20 @@ class BenchmarkRunner:
         return started_at.astimezone(timezone.utc)
 
     def _execute_and_store(self, job: VariantJob) -> None:
-        """Выполняет вариант и сразу персистит результат в result-store."""
-        result = self._execution_adapter.execute_variant(job)
-        self._result_store.store_result(job, result)
+        """
+        Выполняет/диспачит вариант.
+
+        Важно: runner не сохраняет результаты. Сохранение выполняет backend/воркер
+        внутри execution adapter реализации.
+        """
+        self._execution_adapter.execute_variant(job)
+
+    def _execute_without_store(self, job: VariantJob) -> None:
+        """
+        Выполняет/диспачит вариант (compat alias).
+
+        Исторически этот метод использовался dispatch-only стратегиями.
+        Сейчас runner нигде не пишет в store, поэтому поведение эквивалентно
+        `_execute_and_store`.
+        """
+        self._execution_adapter.execute_variant(job)

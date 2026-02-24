@@ -24,6 +24,7 @@ from src.benchmark_engine import (
     MetadataProvider,
     VariantJob,
 )
+from src.benchmark_runtime.contracts.result_store import BenchmarkResultStore
 from src.clickhouse_ddl import TableDDL
 from src.loader import load_config
 
@@ -103,6 +104,12 @@ class DemoExecutionAdapter(BenchmarkExecutionAdapter):
       - подсчёт финального score
     """
 
+    def __init__(self) -> None:
+        self._store: BenchmarkResultStore | None = None
+
+    def bind_result_store(self, result_store: BenchmarkResultStore | None) -> None:
+        self._store = result_store
+
     def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
         """Dry-run выполнение: печатает план и возвращает псевдо-score."""
         pseudo_score = round(1.0 / (1 + job.variant_meta.global_index), 6)
@@ -117,7 +124,7 @@ class DemoExecutionAdapter(BenchmarkExecutionAdapter):
             f"queries={len(job.query_plan.test_queries)}, "
             f"insert_rows_limit={job.insert_rows_limit}"
         )
-        return BenchmarkVariantResult(
+        result = BenchmarkVariantResult(
             benchmark_run_id=job.benchmark_run_id,
             benchmark_id=job.benchmark_id,
             source_database=job.source_database,
@@ -127,6 +134,10 @@ class DemoExecutionAdapter(BenchmarkExecutionAdapter):
             score=pseudo_score,
             payload={"dry_run": True},
         )
+        if self._store is not None:
+            # В проде это делает Celery-воркер; здесь сохраняем в demo-store.
+            self._store.store_result(job, result)
+        return result
 
 
 def main() -> None:

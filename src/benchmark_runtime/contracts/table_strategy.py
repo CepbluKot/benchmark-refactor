@@ -23,5 +23,5 @@ class TableExecutionStrategy(ABC):
         benchmark_run_id: int,
         benchmark_started_at: datetime,
     ) -> None:
-        """Executes whole table plan and persists results via runner."""
+        """Executes whole table plan via runner."""
         pass

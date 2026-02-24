@@ -30,6 +30,8 @@
 2. `indexes_strategy`
 3. `combined_strategy`
 4. `sequential_topn_strategy`
+5. `sequential_topn_stage1_dispatch_strategy`
+6. `sequential_topn_stage2_dispatch_strategy`
 
 Маппинг в `src/models.py`:
 
@@ -37,6 +39,8 @@
 2. `indexes_strategy -> indexes`
 3. `combined_strategy -> combined`
 4. `sequential_topn_strategy -> sequential`
+5. `sequential_topn_stage1_dispatch_strategy -> sequential`
+6. `sequential_topn_stage2_dispatch_strategy -> sequential`
 
 ## 3) Архитектура выполнения (planner -> engine -> runner)
 
@@ -58,7 +62,8 @@
 3. `BenchmarkRunner` (`src/benchmark_engine.py`)
    - выбирает table execution strategy по `table_plan.strategy`;
    - вызывает execution adapter;
-   - сразу сохраняет результат в result store.
+   - сам не сохраняет результат (сохраняет execution backend/воркер);
+   - `result_store` опционален, но обязателен для стратегий с top-N чтением.
 
 ## 4) Runtime-контракты и реализации
 
@@ -71,6 +76,12 @@
 3. `result_store.py` -> `BenchmarkResultStore`
 4. `run_id.py` -> `BenchmarkRunIdProvider`
 5. `table_strategy.py` -> `TableExecutionStrategy`
+
+Важно по execution adapter:
+1. `execute_variant(job)` всегда вызывается runner-ом.
+2. Runner не пишет результаты в store.
+3. Сохранение результата должно происходить внутри execution backend/воркера.
+4. Опционально можно использовать `bind_result_store(result_store)` для in-process demo/test-реализаций.
 
 ### 4.2 Built-in реализации
 
@@ -91,6 +102,8 @@
    - `IndexesTableExecutionStrategy`
    - `CombinedTableExecutionStrategy`
    - `SequentialTopNTableExecutionStrategy`
+   - `SequentialTopNDispatchTypesTableExecutionStrategy`
+   - `SequentialTopNDispatchIndexesTableExecutionStrategy`
 
 ### 4.3 Backward-compatible re-export
 
@@ -164,11 +177,33 @@
 3. Стадия `indexes`:
    - для каждого top type-DDL генерирует index-варианты и выполняет их.
 
+Стратегия ставит внутренний wait-барьер после dispatch type-stage:
+ждёт, пока в store не появятся все `type_total` результатов,
+и только затем выбирает top-N и запускает index-stage.
+
 Условия для index стадии:
 
 1. Должны быть результаты type-стадии.
 2. `sequential_top_n > 0`.
 3. store должен корректно вернуть top type-варианты.
+
+### 6.3 Sequential top-N dispatch (для Celery fire-and-forget)
+
+Если launcher не должен ждать и не должен писать результаты:
+
+1. `sequential_topn_stage1_dispatch_strategy`
+   - отправляет только type-stage jobs;
+   - использует `runner._execute_without_store(...)`.
+2. `sequential_topn_stage2_dispatch_strategy`
+   - читает top-N type-вариантов из `result_store`;
+   - отправляет index-stage jobs;
+   - launcher также ничего не пишет в store.
+
+Типовой поток:
+
+1. Запустить stage1 dispatch.
+2. Внешний процесс ждёт завершения всех type-задач и запись метрик воркерами.
+3. Запустить stage2 dispatch с тем же `benchmark_run_id`.
 
 ## 7) JSON-конфиг и валидация
 

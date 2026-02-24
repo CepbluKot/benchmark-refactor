@@ -90,6 +90,24 @@ class ModelsValidationTests(unittest.TestCase):
         )
         self.assertEqual(benchmark.strategy, "types_strategy")
 
+    def test_benchmark_config_accepts_sequential_dispatch_strategies(self) -> None:
+        """Проверяет, что benchmark config принимает sequential dispatch strategies."""
+        stage1 = BenchmarkConfig(
+            id="bench_seq_stage1",
+            connection_id="conn",
+            strategy="sequential_topn_stage1_dispatch_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            global_rules=RulesConfig(
+                column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64"])]
+            ),
+        )
+        stage2 = stage1.model_copy(
+            update={"id": "bench_seq_stage2", "strategy": "sequential_topn_stage2_dispatch_strategy"}
+        )
+        self.assertEqual(stage1.strategy, "sequential_topn_stage1_dispatch_strategy")
+        self.assertEqual(stage2.strategy, "sequential_topn_stage2_dispatch_strategy")
+
     def test_benchmark_config_rejects_legacy_mode_field(self) -> None:
         """Проверяет, что benchmark config rejects legacy mode field."""
         with self.assertRaises(ValidationError):

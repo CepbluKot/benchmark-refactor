@@ -2,6 +2,7 @@ import unittest
 from datetime import datetime, timezone
 from typing import Dict, List
 
+import src.benchmark_runtime.implementations.table_strategy.sequential_topn as sequential_topn_strategy_impl
 from src.benchmark_engine import (
     BenchmarkEngine,
     BenchmarkExecutionAdapter,
@@ -89,10 +90,14 @@ class StaticMetadataProvider(MetadataProvider):
 class RecordingExecutionAdapter(BenchmarkExecutionAdapter):
     def __init__(self) -> None:
         self.executed_jobs: List[VariantJob] = []
+        self._store: BenchmarkResultStore | None = None
+
+    def bind_result_store(self, result_store: BenchmarkResultStore | None) -> None:
+        self._store = result_store
 
     def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
         self.executed_jobs.append(job)
-        return BenchmarkVariantResult(
+        result = BenchmarkVariantResult(
             benchmark_run_id=job.benchmark_run_id,
             benchmark_id=job.benchmark_id,
             source_database=job.source_database,
@@ -102,11 +107,18 @@ class RecordingExecutionAdapter(BenchmarkExecutionAdapter):
             score=1.0,
             payload={"ok": True},
         )
+        if self._store is not None:
+            self._store.store_result(job, result)
+        return result
 
 
 class SequentialScoringAdapter(BenchmarkExecutionAdapter):
     def __init__(self) -> None:
         self.executed_jobs: List[VariantJob] = []
+        self._store: BenchmarkResultStore | None = None
+
+    def bind_result_store(self, result_store: BenchmarkResultStore | None) -> None:
+        self._store = result_store
 
     def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
         self.executed_jobs.append(job)
@@ -117,7 +129,7 @@ class SequentialScoringAdapter(BenchmarkExecutionAdapter):
         else:
             score = 0.5
 
-        return BenchmarkVariantResult(
+        result = BenchmarkVariantResult(
             benchmark_run_id=job.benchmark_run_id,
             benchmark_id=job.benchmark_id,
             source_database=job.source_database,
@@ -130,6 +142,75 @@ class SequentialScoringAdapter(BenchmarkExecutionAdapter):
                 "user_id_type": user_id_type,
                 "indexes_count": len(job.variant_ddl.indexes),
             },
+        )
+        if self._store is not None:
+            self._store.store_result(job, result)
+        return result
+
+
+class AsyncSelfPersistingSequentialAdapter(BenchmarkExecutionAdapter):
+    """
+    Имитирует async execution:
+    - launcher только dispatch'ит;
+    - реальные результаты сразу пишет self-провайдер (как будто воркер).
+    """
+
+    def __init__(self, store: BenchmarkResultStore) -> None:
+        self._store = store
+        self.executed_jobs: List[VariantJob] = []
+
+    def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
+        self.executed_jobs.append(job)
+        user_id_type = job.variant_ddl.column("user_id").type
+        if job.variant_meta.mode == "types":
+            score = 10.0 if user_id_type == "UInt32" else 1.0
+        else:
+            score = 0.5
+
+        worker_result = BenchmarkVariantResult(
+            benchmark_run_id=job.benchmark_run_id,
+            benchmark_started_at=job.benchmark_started_at,
+            benchmark_id=job.benchmark_id,
+            source_database=job.source_database,
+            source_table=job.source_table,
+            variant_table=job.variant_table,
+            variant_index=job.variant_meta.global_index,
+            score=score,
+            payload={"persisted_by": "worker"},
+        )
+        # Эмулируем запись из воркера во внешнее хранилище.
+        self._store.store_result(job, worker_result)
+
+        # Возвращаем ack-ответ launcher-у.
+        return BenchmarkVariantResult(
+            benchmark_run_id=job.benchmark_run_id,
+            benchmark_id=job.benchmark_id,
+            source_database=job.source_database,
+            source_table=job.source_table,
+            variant_table=job.variant_table,
+            variant_index=job.variant_meta.global_index,
+            score=None,
+            payload={"status": "dispatched"},
+        )
+
+
+class AsyncDispatchOnlyAdapter(BenchmarkExecutionAdapter):
+    """Имитирует async dispatch без runner-side store и без worker-side persistence."""
+
+    def __init__(self) -> None:
+        self.executed_jobs: List[VariantJob] = []
+
+    def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
+        self.executed_jobs.append(job)
+        return BenchmarkVariantResult(
+            benchmark_run_id=job.benchmark_run_id,
+            benchmark_id=job.benchmark_id,
+            source_database=job.source_database,
+            source_table=job.source_table,
+            variant_table=job.variant_table,
+            variant_index=job.variant_meta.global_index,
+            score=None,
+            payload={"status": "dispatched"},
         )
 
 
@@ -871,6 +952,82 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         )
         self.assertEqual(result_store.records[0].score, 1.0)
 
+    def test_runner_allows_missing_result_store_for_non_sequential_strategies(self) -> None:
+        """Проверяет, что result_store опционален для non-sequential стратегий."""
+        benchmark = BenchmarkConfig(
+            id="bench_run_without_store",
+            connection_id="prod_ch",
+            strategy="types_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
+                ]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = AsyncDispatchOnlyAdapter()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual(len(adapter.executed_jobs), 1)
+
+    def test_sequential_strategy_requires_result_store_when_missing(self) -> None:
+        """Проверяет, что sequential top-N требует result_store для top-N отбора."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_without_store",
+            connection_id="prod_ch",
+            strategy="sequential_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            sequential_top_n=1,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt32",
+                        by_name="user_id",
+                        indexes=[IndexConfig(type="minmax", granularity=4)],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}")],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = AsyncDispatchOnlyAdapter()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+        )
+
+        with self.assertRaisesRegex(ValueError, "требует result_store"):
+            runner.run()
+        self.assertEqual(len(adapter.executed_jobs), 0)
+
     def test_runner_rejects_non_positive_explicit_run_id(self) -> None:
         """Проверяет, что runner rejects non positive explicit run id."""
         benchmark = BenchmarkConfig(
@@ -1582,8 +1739,210 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             all(job.insert_rows_limit in {111, 777} for job in adapter.executed_jobs)
         )
 
-    def test_sequential_mode_stops_after_type_stage_when_top_variants_empty(self) -> None:
-        """Проверяет, что sequential mode stops after type stage when top variants empty."""
+    def test_sequential_mode_waits_on_external_store(self) -> None:
+        """Проверяет, что sequential mode ждёт внешнее store и затем запускает index-stage."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_external_store_wait",
+            connection_id="prod_ch",
+            strategy="sequential_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            sequential_top_n=1,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt32",
+                        by_name="user_id",
+                        indexes=[
+                            IndexConfig(type="minmax", granularity=4),
+                            IndexConfig(type="bloom_filter(0.01)", granularity=2),
+                        ],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}")],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        result_store = InMemoryBenchmarkResultStore()
+        adapter = AsyncSelfPersistingSequentialAdapter(store=result_store)
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual(len(adapter.executed_jobs), 5)
+        self.assertEqual(len(result_store.records), 5)
+        self.assertEqual(
+            [job.variant_meta.mode for job in adapter.executed_jobs],
+            ["types", "types", "indexes", "indexes", "indexes"],
+        )
+        self.assertEqual(
+            [
+                job.variant_ddl.column("user_id").type
+                for job in adapter.executed_jobs
+                if job.variant_meta.mode == "indexes"
+            ],
+            ["UInt32", "UInt32", "UInt32"],
+        )
+
+    def test_types_strategy_dispatch_only_does_not_store_in_runner(self) -> None:
+        """Проверяет, что types strategy в async-dispatch режиме не пишет в store."""
+        benchmark = BenchmarkConfig(
+            id="bench_types_dispatch_only",
+            connection_id="prod_ch",
+            strategy="types_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                        codecs=["CODEC(Delta(8), LZ4)"],
+                    )
+                ]
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}")],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = AsyncDispatchOnlyAdapter()
+        store = InMemoryBenchmarkResultStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=store,
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual([job.variant_meta.mode for job in adapter.executed_jobs], ["types", "types"])
+        self.assertEqual(len(store.records), 0)
+
+    def test_indexes_strategy_dispatch_only_does_not_store_in_runner(self) -> None:
+        """Проверяет, что indexes strategy в async-dispatch режиме не пишет в store."""
+        benchmark = BenchmarkConfig(
+            id="bench_indexes_dispatch_only",
+            connection_id="prod_ch",
+            strategy="indexes_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            global_rules=RulesConfig(
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        indexes=[
+                            IndexConfig(type="minmax", granularity=4),
+                            IndexConfig(type="bloom_filter(0.01)", granularity=2),
+                        ],
+                    )
+                ]
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}")],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = AsyncDispatchOnlyAdapter()
+        store = InMemoryBenchmarkResultStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=store,
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual(
+            [job.variant_meta.mode for job in adapter.executed_jobs],
+            ["indexes", "indexes", "indexes"],
+        )
+        self.assertEqual(len(store.records), 0)
+
+    def test_combined_strategy_dispatch_only_does_not_store_in_runner(self) -> None:
+        """Проверяет, что combined strategy в async-dispatch режиме не пишет в store."""
+        benchmark = BenchmarkConfig(
+            id="bench_combined_dispatch_only",
+            connection_id="prod_ch",
+            strategy="combined_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        indexes=[IndexConfig(type="minmax", granularity=4)],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}")],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = AsyncDispatchOnlyAdapter()
+        store = InMemoryBenchmarkResultStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=store,
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertTrue(adapter.executed_jobs)
+        self.assertTrue(all(job.variant_meta.mode == "combined" for job in adapter.executed_jobs))
+        self.assertEqual(len(store.records), 0)
+
+    def test_sequential_mode_times_out_when_top_variants_never_appear(self) -> None:
+        """Проверяет, что sequential mode ждёт top variants и падает по timeout."""
         benchmark = BenchmarkConfig(
             id="bench_sequential_no_top",
             connection_id="prod_ch",
@@ -1629,13 +1988,159 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             result_store=result_store,
         )
 
-        run_id = runner.run()
-        self.assertEqual(run_id, 1)
+        original_timeout = sequential_topn_strategy_impl._TYPE_STAGE_WAIT_TIMEOUT_SEC
+        original_poll = sequential_topn_strategy_impl._TYPE_STAGE_WAIT_POLL_INTERVAL_SEC
+        sequential_topn_strategy_impl._TYPE_STAGE_WAIT_TIMEOUT_SEC = 0.05
+        sequential_topn_strategy_impl._TYPE_STAGE_WAIT_POLL_INTERVAL_SEC = 0.01
+        try:
+            with self.assertRaises(TimeoutError):
+                runner.run()
+        finally:
+            sequential_topn_strategy_impl._TYPE_STAGE_WAIT_TIMEOUT_SEC = original_timeout
+            sequential_topn_strategy_impl._TYPE_STAGE_WAIT_POLL_INTERVAL_SEC = original_poll
         self.assertEqual(len(adapter.executed_jobs), 2)  # только type-stage
         self.assertEqual(
             [job.variant_meta.mode for job in adapter.executed_jobs],
             ["types", "types"],
         )
+
+    def test_sequential_dispatch_stage1_runs_only_types_without_store(self) -> None:
+        """Проверяет, что dispatch stage1 отправляет только types и не пишет в store."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_stage1_dispatch",
+            connection_id="prod_ch",
+            strategy="sequential_topn_stage1_dispatch_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            sequential_top_n=1,
+            insert_rows_limit=999,
+            insert_rows_limits=InsertRowsLimitsConfig(types=111, indexes=222),
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt32",
+                        by_name="user_id",
+                        indexes=[
+                            IndexConfig(type="minmax", granularity=4),
+                            IndexConfig(type="bloom_filter(0.01)", granularity=2),
+                        ],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}")],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = AsyncDispatchOnlyAdapter()
+        result_store = InMemoryBenchmarkResultStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual([j.variant_meta.mode for j in adapter.executed_jobs], ["types", "types"])
+        self.assertTrue(all(job.insert_rows_limit == 111 for job in adapter.executed_jobs))
+        self.assertEqual(len(result_store.records), 0)
+
+    def test_sequential_dispatch_stage2_uses_top_variants_and_skips_store(self) -> None:
+        """Проверяет, что dispatch stage2 берёт top-N из store и не пишет результаты launcher."""
+        stage1_benchmark = BenchmarkConfig(
+            id="bench_sequential_dispatch_shared",
+            connection_id="prod_ch",
+            strategy="types_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            sequential_top_n=1,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt32",
+                        by_name="user_id",
+                        indexes=[
+                            IndexConfig(type="minmax", granularity=4),
+                            IndexConfig(type="bloom_filter(0.01)", granularity=2),
+                        ],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}")],
+            ),
+        )
+        stage2_benchmark = stage1_benchmark.model_copy(
+            update={"strategy": "sequential_topn_stage2_dispatch_strategy"}
+        )
+
+        stage1_planner = BenchmarkPlanner(
+            config=self._root(stage1_benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        stage1_engine = BenchmarkEngine(planner=stage1_planner)
+        stage1_adapter = SequentialScoringAdapter()
+        shared_store = InMemoryBenchmarkResultStore()
+        stage1_runner = BenchmarkRunner(
+            engine=stage1_engine,
+            execution_adapter=stage1_adapter,
+            result_store=shared_store,
+        )
+        run_id = stage1_runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual(len(shared_store.records), 2)
+
+        stage2_planner = BenchmarkPlanner(
+            config=self._root(stage2_benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        stage2_engine = BenchmarkEngine(planner=stage2_planner)
+        stage2_adapter = AsyncDispatchOnlyAdapter()
+        stage2_runner = BenchmarkRunner(
+            engine=stage2_engine,
+            execution_adapter=stage2_adapter,
+            result_store=shared_store,
+        )
+
+        stage2_run_id = stage2_runner.run(benchmark_run_id=1)
+        self.assertEqual(stage2_run_id, 1)
+        self.assertEqual(
+            [job.variant_meta.mode for job in stage2_adapter.executed_jobs],
+            ["indexes", "indexes", "indexes"],
+        )
+        self.assertEqual(
+            [job.variant_meta.global_index for job in stage2_adapter.executed_jobs],
+            [2, 3, 4],
+        )
+        self.assertEqual(
+            [job.variant_ddl.column("user_id").type for job in stage2_adapter.executed_jobs],
+            ["UInt32", "UInt32", "UInt32"],
+        )
+        # stage2 dispatch не должен добавлять launcher-side записи.
+        self.assertEqual(len(shared_store.records), 2)
 
     def test_sequential_mode_uses_sequential_insert_rows_limit_fallback(self) -> None:
         """Проверяет, что sequential mode uses sequential insert rows limit fallback."""

@@ -57,7 +57,7 @@
 5. Строится `TableBenchmarkPlan`.
 6. Генерируются DDL-варианты и `VariantJob`.
 7. Каждый job выполняется через `BenchmarkExecutionAdapter`.
-8. Результат сразу пишется в `BenchmarkResultStore` (без накопления большого списка в памяти).
+8. `BenchmarkExecutionAdapter`/воркер сохраняет результат в `BenchmarkResultStore`.
 
 Если режим `sequential`:
 1. Сначала гоняются варианты `types`.
@@ -84,7 +84,7 @@ flowchart LR
     D --> E["BenchmarkEngine<br/>TableBenchmarkPlan -> VariantJob"]
     E --> F["BenchmarkRunner<br/>выбор TableExecutionStrategy"]
     F --> G["BenchmarkExecutionAdapter<br/>реальный SQL запуск"]
-    G --> H["BenchmarkResultStore<br/>store_result + top-N"]
+    G --> H["BenchmarkResultStore<br/>worker-side save + top-N"]
 
     D -. metadata .-> M["MetadataProvider"]
     D -. rule resolving .-> R["resolver.py"]
@@ -173,9 +173,21 @@ JSON-секции или `benchmark.project.json`.
 Что приходит:
 `TableBenchmarkPlan`.
 Что уходит:
-Вызовы в execution adapter и записи в result store.
+Вызовы в execution adapter.
 Важно:
 Для `sequential_topn_strategy` runner делает 2 этапа: сначала `types`, потом `indexes` только для top-N.
+`result_store` в `BenchmarkRunner` теперь опционален, но для top-N стратегий обязателен
+(`sequential_topn_strategy`, `sequential_topn_stage2_dispatch_strategy`).
+Runner не пишет результаты в store. Сохранение выполняет execution backend (обычно Celery-воркер).
+`sequential_topn_strategy` внутри себя ставит wait-барьер: ждёт, пока в store появятся все результаты type-stage,
+и только потом выбирает top-N и запускает index-stage.
+Если нужен fire-and-forget через Celery (launcher не ждёт), используйте:
+- `sequential_topn_stage1_dispatch_strategy` — отправляет только types-stage.
+- `sequential_topn_stage2_dispatch_strategy` — читает top-N types из store и отправляет indexes-stage.
+Практический порядок запуска:
+1. Запускаете benchmark со `strategy=sequential_topn_stage1_dispatch_strategy`.
+2. Внешний процесс дожидается завершения всех type-задач и записи результатов воркерами.
+3. Повторно запускаете тот же benchmark (тот же `benchmark_id` и `benchmark_run_id`), но со `strategy=sequential_topn_stage2_dispatch_strategy`.
 
 9. Фактическое выполнение SQL (`BenchmarkExecutionAdapter`).
 Что это:
@@ -538,6 +550,8 @@ print(run_id)
 - `indexes_strategy`
 - `combined_strategy`
 - `sequential_topn_strategy`
+- `sequential_topn_stage1_dispatch_strategy`
+- `sequential_topn_stage2_dispatch_strategy`
 
 `queries.mode`:
 - `auto`
@@ -570,6 +584,9 @@ print(run_id)
 
 5. В `sequential` нет этапа индексов.
 Проверь, что есть `index_rules`, `sequential_top_n > 0`, и адаптер возвращает `score`.
+Если используете dispatch-стратегии, проверь, что после `sequential_topn_stage1_dispatch_strategy`
+внешний процесс действительно дождался завершения всех type-задач и только потом запускает
+`sequential_topn_stage2_dispatch_strategy` с тем же `benchmark_run_id`.
 
 6. Включён `global_bank_only`, но нет доступного bank.
 Либо укажи `global_rules.rule_bank`, либо настрой `default_rule_banks` для своего DBMS.
@@ -585,7 +602,7 @@ print(run_id)
 2. `BenchmarkPlanner` раскрывает селекторы БД/таблиц и строит `TableBenchmarkPlan`.
 3. `BenchmarkEngine` на основе плана генерирует варианты DDL и превращает их в `VariantJob`.
 4. `BenchmarkRunner` выполняет jobs через `BenchmarkExecutionAdapter`.
-5. Каждый результат сразу сохраняется в `BenchmarkResultStore`.
+5. Сохранение результата делает execution backend/воркер в `BenchmarkResultStore`.
 
 Где лежат runtime-контракты:
 1. Интерфейсы: `src/benchmark_runtime/contracts/*`.
@@ -626,6 +643,7 @@ print(run_id)
    - warmup-запросы;
    - test-запросы;
    - расчёт итогового `score`;
+   - сохранение результата в `BenchmarkResultStore` (обычно из воркера);
    - очистка временных таблиц.
 
 #### 4) Подключить реальный источник метаданных

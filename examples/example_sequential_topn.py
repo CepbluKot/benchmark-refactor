@@ -26,6 +26,7 @@ from src.benchmark_engine import (
     MetadataProvider,
     VariantJob,
 )
+from src.benchmark_runtime.contracts.result_store import BenchmarkResultStore
 from src.clickhouse_ddl import TableDDL
 from src.loader import load_config
 
@@ -98,6 +99,12 @@ class SequentialTopNDemoAdapter(BenchmarkExecutionAdapter):
         "Int64": 64,
     }
 
+    def __init__(self) -> None:
+        self._store: BenchmarkResultStore | None = None
+
+    def bind_result_store(self, result_store: BenchmarkResultStore | None) -> None:
+        self._store = result_store
+
     @classmethod
     def _base_type(cls, raw_type: str) -> str:
         t = raw_type
@@ -131,7 +138,7 @@ class SequentialTopNDemoAdapter(BenchmarkExecutionAdapter):
             f"insert_rows_limit={job.insert_rows_limit}"
         )
 
-        return BenchmarkVariantResult(
+        result = BenchmarkVariantResult(
             benchmark_run_id=job.benchmark_run_id,
             benchmark_id=job.benchmark_id,
             source_database=job.source_database,
@@ -141,6 +148,10 @@ class SequentialTopNDemoAdapter(BenchmarkExecutionAdapter):
             score=score,
             payload={"stage": stage},
         )
+        if self._store is not None:
+            # В проде это делает Celery-воркер; здесь сохраняем в demo-store.
+            self._store.store_result(job, result)
+        return result
 
 
 def main() -> None:
