@@ -10,6 +10,8 @@ metadata через fetcher, исполнение через Celery-задачи
 В ClickHouse+Celery runtime baseline включает не только `SELECT`, но и `INSERT`-замеры:
 воркер создаёт временную baseline-таблицу, копирует туда данные, снимает метрики,
 и удаляет эту таблицу в `finally`.
+Для `SELECT` также сохраняются отдельные per-query метрики (замеры/перцентили/speedup),
+чтобы анализировать каждый запрос отдельно, а не только агрегат по всем запросам.
 
 ## Оглавление
 
@@ -64,7 +66,8 @@ metadata через fetcher, исполнение через Celery-задачи
 6. Перед запуском strategy runner выполняет baseline исходного DDL
    (`SourceBenchmarkJob -> execute_source_benchmark`).
    В ClickHouse runtime это отдельный прогон в воркере:
-   создаётся временная baseline-таблица в `test_database` (если задана, иначе в source БД),
+   создаётся временная baseline-таблица в `test_database`
+   (если не задана — в `${source_database}__benchmark_tmp`),
    снимаются baseline insert/select метрики, затем таблица удаляется.
 7. Baseline-результат прикладывается к каждому `VariantJob`
    (поле `VariantJob.source_benchmark`).
@@ -224,6 +227,10 @@ Runner не пишет результаты в store. Сохранение вы�
 - параметры варианта: `variant_mode`, `variant_params`;
 - DDL-снимки: `tested_table_ddl` (как минимум), при наличии `source_table_ddl`;
 - метрики combined-схемы (insert/select/compression/indexes) + `extra_json` для расширений;
+- per-query select-метрики в JSON-строках:
+  `tested_table_select_metrics_by_query_json`,
+  `source_table_select_metrics_by_query_json`,
+  `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json`;
 - итог: `score`; для top-N DDL берется из `tested_table_ddl`.
 
 11. Управление run-id (`BenchmarkRunIdProvider`).
@@ -473,6 +480,8 @@ config = load_config("configs/benchmark.project.local.json")
 3. Для `sequential_topn_strategy` launcher ждёт завершения stage1/stage2 через monitor-hook,
    после чего делает top-N отбор.
 4. Baseline-задача в воркере создаёт временную baseline-таблицу и удаляет её в `finally`.
+   Если `test_database` не задана, используется fallback `${source_database}__benchmark_tmp`.
+   Baseline select/warmup выполняются по baseline-копии, а не по оригинальной таблице.
 5. Variant-задача всегда удаляет variant-таблицу в `finally`, даже при ошибке.
 6. Для индексных вариантов insert-замеры выполняются с фильтром по индексируемым колонкам
    (legacy-совместимое поведение `tested_cols`).
@@ -731,9 +740,10 @@ print(run_id)
 2. Класс удобно размещать в `src/benchmark_runtime/implementations/`.
 3. Готовая production-ориентированная реализация уже есть: `src/benchmark_runtime/implementations/clickhouse_celery/execution.py`.
 3. Внутри `execute_source_benchmark(job)` обычно делаются:
-   - создание временной baseline-таблицы (обычно в `job.test_database`, иначе в source БД);
+   - создание временной baseline-таблицы (в `job.test_database`, иначе в `${source_database}__benchmark_tmp`);
+   - построение DDL baseline-копии: сначала через `TableDDL`, при ошибке парсинга — fallback с переписью имени таблицы в `CREATE TABLE`;
    - baseline insert-прогон (source -> baseline copy) с метриками;
-   - baseline select-прогон;
+   - baseline select-прогон по baseline-копии;
    - расчёт baseline-метрик/score;
    - очистка временной baseline-таблицы в `finally`;
    - возврат `SourceBenchmarkResult` (который потом попадёт в `VariantJob.source_benchmark`).
@@ -742,6 +752,7 @@ print(run_id)
    - `INSERT INTO ... SELECT ...` (с учётом `job.insert_rows_limit`);
    - warmup-запросы;
    - test-запросы;
+   - расчёт как агрегированных select-метрик, так и per-query select-метрик;
    - расчёт итогового `score`;
    - сохранение результата в `BenchmarkResultStore` (обычно из Celery-воркера);
    - очистка временных таблиц.

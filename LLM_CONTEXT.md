@@ -146,7 +146,7 @@
 
 `SourceBenchmarkJob` также содержит:
 1. `test_database` — БД для временной baseline-копии исходной таблицы
-   (если не задана, baseline-копия создаётся в `source_database`).
+   (если не задана, baseline-копия создаётся в `${source_database}__benchmark_tmp`).
 
 Ключевой формат хранения (`StoredBenchmarkResult`):
 
@@ -155,7 +155,11 @@
 3. параметры варианта: `variant_params` (нормализованный JSON-словарь из `VariantMeta`).
 4. DDL-снимки: `tested_table_ddl` (обязательный), `source_table_ddl` (опциональный).
 5. extended combined-метрики: insert/select/compression/indexes поля + `extra_json`.
-6. итог: `score`; для top-N DDL восстанавливается из `tested_table_ddl`.
+6. per-query select JSON-поля:
+   - `tested_table_select_metrics_by_query_json`
+   - `source_table_select_metrics_by_query_json`
+   - `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json`
+7. итог: `score`; для top-N DDL восстанавливается из `tested_table_ddl`.
 
 В `src/benchmark_runtime/types.py` есть helper `build_variant_params(...)`,
 который собирает стабильные параметры текущего варианта из `VariantMeta`.
@@ -165,21 +169,30 @@
 Файл: `src/benchmark_runtime/implementations/clickhouse_celery/tasks.py`.
 
 `run_source_benchmark(payload)`:
-1. Вычисляет `baseline_database = payload.test_database or payload.source_database`.
+1. Вычисляет `baseline_database = payload.test_database or f"{payload.source_database}__benchmark_tmp"`.
 2. Создаёт временную baseline-таблицу с именем `source_table__source_baseline__<uuid>`.
-3. Снимает baseline insert-метрики через `_measure_insert(...)`.
-4. Снимает baseline select-метрики через `_measure_select_queries(...)`.
-5. Возвращает baseline-метрики в `SourceBenchmarkResult.metrics`.
-6. Всегда удаляет временную baseline-таблицу в `finally`.
+3. Строит DDL baseline-копии:
+   - основной путь: `TableDDL.from_ddl(...)->to_ddl()`;
+   - fallback: перепись target-имени в `CREATE TABLE` (для synthetic/legacy DDL).
+4. Переписывает `warmup/test queries` на baseline-копию (`_rewrite_queries_to_baseline_copy`).
+5. Снимает baseline insert-метрики через `_measure_insert(...)`.
+6. Снимает baseline select-метрики через `_measure_select_queries(...)`.
+7. Дополнительно сохраняет per-query source select-метрики (`source_table_select_metrics_by_query`).
+8. Возвращает baseline-метрики в `SourceBenchmarkResult.metrics`.
+9. Всегда удаляет временную baseline-таблицу в `finally`.
 
 `run_variant_benchmark(payload)`:
 1. Создаёт variant-таблицу в `variant_database`.
 2. Для insert-замеров использует `_measure_insert(...)`.
 3. Для индексных вариантов передаёт `tested_cols` из `variant_params.index_choices`
    (legacy-совместимое поведение).
-4. Снимает select/size/index/compression-метрики, считает percentiles/speedup/score.
-5. Пишет результат через `ClickHouseBenchmarkResultStore.store_worker_result(...)`.
-6. Всегда удаляет variant-таблицу в `finally`.
+4. Снимает select/size/index/compression-метрики.
+5. Для select считает:
+   - агрегированные percentiles/speedup;
+   - per-query percentiles;
+   - per-query speedup (`source/tested`).
+6. Пишет результат через `ClickHouseBenchmarkResultStore.store_worker_result(...)`.
+7. Всегда удаляет variant-таблицу в `finally`.
 
 Низкоуровневые гарантии runtime:
 1. Streaming insert: приоритет `raw_stream/raw_insert` (clickhouse-connect),
