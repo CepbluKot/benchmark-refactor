@@ -1,759 +1,93 @@
 # DDL Benchmark Engine
 
-Python-движок для перебора вариантов DDL (типы/кодеки/индексы), прогонки бенчмарка и выбора лучших конфигураций.
-
-Документ описывает:
-1. полный алгоритм работы пайплайна;
-2. все ключевые модели конфигурации;
-3. все классы и методы runtime-оркестрации;
-4. все вспомогательные модули (парсинг DDL, комбинатор, генерация запросов, naming, fetcher).
-
-## 0. Простыми словами
-
-Если объяснить без внутренней кухни, бенчмарк делает вот что:
-
-1. Вы даете JSON-конфиг:
-   - куда подключаться (БД/креды);
-   - какие базы и таблицы тестировать (все автоматически или вручную);
-   - что разрешено менять в DDL (типы, кодеки, индексы);
-   - лимиты (например, максимум итераций).
-2. Движок строит варианты DDL для каждой выбранной таблицы.
-3. Для каждого варианта прогоняются одни и те же тестовые запросы.
-4. По каждому прогону считается метрика качества (`score`) и сразу пишется в хранилище результатов (обычно БД), без накопления большого списка в памяти.
-5. Если режим `sequential`:
-   - сначала тестируются только варианты типов/кодеков;
-   - потом из БД выбираются top-N лучших по `score`;
-   - и только на этих лучших DDL дополнительно тестируются индексы.
-6. В конце у вас есть `benchmark_run_id`, `benchmark_started_at` (время старта всего запуска) и все результаты в БД, откуда можно сделать отчеты и выбрать лучший DDL для продакшена.
-
-Коротко: это автоматический перебор и сравнение DDL-вариантов, чтобы не угадывать вручную, а опираться на реальные замеры.
-
-## 1. Архитектура и поток данных
-
-Пайплайн состоит из трех основных уровней:
-
-1. `loader.py` + `models.py`  
-   Загрузка и валидация JSON-конфига в `BenchmarkRootConfig`.
-2. `benchmark_engine.py::BenchmarkPlanner`  
-   Преобразование конфига в table-level планы (`TableBenchmarkPlan`) с учетом глобальных и локальных override.
-3. `benchmark_engine.py::BenchmarkEngine` + `BenchmarkRunner`  
-   Генерация `VariantJob` и выполнение через `BenchmarkExecutionAdapter`.
-
-Упрощенный поток:
-
-```text
-file-mode: project json -> ConfigLoader.load/parse -> BenchmarkRootConfig
-env-mode (текущий main.py): BENCH_*_CONFIG_B64 -> settings.py -> parse_config_parts -> BenchmarkRootConfig
-BenchmarkRootConfig + MetadataProvider -> BenchmarkPlanner -> TableBenchmarkPlan
-TableBenchmarkPlan -> BenchmarkEngine -> VariantJob -> BenchmarkExecutionAdapter -> BenchmarkVariantResult -> BenchmarkResultStore
-```
-
-## 2. Алгоритм работы (end-to-end)
-
-### 2.1 Загрузка конфигурации
-
-Есть два поддерживаемых режима:
-
-1. File-mode (`load_config` / `parse_config`):
-   - `ConfigLoader` валидирует `BenchmarkProjectConfig`;
-   - читает `connections_file`, `rule_banks_file`, `benchmarks_file` (или inline `benchmarks`);
-   - собирает `BenchmarkRootConfig`.
-2. Env-mode (`parse_config_parts`, текущий `main.py`):
-   - `settings.py` декодирует 4 base64 JSON-секции:
-     - `BENCH_CELERY_CONFIG_B64`
-     - `BENCH_CONNECTIONS_CONFIG_B64`
-     - `BENCH_RULE_BANKS_CONFIG_B64`
-     - `BENCH_BENCHMARKS_CONFIG_B64`
-   - `parse_config_parts(...)` собирает `BenchmarkRootConfig` напрямую из этих секций.
-
-После сборки выполняется валидация ссылок:
-- `benchmark.connection_id` существует;
-- `rules.rule_bank` существует;
-- `default_rule_banks[dbms]` указывает на существующий банк.
-
-### 2.2 Планирование таблиц
-
-Для каждого benchmark:
-
-1. `TableSelector` раскрывает селекторы `databases` и `tables`.
-2. Для каждой таблицы ищется локальный `table_rule`.
-3. `RuleResolver.merge(global_rules, local_rules)` объединяет правила.
-4. `RuleResolver.resolve(...)` выбирает источник правил:
-   - explicit `rule_bank`;
-   - inline overrides;
-   - `default_rule_banks`.
-5. Вычисляются итоговые параметры таблицы:
-   - `mode`;
-   - `max_iterations`;
-   - `sequential_top_n`;
-   - `insert_rows_limit`;
-   - `insert_rows_limits`;
-   - `column_order_mode`;
-   - `queries`;
-   - глобальный `celery` из root-конфига.
-6. Формируется `TableBenchmarkPlan`.
-
-### 2.3 Генерация заданий на выполнение
-
-Для каждого `TableBenchmarkPlan`:
-
-1. `BenchmarkEngine.prepare_table_context(...)`:
-   - читает исходный `TableDDL` у `MetadataProvider`;
-   - строит сырой `QueryPlan` с placeholder `{table}`.
-2. `BenchmarkEngine.iter_variant_jobs_for_table_plan(...)`:
-   - определяет режим генерации;
-   - считает `total_variants(...)`;
-   - итерирует `iter_variants(...)`;
-   - для каждого варианта строит `VariantJob`.
-
-### 2.4 Выполнение
-
-`BenchmarkRunner.run(...)`:
-
-0. Резолвит единый `benchmark_run_id` для всего запуска:
-   - из аргумента `run(..., benchmark_run_id=...)`, либо
-   - через `BenchmarkRunIdProvider.next_benchmark_run_id()`.
-   Одновременно выставляет единый `benchmark_started_at` (UTC datetime) для всего запуска.
-1. Для каждой таблицы выбирает `TableExecutionStrategy` по `table_plan.mode`.
-2. По умолчанию (`DefaultTableExecutionStrategy`):
-   - запускает jobs через `execution_adapter.execute_variant(job)`;
-   - сразу сохраняет результат в `result_store.store_result(job, result)`.
-3. Для `mode == "sequential"` используется `SequentialTopNTableExecutionStrategy`:
-   - Stage A: прогоняет только `types`-варианты;
-   - для Stage A лимит вставки берётся из `insert_rows_limits.types` (если задан);
-   - сохраняет score/DDL type-этапа в result-store;
-   - выбирает top-N (`sequential_top_n`) через `result_store.get_top_type_variants(...)`;
-   - Stage B: для DDL лучших type-вариантов прогоняет `indexes`-варианты;
-   - для Stage B лимит вставки берётся из `insert_rows_limits.indexes` (если задан);
-   - сохраняет index-результаты в result-store.
-
-`run(...)` больше не возвращает массив результатов, а возвращает только `benchmark_run_id`.
-Время старта текущего запуска доступно через `runner.last_benchmark_started_at`.
-
-Сортировка top-N:
-- больше `score` = лучше;
-- `score=None` уходит в конец.
-
-## 3. Режимы перебора
-
-Режим задается в `BenchmarkConfig.mode` или `TableRuleConfig.mode`.
-
-1. `types`  
-   Меняются только типы и кодеки колонок.
-2. `indexes`  
-   Меняются только skip-индексы.
-3. `combined`  
-   Декартово произведение type-вариантов и index-вариантов.
-4. `sequential`  
-   Адаптивный двухфазный режим в `BenchmarkRunner`:
-   - types -> score -> top-N -> indexes на top-N DDL.
-
-## 4. Конфиг-модели (`models.py`)
-
-### 4.1 Базовые alias
-
-- `BenchmarkMode = Literal["types", "indexes", "sequential", "combined"]`
-- `DatabasesSelector = "*" | List[str]`
-- `TablesSelector = "*" | List[str] | Dict[str, "*" | List[str]]`
-
-### 4.2 Модели правил
-
-1. `ColumnRuleConfig`
-   - поля: `by_type`, `by_name`, `types`, `codecs`
-   - `by_type` матчится строго по полной строке типа (без префиксного матчинга)
-   - метод: `check_matchers()`
-2. `IndexConfig`
-   - поля: `type`, `granularity`
-3. `IndexRuleConfig`
-   - поля: `by_type`, `by_name`, `indexes`
-   - `by_type` матчится строго по полной строке типа (без префиксного матчинга)
-   - метод: `check_matchers()`
-4. `RuleBankConfig`
-   - поля: `column_rules`, `index_rules`, `column_order`
-5. `RulesConfig`
-   - поля: `rule_bank`, `column_rules`, `index_rules`, `column_order`
-   - методы: `has_inline_overrides()`, `is_empty()`, `merged_over(base)`
-
-### 4.3 Модели запросов и выполнения
-
-1. `TestQueryConfig`
-   - поля: `query`, `weight` (конфиговое поле, runtime сейчас использует только `query`)
-2. `QueriesConfig`
-   - поля: `mode`, `warmup_queries`, `test_queries`
-   - метод: `check_manual_has_queries()`
-3. `CeleryConfig`
-   - поля: `workers`, `threads_per_worker`
-   - используется только на уровне `BenchmarkRootConfig` (внутри `BenchmarkConfig` не задаётся)
-
-### 4.4 Модели benchmark-проекта
-
-1. `TableRuleConfig`
-   - поля: `database`, `table`, `rules`, `column_order_mode`, `queries`, `max_iterations`, `sequential_top_n`, `insert_rows_limit`, `insert_rows_limits`, `mode`
-   - метод: `non_empty_table_target(...)`
-2. `ConnectionConfig`
-   - поля: `id`, `dbms`, `credential_type`, `host`, `port`, `login`, `password`
-   - метод: `normalize_tokens(...)`
-3. `BenchmarkConfig`
-   - поля: `id`, `connection_id`, `mode`, `global_rules`, `column_rules_mode`, `index_rules_mode`, `column_order_mode`, `databases`, `tables`, `max_iterations`, `sequential_top_n`, `insert_rows_limit`, `insert_rows_limits`, `queries`, `table_rules`
-   - метод: `validate_selectors()`
-   - режимы `column_rules_mode`/`index_rules_mode`:
-     - `global_bank_only` — брать только правила из глобального bank;
-     - `global_bank_with_inline_priority` — inline-правила ставятся первыми, затем добавляются bank-правила;
-     - `inline_only` — использовать только inline-правила из конфига benchmark/table.
-   - задаются отдельно для каждого элемента в `benchmarks[]` (нет общего root-поля для этих режимов).
-4. `BenchmarkRootConfig`
-   - поля: `connections`, `benchmarks`, `rule_banks`, `default_rule_banks`, `celery`
-   - методы: `normalize_default_rule_banks(...)`, `validate_uniqueness()`
-5. Файловые обертки:
-   - `ConnectionsFileConfig` (+ `validate_non_empty()`)
-   - `RuleBanksFileConfig` (+ `normalize_default_rule_banks(...)`)
-   - `BenchmarksFileConfig` (+ `validate_non_empty()`)
-   - `BenchmarkProjectConfig` (+ `normalize_file_refs(...)`, `validate_benchmarks_source()`)
-
-## 5. Loader API (`loader.py`)
-
-### Класс `ConfigLoader`
-
-1. `load(path)`  
-   Читает project JSON и запускает сборку.
-2. `parse(raw, base_dir=None)`  
-   Парсит уже загруженный dict.
-3. `parse_parts(celery_raw, connections_raw, rule_banks_raw, benchmarks_raw)`  
-   Сборка `BenchmarkRootConfig` из 4 независимых JSON-секций (env-mode).
-4. `_parse_project_config(raw, base_dir)`  
-   Внутренний full pipeline сборки для file-mode.
-5. `_resolve_file_path(base_dir, ref)`  
-   Резолв относительных путей.
-6. `_read_json(path)`  
-   Чтение JSON с нормальными ошибками.
-7. `_validate_references(config)`  
-   Проверка кросс-ссылок.
-8. `_validate_table_rule_scope(bench)`  
-   Проверка, что table_rules не выходят за `databases`.
-
-### Функции
-
-1. `load_config(path)`
-2. `parse_config(raw, base_dir=None)`
-3. `parse_config_parts(celery_raw, connections_raw, rule_banks_raw, benchmarks_raw)`
-
-## 6. Resolver API (`resolver.py`)
-
-### Функции
-
-1. `_column_rule_from_config(cfg)`
-2. `_index_rule_from_config(cfg)`
-3. `resolve(rules_config, banks, default_rule_banks=None, dbms=None)`  
-   backward-compatible wrapper.
-
-### Класс `ResolvedRules`
-
-Поля:
-- `column_rules`
-- `index_rules`
-- `column_order`
-- `source_bank`
-
-Методы:
-- `__init__(...)`
-- `__repr__()`
-
-### Класс `RuleResolver`
-
-1. `__init__(banks, default_rule_banks=None)`
-2. `merge(global_rules, local_rules)`
-3. `resolve(rules_config, dbms=None)`
-4. `_pick_bank(rules_config, dbms)`
-5. `_resolve_bank_name(rules_config, dbms)`
-
-## 7. DDL-модель и парсер (`clickhouse_ddl.py`)
-
-### `ColumnDef`
-
-Поля: `name`, `type`, `codec`, `extra`  
-Методы: `to_sql(indent="    ")`, `copy()`
-
-### `IndexDef`
-
-Поля: `name`, `expr`, `index_type`, `granularity`  
-Методы: `to_sql(indent="    ")`, `copy()`
-
-### `TableDDL`
-
-Поля:
-- `name`, `cluster`
-- `columns`, `indexes`
-- `other_body_entries`
-- `engine`, `partition_by`, `order_by`, `primary_key`, `sample_by`
-- `other_table_options`
-
-Парсинг helpers:
-1. `_find_closing_paren(text, pos)`
-2. `_split_top_level_commas(text)`
-3. `_consume_identifier(text)`
-4. `_consume_type(text)`
-5. `_extract_codec(text)`
-6. `from_ddl(ddl)`
-7. `_parse_column(text)`
-8. `_parse_index(text)`
-9. `_parse_table_options(text)`
-
-Сборка/доступ:
-1. `to_ddl()`
-2. `copy()`
-3. `column(name)`
-4. `index(name)`
-
-## 8. Правила и генераторы вариантов колонок/индексов
-
-### `column_rules.py`
-
-1. `ColumnAlternatives`
-   - `iter_combos(original)`
-   - `total(original)`
-2. `ColumnRule`
-   - поля: `alternatives`, `by_type`, `by_name`
-   - метод: `matches(col)`
-
-### `column_variants.py`
-
-1. `ColumnVariantMeta`
-2. `_resolve_columns(table, rules, column_order)`
-3. `iter_column_variants(table, rules, column_order=None)`
-4. `total_column_variants(table, rules, column_order=None)`
-
-### `index_rules.py`
-
-1. `IndexVariant`
-   - `to_index_def(col, idx_num)`
-2. `IndexAlternatives`
-   - `iter_variants(col)`
-   - `total()`
-3. `IndexRule`
-   - `matches(col)`
-
-### `index_variants.py`
-
-1. `IndexVariantMeta`
-2. `_resolve_index_columns(table, rules, column_order=None)`
-3. `iter_index_variants(table, rules, column_order=None)`
-4. `total_index_variants(table, rules, column_order=None)`
-
-## 9. Комбинатор режимов (`combiner.py`)
-
-### `VariantMeta`
-
-Поля:
-- `global_index`
-- `mode`
-- `column_meta`
-- `index_meta`
-
-Методы-свойства:
-- `column_choices`
-- `index_choices`
-
-### Публичные функции
-
-1. `iter_variants(table, mode, column_rules, index_rules, column_order=None, max_iterations=None)`
-2. `total_variants(table, mode, column_rules, index_rules, column_order=None, max_iterations=None)`
-
-### Расширяемый API стратегий
-
-1. `VariantGenerationStrategy`
-   - `iter_variants(...)`
-   - `total_variants(...)`
-2. Встроенные реализации:
-   - `TypesVariantGenerationStrategy`
-   - `IndexesVariantGenerationStrategy`
-   - `SequentialVariantGenerationStrategy`
-   - `CombinedVariantGenerationStrategy`
-3. Реестр:
-   - `MODE_VARIANT_STRATEGIES`
-   - `register_variant_generation_strategy(mode, strategy, overwrite=False)`
-   - `get_variant_generation_strategy(mode)`
-
-Новый mode добавляется без правок `if/elif`:
-
-```python
-from combiner import (
-    VariantGenerationStrategy,
-    VariantMeta,
-    register_variant_generation_strategy,
-)
-
-
-class MyModeStrategy(VariantGenerationStrategy):
-    def iter_variants(self, table, column_rules, index_rules, column_order=None):
-        # your generation logic
-        yield table.copy(), VariantMeta(global_index=0, mode="my_mode")
-
-    def total_variants(self, table, column_rules, index_rules, column_order=None):
-        return 1
-
-
-register_variant_generation_strategy("my_mode", MyModeStrategy())
-```
-
-## 10. Генерация тестовых SQL (`query_generator.py`)
-
-### Helper-функции классификации типов
-
-1. `_base_type(col)`
-2. `_is_integer(col)`
-3. `_is_float(col)`
-4. `_is_numeric(col)`
-5. `_is_datetime(col)`
-6. `_is_string(col)`
-7. `_is_low_cardinality(col)`
-8. `_is_nullable(col)`
-
-### `GeneratedQuery`
-
-Поля: `query`, `description`
-
-### `QueryGenerator`
-
-1. `__init__(table)`
-2. `generate()`
-3. `_full_scan_queries()`
-4. `_datetime_range_queries()`
-5. `_order_by_filter_queries()`
-6. `_aggregate_queries()`
-7. `_group_by_queries()`
-
-### Публичная функция
-
-1. `generate_queries(table)`
-
-## 11. Naming (`naming.py`)
-
-1. `_sanitize(s)`
-2. `variant_table_name(original_table, benchmark_id, variant_index)`
-3. `parse_variant_name(name)`
-4. `is_variant_table(name)`
-
-## 12. Fetcher (`fetcher.py`)
-
-### Модели/исключения
-
-1. `TableMetrics`
-   - property: `compression_ratio`
-2. `QueryResult`
-3. `FetcherError`
-
-### Класс `Fetcher`
-
-Lifecycle:
-1. `__init__(connection)`
-2. `connect()`
-3. `disconnect()`
-4. `__enter__()`
-5. `__exit__(...)`
-
-Core SQL:
-1. `_execute(query, params=None)`
-
-Metadata/DDl:
-1. `list_databases(exclude_system=True)`
-2. `list_tables(database)`
-3. `table_exists(database, table)`
-4. `fetch_ddl(database, table)`
-5. `fetch_table_ddl(database, table)` (alias)
-6. `create_table(table_ddl)`
-7. `drop_table(database, table, if_exists=True)`
-
-Data + metrics:
-1. `insert_from(source_database, source_table, target_database, target_table, limit=None)`
-2. `fetch_metrics(database, table)`
-3. `run_query(query)`
-4. `_generate_query_id()`
-5. `warmup(query)`
-
-Фабрика:
-1. `make_fetcher(connection)`
-
-## 13. Core runtime API (`benchmark_engine.py`)
-
-### Runtime модели
-
-1. `_FrozenModel`
-2. `TableTarget`
-3. `Query`
-4. `QueryPlan`
-5. `TableBenchmarkPlan`
-6. `VariantJob`
-7. `BenchmarkVariantResult`
-8. `StoredBenchmarkResult`
-9. `TopTypeVariant`
-
-`VariantJob` содержит run-level поля `benchmark_run_id` (целое > 0) и
-`benchmark_started_at` (UTC datetime), общие для всех benchmark'ов внутри
-одного запуска конфига. `StoredBenchmarkResult` сохраняет эти же run-level поля.
-`VariantJob.insert_rows_limit` задаёт лимит строк для копирования из source в variant
-перед замерами (если ваш execution adapter это поддерживает).
-При наличии `insert_rows_limits` в конфиге лимит выбирается по mode/stage
-(`types`, `indexes`, `combined`, `sequential`) и только затем применяется fallback
-на `insert_rows_limit`.
-Для `mode="sequential"` это даёт отдельные stage-лимиты без изменения интерфейса:
-- этап типов/кодеков (`variant_meta.mode="types"`) -> `insert_rows_limits.types`;
-- этап индексов (`variant_meta.mode="indexes"`) -> `insert_rows_limits.indexes`;
-- если stage-ключ не задан, fallback: `insert_rows_limits.sequential`, затем `insert_rows_limit`.
-
-### Result store
-
-1. `BenchmarkResultStore`
-   - `store_result(job, result)`
-   - `get_top_type_variants(benchmark_run_id, benchmark_id, source_database, source_table, top_n)`
-2. `InMemoryBenchmarkResultStore`
-   - тестовая in-memory реализация; в production рекомендуется DB-backed реализация.
-
-### Metadata abstraction
-
-1. `MetadataProvider`
-   - `list_databases()`
-   - `list_tables(database)`
-   - `fetch_table_ddl(database, table)`
-2. `FetcherMetadataProvider`
-   - `__init__(fetcher)`
-   - `list_databases()`
-   - `list_tables(database)`
-   - `fetch_table_ddl(database, table)`
-
-### `TableSelector`
-
-1. `select_targets(benchmark, provider)`
-2. `_resolve_databases(benchmark, provider)`
-3. `_resolve_tables(benchmark, databases, provider)`
-4. `_deduplicate(targets)`
-
-### `QueryPlanBuilder`
-
-1. `build(table_ddl, queries_config)`
-2. `render_for_table(plan, database, table)`
-
-### `BenchmarkPlanner`
-
-1. `__init__(config, providers_by_connection_id, table_selector=None, rule_resolver=None)`
-2. `provider_for_connection(connection_id)`
-3. `iter_table_plans(benchmark_ids=None)`
-4. `_find_table_rule(benchmark, target)`
-
-### `BenchmarkEngine`
-
-1. `__init__(planner, query_builder=None)`
-2. `iter_table_plans(benchmark_ids=None)`
-3. `prepare_table_context(table_plan)`
-4. `build_variant_job(table_plan, raw_query_plan, variant_ddl, variant_meta, total_variants, benchmark_run_id, benchmark_started_at, job_mode=None)`
-5. `iter_variant_jobs_for_table_plan(table_plan, benchmark_run_id=1, benchmark_started_at=None)`
-6. `iter_variant_jobs(benchmark_ids=None, benchmark_run_id=1, benchmark_started_at=None)`
-
-### Execution adapter
-
-1. `BenchmarkExecutionAdapter`
-   - `execute_variant(job)`
-2. `NoopExecutionAdapter`
-   - `execute_variant(job)`
-
-### Run id provider
-
-1. `BenchmarkRunIdProvider`
-   - `next_benchmark_run_id()`
-2. `InMemoryBenchmarkRunIdProvider`
-   - serial id в памяти процесса (`1, 2, 3, ...`)
-3. `MaxIdBenchmarkRunIdProvider`
-   - принимает `max_id_getter()`;
-   - выдает `max(existing_id)+1`;
-   - хранит локальный reserved id, чтобы не выдавать дубликаты между вызовами.
-
-### Table execution strategy
-
-1. `TableExecutionStrategy`
-   - `execute_table(runner, table_plan, benchmark_run_id, benchmark_started_at)`
-2. `DefaultTableExecutionStrategy`
-   - обычный проход `VariantJob` из `BenchmarkEngine`.
-3. `SequentialTopNTableExecutionStrategy`
-   - двухэтапный алгоритм `types -> top-N -> indexes`.
-
-### `BenchmarkRunner`
-
-1. `__init__(engine, execution_adapter, result_store, run_id_provider=None, run_started_at_provider=None, table_execution_strategies=None, default_table_execution_strategy=None)`
-2. `run(benchmark_ids=None, benchmark_run_id=None)`
-3. `register_table_execution_strategy(mode, strategy, overwrite=False)`
-4. `_next_run_id()`
-5. `_next_run_started_at()`
-6. `last_benchmark_started_at` (property)
-7. `_execute_regular_table(table_plan, benchmark_run_id, benchmark_started_at)`
-8. `_execute_and_store(job)`
-
-### Расширение режимов
-
-Если нужен новый нестандартный режим, обычно делается 2 шага:
-
-1. Генерация DDL-вариантов:
-   - реализуй `VariantGenerationStrategy`;
-   - зарегистрируй через `register_variant_generation_strategy("my_mode", ...)`.
-2. Оркестрация выполнения (если нужна особая логика):
-   - реализуй `TableExecutionStrategy`;
-   - подключи через `runner.register_table_execution_strategy("my_mode", ...)`.
-
-Если режим должен задаваться из JSON (`BenchmarkConfig.mode`), добавь значение в `BenchmarkMode` в `models.py`.
-
-## 14. Как запускать
-
-### 14.1 Запуск `main.py` через env base64 (текущий основной путь)
-
-1. Сгенерируй `.env` из примерных JSON:
+Инструмент для автоматического DDL-бенчмарка: перебирает варианты схемы таблиц (типы, кодеки, индексы), запускает тестовые запросы и помогает выбрать лучший вариант по `score`.
+
+Важно: текущий `main.py` — это demo-runner (in-memory таблицы + `NoopExecutionAdapter`).
+Для реального прогона на вашем ClickHouse нужен рабочий `ExecutionAdapter`.
+
+## Оглавление
+
+- [Что это и кому полезно](#what)
+- [Что подаём на вход и что получаем на выход](#io)
+- [Алгоритм работы бенчмарка](#algorithm)
+- [Чек-лист перед первым запуском](#checklist)
+- [Быстрый старт](#quick-start)
+- [Как собрать конфиг под свой ClickHouse](#clickhouse-config)
+- [Как запустить бенчмарк](#run)
+- [Валидация JSON-конфигов](#validation)
+- [Мини-справочник по полям JSON](#json-reference)
+- [Частые ошибки](#faq)
+- [Для разработчиков (технические детали)](#dev)
+
+<a id="what"></a>
+## Что это и кому полезно
+
+Этот проект нужен, если вы хотите не “на глаз” выбирать DDL, а сравнивать варианты на реальных запросах.
+
+Что делает:
+1. Берёт ваши правила мутаций DDL (типы/кодеки/индексы).
+2. Генерирует варианты схемы.
+3. Гоняет одни и те же запросы на каждом варианте.
+4. Сохраняет результаты и score.
+5. Позволяет выбрать лучший вариант на основе замеров.
+
+<a id="io"></a>
+## Что подаём на вход и что получаем на выход
+
+На вход:
+1. Конфиги подключения к БД.
+2. Какие БД/таблицы бенчмаркить.
+3. Какие правила перебора применяем.
+4. Какой режим перебора (`types`, `indexes`, `combined`, `sequential`).
+5. Какие запросы запускать.
+
+На выход:
+1. `benchmark_run_id` одного запуска.
+2. Результаты по каждому варианту (через result store).
+3. Возможность взять топ-варианты по score.
+
+<a id="algorithm"></a>
+## Алгоритм работы бенчмарка
+
+1. Загружается JSON-конфиг и валидируется.
+2. Из настроек `databases`/`tables` строится список целевых таблиц.
+3. Для каждой таблицы применяются global + table override.
+4. Резолвятся правила из `rule_banks` и inline-правила.
+5. Строится `TableBenchmarkPlan`.
+6. Генерируются DDL-варианты и `VariantJob`.
+7. Каждый job выполняется через `ExecutionAdapter`.
+8. Результат сразу пишется в `ResultStore` (без накопления большого списка в памяти).
+
+Если режим `sequential`:
+1. Сначала гоняются варианты `types`.
+2. По score выбираются top-N (`sequential_top_n`).
+3. Только для top-N запускаются варианты `indexes`.
+
+Лимиты вставки строк (`insert_rows_limit`/`insert_rows_limits`) применяются по приоритету:
+1. `insert_rows_limits[variant_meta.mode]`
+2. `insert_rows_limits[job.mode]`
+3. `insert_rows_limit`
+
+<a id="checklist"></a>
+## Чек-лист перед первым запуском
+
+1. В `connections.json` есть нужный `connection_id`.
+2. В `benchmarks.json` этот `connection_id` указан в каждом benchmark.
+3. Если используете `rule_bank`, он реально существует в `rule_banks.json`.
+4. Если `queries.mode = "manual"`, в `test_queries` есть хотя бы один запрос.
+5. Конфиги проходят валидацию через `validate_json_config.py`.
+
+<a id="quick-start"></a>
+## Быстрый старт
+
+### 1) Проверка окружения
 
 ```bash
-./venv/bin/python encode_configs_base64.py | sed 's/^export //' > .env
-```
-
-2. Запусти:
-
-```bash
-./venv/bin/python main.py
-```
-
-`main.py` ожидает эти переменные в `.env`:
-- `BENCH_CELERY_CONFIG_B64`
-- `BENCH_CONNECTIONS_CONFIG_B64`
-- `BENCH_RULE_BANKS_CONFIG_B64`
-- `BENCH_BENCHMARKS_CONFIG_B64`
-
-`encode_configs_base64.py` берёт пути к JSON из глобальных переменных в начале файла:
-- `CELERY_JSON_PATH`
-- `CONNECTIONS_JSON_PATH`
-- `RULE_BANKS_JSON_PATH`
-- `BENCHMARKS_JSON_PATH`
-
-### 14.2 Обычное демо
-
-```bash
-./venv/bin/python examples/example.py
-```
-
-### 14.3 Демо нового sequential top-N
-
-```bash
-./venv/bin/python examples/example_sequential_topn.py
-```
-
-### 14.4 Тесты
-
-```bash
+./venv/bin/python -V
 ./venv/bin/python -m pytest -q
 ```
 
-## 15. Примеры конфигов
-
-1. `configs/celery.example.json`  
-   Отдельный конфиг Celery для env-mode.
-2. `configs/connections.example.json`
-3. `configs/rule_banks.example.json`
-4. `configs/benchmarks.example.json`
-   Включает пример `sequential` с отдельными `insert_rows_limits.types` и
-   `insert_rows_limits.indexes`, а также table-level override для конкретной таблицы.
-5. `configs/rule_banks.clickhouse_baseline.json`  
-   Отдельный большой универсальный baseline bank для ClickHouse (только `by_type`).
-6. `configs/benchmark.project.example.json`  
-   Пример file-mode (project wrapper + inline benchmarks).
-7. `configs/benchmark.project.sequential_topn.example.json`  
-   Пример file-mode для двухфазного `sequential`.
-
-## 16. Важные практические детали
-
-1. `TestQueryConfig.weight` пока остается в конфиге для совместимости, но runtime `Query` работает только с текстом запроса.
-2. Для `sequential` индексный этап зависит от `score` адаптера, поэтому корректный `execute_variant(...)` критичен.
-3. Если у варианта `score=None`, он почти всегда проиграет ранжирование top-N.
-4. Если `sequential_top_n` больше количества type-вариантов, фактически берутся все.
-5. Автоподстановки builtin rule bank больше нет: если нужны дефолтные правила, укажи `default_rule_banks` в своем JSON.
-6. Готовый baseline для ClickHouse вынесен в `configs/rule_banks.clickhouse_baseline.json`.
-7. `by_type` матчится строго по полному типу: `LowCardinality(String)` и `LowCardinality` — это разные значения.
-8. `column_order_mode="compressed_size_desc"` автоматически расставляет приоритет колонок по убыванию `data_compressed_bytes` в исходной таблице для генерации и type-, и index-вариантов.
-9. Для serial run id из БД:
-
-```python
-from benchmark_engine import (
-    BenchmarkRunner,
-    MaxIdBenchmarkRunIdProvider,
-    InMemoryBenchmarkResultStore,
-)
-
-provider = MaxIdBenchmarkRunIdProvider(
-    max_id_getter=lambda: fetch_max_run_id_from_db(),  # верни int | None
-)
-result_store = InMemoryBenchmarkResultStore()  # в проде: ваш DB-backed store
-runner = BenchmarkRunner(
-    engine=engine,
-    execution_adapter=adapter,
-    result_store=result_store,
-    run_id_provider=provider,
-)
-run_id = runner.run()
-```
-10. Текущий `main.py` использует `StubMetadataProvider` (in-memory DDL), а не реальный `Fetcher`.
-11. Для production-интеграции обычно заменяют:
-    - `StubMetadataProvider` -> `FetcherMetadataProvider` (или свой provider),
-    - `NoopExecutionAdapter` -> рабочий adapter с реальными замерами.
-12. Если выбран `global_bank_only` или `global_bank_with_inline_priority`, должен быть доступен глобальный bank (`global_rules.rule_bank` или `default_rule_banks` для текущего DBMS), иначе planner завершится с ошибкой.
-13. `insert_rows_limit` можно задать на benchmark-уровне и переопределить в `table_rules`; итоговое значение передаётся в `VariantJob` и используется вашим execution adapter для `INSERT ... SELECT ... LIMIT N`.
-14. `insert_rows_limits` позволяет задать разные лимиты для `types`/`indexes`/`combined`/`sequential` и для будущих custom-mode ключей. Приоритет вычисления лимита для job:
-    - `insert_rows_limits[variant_meta.mode]`;
-    - затем `insert_rows_limits[job.mode]`;
-    - затем fallback `insert_rows_limit`.
-15. Для `mode="sequential"` можно управлять лимитами этапов отдельно, без новых полей в JSON:
-
-```json
-{
-  "mode": "sequential",
-  "insert_rows_limit": 1000000,
-  "insert_rows_limits": {
-    "types": 800000,
-    "indexes": 300000,
-    "sequential": 500000
-  },
-  "table_rules": [
-    {
-      "database": "analytics",
-      "table": "user_events",
-      "mode": "sequential",
-      "insert_rows_limits": {
-        "indexes": 120000
-      }
-    }
-  ]
-}
-```
-
-Для примера выше:
-- для всех таблиц в `sequential`: type-stage = `800000`, index-stage = `300000`;
-- для `analytics.user_events`: index-stage переопределён в `120000`, type-stage остаётся `800000`.
-
-## 17. CLI валидации JSON по пути
-
-Добавлена утилита `validate_json_config.py`, которая валидирует JSON по моделям
-и в нужных режимах проверяет кросс-ссылки.
-
-Запуск:
-
-```bash
-./venv/bin/python validate_json_config.py --help
-```
-
-### 17.1 Валидация одного файла (`single`)
-
-```bash
-./venv/bin/python validate_json_config.py single --type celery --path configs/celery.example.json
-./venv/bin/python validate_json_config.py single --type connections --path configs/connections.example.json
-./venv/bin/python validate_json_config.py single --type rule_banks --path configs/rule_banks.example.json
-./venv/bin/python validate_json_config.py single --type benchmarks --path configs/benchmarks.example.json
-./venv/bin/python validate_json_config.py single --type project --path configs/benchmark.project.example.json
-```
-
-Поддерживаемые `--type`: `celery`, `connections`, `rule_banks`, `benchmarks`, `project`, `root`.
-
-### 17.2 Валидация 4 секций и ссылок (`parts`)
+### 2) Валидация примерных конфигов
 
 ```bash
 ./venv/bin/python validate_json_config.py parts \
@@ -763,216 +97,16 @@ run_id = runner.run()
   --benchmarks-path configs/benchmarks.example.json
 ```
 
-Этот режим проверяет:
-1. Каждую секцию по своей модели.
-2. Сборку в единый `BenchmarkRootConfig`.
-3. Ссылки `connection_id`, `rule_bank`, `default_rule_banks`.
+### 3) Запуск demo
 
-### 17.3 Валидация project-конфига (`project`)
+Сделай шаги из раздела [Как запустить бенчмарк](#run), вариант A.
 
-```bash
-./venv/bin/python validate_json_config.py project --path configs/benchmark.project.example.json
-```
+<a id="clickhouse-config"></a>
+## Как собрать конфиг под свой ClickHouse
 
-Этот режим:
-1. Валидирует `BenchmarkProjectConfig`.
-2. Загружает и валидирует связанные файлы.
-3. Проверяет кросс-ссылки между секциями.
+Ниже минимальный, рабочий сценарий.
 
-Коды завершения:
-1. `0` — всё валидно.
-2. `1` — ошибка валидации/JSON/ссылок.
-
-## 18. Полный состав JSON-файлов
-
-Ниже перечислен контракт каждого JSON-файла, который поддерживается движком.
-Все неизвестные поля запрещены (кроме `insert_rows_limits` custom mode-ключей).
-
-### 18.1 `celery.json` (`CeleryConfig`)
-
-Пример:
-
-```json
-{
-  "workers": 4,
-  "threads_per_worker": 2
-}
-```
-
-Поля:
-
-| Поле | Тип | Обязательное | Значение |
-|---|---|---|---|
-| `workers` | `int` | нет | `> 0`, default `4` |
-| `threads_per_worker` | `int` | нет | `> 0`, default `2` |
-
-### 18.2 `connections.json` (`ConnectionsFileConfig`)
-
-Корень:
-
-| Поле | Тип | Обязательное | Значение |
-|---|---|---|---|
-| `connections` | `list[ConnectionConfig]` | да | список не может быть пустым |
-
-Элемент `ConnectionConfig`:
-
-| Поле | Тип | Обязательное | Значение |
-|---|---|---|---|
-| `id` | `str` | да | уникальный id подключения |
-| `dbms` | `str` | нет | default `clickhouse`, lower-case |
-| `credential_type` | `str` | нет | default `password`, lower-case |
-| `host` | `str` | да | адрес хоста |
-| `port` | `int` | да | `1..65535` |
-| `login` | `str` | да | логин |
-| `password` | `str` | да | пароль |
-
-### 18.3 `rule_banks.json` (`RuleBanksFileConfig`)
-
-Корень:
-
-| Поле | Тип | Обязательное | Значение |
-|---|---|---|---|
-| `rule_banks` | `dict[str, RuleBankConfig]` | нет | default `{}` |
-| `default_rule_banks` | `dict[str, str]` | нет | default `{}`, ключи DBMS нормализуются в lower-case |
-
-`RuleBankConfig`:
-
-| Поле | Тип | Обязательное | Значение |
-|---|---|---|---|
-| `column_rules` | `list[ColumnRuleConfig]` | нет | default `[]` |
-| `index_rules` | `list[IndexRuleConfig]` | нет | default `[]` |
-| `column_order` | `dict[str, int]` | нет | приоритет колонок вручную |
-
-`ColumnRuleConfig`:
-
-| Поле | Тип | Обязательное | Значение |
-|---|---|---|---|
-| `by_type` | `str \| null` | условно | обязателен, если задан `by_name` |
-| `by_name` | `str \| null` | условно | можно задавать вместе с `by_type` |
-| `types` | `list[str]` | нет | альтернативные типы |
-| `codecs` | `list[str]` | нет | альтернативные кодеки |
-
-`IndexRuleConfig`:
-
-| Поле | Тип | Обязательное | Значение |
-|---|---|---|---|
-| `by_type` | `str \| null` | условно | обязателен, если задан `by_name` |
-| `by_name` | `str \| null` | условно | можно задавать вместе с `by_type` |
-| `indexes` | `list[IndexConfig]` | нет | варианты индексов |
-
-`IndexConfig`:
-
-| Поле | Тип | Обязательное | Значение |
-|---|---|---|---|
-| `type` | `str` | да | тип skip-индекса |
-| `granularity` | `int` | нет | `>= 1`, default `1` |
-
-### 18.4 `benchmarks.json` (`BenchmarksFileConfig`)
-
-Корень:
-
-| Поле | Тип | Обязательное | Значение |
-|---|---|---|---|
-| `benchmarks` | `list[BenchmarkConfig]` | да | список не может быть пустым |
-
-`BenchmarkConfig`:
-
-| Поле | Тип | Обязательное | Значение |
-|---|---|---|---|
-| `id` | `str` | да | уникальный id бенчмарка |
-| `connection_id` | `str` | да | ссылка на `connections[].id` |
-| `mode` | `types \| indexes \| sequential \| combined` | да | режим перебора |
-| `global_rules` | `RulesConfig` | нет | default `{}` |
-| `column_order_mode` | `compressed_size_desc \| null` | нет | авто-ранжирование колонок |
-| `databases` | `"*" \| list[str]` | нет | default `"*"` |
-| `tables` | `"*" \| list[str] \| dict[str, "*" \| list[str]]` | нет | default `"*"` |
-| `max_iterations` | `int` | нет | `> 0`, default `100` |
-| `sequential_top_n` | `int` | нет | `> 0`, default `1` |
-| `insert_rows_limit` | `int \| null` | нет | `> 0` |
-| `insert_rows_limits` | `InsertRowsLimitsConfig \| null` | нет | лимиты по mode/stage |
-| `column_rules_mode` | `global_bank_only \| global_bank_with_inline_priority \| inline_only \| null` | нет | источник column rules |
-| `index_rules_mode` | `global_bank_only \| global_bank_with_inline_priority \| inline_only \| null` | нет | источник index rules |
-| `queries` | `QueriesConfig` | нет | default `{"mode":"auto"}` |
-| `table_rules` | `list[TableRuleConfig]` | нет | default `[]` |
-
-`RulesConfig`:
-
-| Поле | Тип | Обязательное | Значение |
-|---|---|---|---|
-| `rule_bank` | `str \| null` | нет | ссылка на `rule_banks` |
-| `column_rules` | `list[ColumnRuleConfig] \| null` | нет | inline override |
-| `index_rules` | `list[IndexRuleConfig] \| null` | нет | inline override |
-| `column_order` | `dict[str, int] \| null` | нет | inline override |
-
-`QueriesConfig`:
-
-| Поле | Тип | Обязательное | Значение |
-|---|---|---|---|
-| `mode` | `auto \| manual \| auto_with_manual` | нет | default `auto` |
-| `warmup_queries` | `list[str]` | нет | default `[]` |
-| `test_queries` | `list[TestQueryConfig]` | нет | для `manual` обязателен минимум 1 |
-
-`TestQueryConfig`:
-
-| Поле | Тип | Обязательное | Значение |
-|---|---|---|---|
-| `query` | `str` | да | SQL с `{table}` |
-| `weight` | `float` | нет | `> 0`, default `1.0` |
-
-`TableRuleConfig`:
-
-| Поле | Тип | Обязательное | Значение |
-|---|---|---|---|
-| `database` | `str` | да | имя БД, не пустое |
-| `table` | `str` | да | имя таблицы, не пустое |
-| `rules` | `RulesConfig` | нет | default `{}` |
-| `column_order_mode` | `compressed_size_desc \| null` | нет | локальный override |
-| `queries` | `QueriesConfig \| null` | нет | локальный override |
-| `max_iterations` | `int \| null` | нет | `> 0`, локальный override |
-| `sequential_top_n` | `int \| null` | нет | `> 0`, локальный override |
-| `insert_rows_limit` | `int \| null` | нет | `> 0`, локальный override |
-| `insert_rows_limits` | `InsertRowsLimitsConfig \| null` | нет | локальный override |
-| `mode` | `types \| indexes \| sequential \| combined \| null` | нет | локальный override |
-
-`InsertRowsLimitsConfig`:
-
-| Поле | Тип | Обязательное | Значение |
-|---|---|---|---|
-| `types` | `int \| null` | нет | `> 0` |
-| `indexes` | `int \| null` | нет | `> 0` |
-| `combined` | `int \| null` | нет | `> 0` |
-| `sequential` | `int \| null` | нет | `> 0` |
-| `<custom_mode_key>` | `int` | нет | любое непустое имя ключа, значение `> 0` |
-
-### 18.5 `benchmark.project.json` (`BenchmarkProjectConfig`)
-
-Используется в file-mode как обёртка, которая ссылается на отдельные JSON-файлы.
-
-| Поле | Тип | Обязательное | Значение |
-|---|---|---|---|
-| `connections_file` | `str` | да | путь к connections JSON |
-| `rule_banks_file` | `str` | да | путь к rule_banks JSON |
-| `benchmarks` | `list[BenchmarkConfig] \| null` | условно | inline benchmark-список |
-| `benchmarks_file` | `str \| null` | условно | путь к benchmarks JSON |
-| `celery` | `CeleryConfig` | нет | default `{"workers":4,"threads_per_worker":2}` |
-
-Требование:
-1. Нужно указать ровно один источник benchmark-ов: либо `benchmarks`, либо `benchmarks_file`.
-
-## 19. Пошаговый гайд: с нуля до запуска
-
-### 19.1 Создай 4 базовых JSON-файла
-
-1. `configs/celery.local.json`:
-
-```json
-{
-  "workers": 4,
-  "threads_per_worker": 2
-}
-```
-
-2. `configs/connections.local.json`:
+### Шаг 1. `connections.local.json`
 
 ```json
 {
@@ -981,7 +115,7 @@ run_id = runner.run()
       "id": "prod_ch",
       "dbms": "clickhouse",
       "credential_type": "password",
-      "host": "127.0.0.1",
+      "host": "clickhouse.my-host.local",
       "port": 9000,
       "login": "bench_user",
       "password": "secret"
@@ -990,7 +124,9 @@ run_id = runner.run()
 }
 ```
 
-3. `configs/rule_banks.local.json`:
+### Шаг 2. `rule_banks.local.json`
+
+Вариант 1 (самый быстрый): взять готовый baseline и не писать большой банк с нуля.
 
 ```json
 {
@@ -1020,7 +156,7 @@ run_id = runner.run()
 }
 ```
 
-4. `configs/benchmarks.local.json`:
+### Шаг 3. `benchmarks.local.json`
 
 ```json
 {
@@ -1030,7 +166,7 @@ run_id = runner.run()
       "connection_id": "prod_ch",
       "mode": "sequential",
       "databases": ["analytics"],
-      "tables": ["user_events"],
+      "tables": ["events"],
       "max_iterations": 20,
       "sequential_top_n": 2,
       "insert_rows_limit": 1000000,
@@ -1043,27 +179,39 @@ run_id = runner.run()
         "rule_bank": "baseline"
       },
       "queries": {
-        "mode": "auto"
+        "mode": "manual",
+        "test_queries": [
+          {
+            "query": "SELECT count() FROM {table}",
+            "weight": 1.0
+          }
+        ]
       }
     }
   ]
 }
 ```
 
-### 19.2 Провалидируй конфиги перед запуском
+### Шаг 4. `celery.local.json`
 
-```bash
-./venv/bin/python validate_json_config.py parts \
-  --celery-path configs/celery.local.json \
-  --connections-path configs/connections.local.json \
-  --rule-banks-path configs/rule_banks.local.json \
-  --benchmarks-path configs/benchmarks.local.json
+```json
+{
+  "workers": 4,
+  "threads_per_worker": 2
+}
 ```
 
-### 19.3 Запусти benchmark через текущий `main.py` (env-mode)
+<a id="run"></a>
+## Как запустить бенчмарк
 
-1. Открой `encode_configs_base64.py` и выставь пути:
-   `CELERY_JSON_PATH`, `CONNECTIONS_JSON_PATH`, `RULE_BANKS_JSON_PATH`, `BENCHMARKS_JSON_PATH`.
+### Вариант A. Через текущий `main.py` (env-mode)
+
+1. Укажи пути в `encode_configs_base64.py`:
+- `CELERY_JSON_PATH`
+- `CONNECTIONS_JSON_PATH`
+- `RULE_BANKS_JSON_PATH`
+- `BENCHMARKS_JSON_PATH`
+
 2. Сгенерируй `.env`:
 
 ```bash
@@ -1076,9 +224,11 @@ run_id = runner.run()
 ./venv/bin/python main.py
 ```
 
-### 19.4 Альтернатива: file-mode через project JSON
+Важно: это demo-runner (без реального SQL execution).
 
-1. Создай `configs/benchmark.project.local.json`:
+### Вариант B. File-mode через project JSON
+
+Создай `configs/benchmark.project.local.json`:
 
 ```json
 {
@@ -1092,11 +242,262 @@ run_id = runner.run()
 }
 ```
 
-2. Проверь:
+Проверка:
 
 ```bash
 ./venv/bin/python validate_json_config.py project --path configs/benchmark.project.local.json
 ```
 
-3. Используй `load_config(...)`/`parse_config(...)` в своем раннере file-mode.
-   Текущий `main.py` в репозитории работает через env-mode и `parse_config_parts(...)`.
+Использование в коде:
+
+```python
+from loader import load_config
+
+config = load_config("configs/benchmark.project.local.json")
+```
+
+### Вариант C. Реальный запуск на своём ClickHouse
+
+Для реального прогона нужны 3 вещи:
+1. `MetadataProvider`, который читает реальные таблицы из ClickHouse.
+2. `ExecutionAdapter`, который реально создаёт variant-таблицы, вставляет данные, гоняет warmup/test SQL и считает score.
+3. `ResultStore` (обычно DB-backed), куда сохраняются результаты.
+
+Минимальный шаблон:
+
+```python
+from loader import load_config
+from benchmark_engine import (
+    BenchmarkPlanner,
+    BenchmarkEngine,
+    BenchmarkRunner,
+    FetcherMetadataProvider,
+)
+from fetcher import make_fetcher
+
+config = load_config("configs/benchmark.project.local.json")
+connection = next(c for c in config.connections if c.id == "prod_ch")
+fetcher = make_fetcher(connection)
+
+provider = FetcherMetadataProvider(fetcher)
+planner = BenchmarkPlanner(config=config, providers_by_connection_id={"prod_ch": provider})
+engine = BenchmarkEngine(planner=planner)
+
+runner = BenchmarkRunner(
+    engine=engine,
+    execution_adapter=YourClickHouseExecutionAdapter(fetcher),  # реализуете сами
+    result_store=YourResultStore(),  # реализуете сами
+)
+run_id = runner.run()
+print(run_id)
+```
+
+Если нужен быстрый ориентир по структуре адаптера, посмотри:
+- `examples/example.py`
+- `examples/example_sequential_topn.py`
+
+<a id="validation"></a>
+## Валидация JSON-конфигов
+
+Утилита: `validate_json_config.py`.
+
+### Проверить один файл
+
+```bash
+./venv/bin/python validate_json_config.py single --type celery --path configs/celery.example.json
+./venv/bin/python validate_json_config.py single --type connections --path configs/connections.example.json
+./venv/bin/python validate_json_config.py single --type rule_banks --path configs/rule_banks.example.json
+./venv/bin/python validate_json_config.py single --type benchmarks --path configs/benchmarks.example.json
+./venv/bin/python validate_json_config.py single --type project --path configs/benchmark.project.example.json
+```
+
+Поддерживаемые `--type`:
+- `celery`
+- `connections`
+- `rule_banks`
+- `benchmarks`
+- `project`
+- `root`
+
+### Проверить все 4 секции сразу + ссылки
+
+```bash
+./venv/bin/python validate_json_config.py parts \
+  --celery-path configs/celery.example.json \
+  --connections-path configs/connections.example.json \
+  --rule-banks-path configs/rule_banks.example.json \
+  --benchmarks-path configs/benchmarks.example.json
+```
+
+Коды завершения:
+- `0` — всё хорошо.
+- `1` — ошибка валидации/JSON/ссылок.
+
+<a id="json-reference"></a>
+## Мини-справочник по полям JSON
+
+Это короткая версия справочника.
+Если нужен полный пример со всеми важными полями, смотри:
+- `configs/benchmarks.full_fields.example.json`
+- `configs/benchmark.project.sequential_topn.example.json`
+
+### `celery.json`
+
+- `workers` (`int > 0`, default `4`)
+- `threads_per_worker` (`int > 0`, default `2`)
+
+### `connections.json`
+
+Корень:
+- `connections`: список подключений.
+
+Подключение:
+- `id` (уникальный id)
+- `dbms` (обычно `clickhouse`)
+- `credential_type` (обычно `password`)
+- `host`, `port`, `login`, `password`
+
+### `rule_banks.json`
+
+Корень:
+- `rule_banks`: словарь банков правил
+- `default_rule_banks`: дефолтный банк по DBMS
+
+`rule_banks.<bank_id>`:
+- `column_rules`
+- `index_rules`
+- `column_order`
+
+### `benchmarks.json`
+
+Корень:
+- `benchmarks`: список benchmark-конфигов.
+
+Главные поля benchmark:
+- `id`, `connection_id`, `mode`
+- `databases`, `tables`
+- `global_rules`, `table_rules`
+- `max_iterations`, `sequential_top_n`
+- `insert_rows_limit`, `insert_rows_limits`
+- `queries`
+- `column_rules_mode`, `index_rules_mode`
+
+`mode`:
+- `types`
+- `indexes`
+- `combined`
+- `sequential`
+
+`queries.mode`:
+- `auto`
+- `manual`
+- `auto_with_manual`
+
+### `benchmark.project.json`
+
+- `connections_file`
+- `rule_banks_file`
+- ровно одно из:
+  - `benchmarks` (inline),
+  - `benchmarks_file`
+- `celery`
+
+<a id="faq"></a>
+## Частые ошибки
+
+1. `connection_id ... не найден в connections`.
+Проверь совпадение `benchmarks[].connection_id` и `connections[].id`.
+
+2. `rule_bank ... не найден в rule_banks`.
+Проверь `global_rules.rule_bank` и `table_rules[].rules.rule_bank`.
+
+3. `mode=manual требует хотя бы одного test_query`.
+Добавь `queries.test_queries`.
+
+4. JSON parse error (`Expecting value`, `Expecting property name`).
+Обычно это лишняя запятая или комментарий в JSON.
+
+5. В `sequential` нет этапа индексов.
+Проверь, что есть `index_rules`, `sequential_top_n > 0`, и адаптер возвращает `score`.
+
+6. Включён `global_bank_only`, но нет доступного bank.
+Либо укажи `global_rules.rule_bank`, либо настрой `default_rule_banks` для своего DBMS.
+
+<a id="dev"></a>
+## Для разработчиков (технические детали)
+
+### Как это работает внутри
+
+Если коротко, ядро построено как `planner -> engine -> runner`.
+
+1. `loader` + `models` валидируют JSON и собирают `BenchmarkRootConfig`.
+2. `BenchmarkPlanner` раскрывает селекторы БД/таблиц и строит `TableBenchmarkPlan`.
+3. `BenchmarkEngine` на основе плана генерирует варианты DDL и превращает их в `VariantJob`.
+4. `BenchmarkRunner` выполняет jobs через `ExecutionAdapter`.
+5. Каждый результат сразу сохраняется в `ResultStore`.
+
+Почему это удобно:
+1. Можно менять способ генерации вариантов отдельно от способа выполнения.
+2. Можно подключать свой storage без изменений planner/engine.
+3. Логику `sequential` можно развивать независимо от остальных режимов.
+
+### Как расширять функционал
+
+#### 1) Добавить новый режим генерации вариантов
+
+1. Реализуйте `VariantGenerationStrategy` в `src/combiner.py`.
+2. Зарегистрируйте стратегию через `register_variant_generation_strategy("my_mode", strategy)`.
+3. Если новый mode должен приходить из JSON, добавьте его в `BenchmarkMode` в `src/models.py`.
+
+#### 2) Добавить особую логику выполнения mode
+
+1. Реализуйте `TableExecutionStrategy`.
+2. Подключите через `runner.register_table_execution_strategy("my_mode", strategy)`.
+
+Это нужно, если режим выполняется не просто “прогнать все варианты подряд”, как в `sequential`.
+
+#### 3) Подключить реальный SQL-бенчмарк
+
+1. Реализуйте `BenchmarkExecutionAdapter`.
+2. Внутри `execute_variant(job)` обычно делаются:
+   - создание variant-таблицы;
+   - `INSERT INTO ... SELECT ...` (с учётом `job.insert_rows_limit`);
+   - warmup-запросы;
+   - test-запросы;
+   - расчёт итогового `score`;
+   - очистка временных таблиц.
+
+#### 4) Подключить реальный источник метаданных
+
+1. Используйте `MetadataProvider` интерфейс.
+2. Для ClickHouse можно взять `FetcherMetadataProvider` + `make_fetcher(...)`.
+
+#### 5) Подключить production-хранилище результатов
+
+1. Реализуйте `BenchmarkResultStore`.
+2. Обязательные методы:
+   - `store_result(job, result)`;
+   - `get_top_type_variants(...)` (критично для `sequential`).
+
+### В каком файле что искать
+
+1. `src/models.py` — контракт JSON (все поля и валидации).
+2. `src/loader.py` — сборка конфига и проверка ссылок между секциями.
+3. `src/benchmark_engine.py` — planner/engine/runner, стратегии выполнения, run-id.
+4. `src/combiner.py` — стратегии генерации вариантов по mode.
+5. `src/fetcher.py` — ClickHouse-fetcher.
+6. `validate_json_config.py` — CLI-валидатор JSON по пути.
+7. `configs/*.example.json` — примеры конфигов.
+
+### Что проверить после изменений
+
+```bash
+# Полный тест-ран
+./venv/bin/python -m pytest -q
+
+# Тесты валидатора конфигов
+./venv/bin/python -m pytest tests/test_validate_json_config.py -q
+
+# Проверка JSON-синтаксиса конкретного файла
+./venv/bin/python -m json.tool configs/benchmarks.example.json >/dev/null
+```
