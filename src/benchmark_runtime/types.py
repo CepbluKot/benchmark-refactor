@@ -90,8 +90,40 @@ class VariantJob(_FrozenModel):
     insert_rows_limit: Optional[int]
     total_variants: int
     variant_ddl: TableDDL
+    source_benchmark: Optional["SourceBenchmarkResult"] = None
     query_plan: QueryPlan
     celery: CeleryConfig
+
+
+class SourceBenchmarkJob(_FrozenModel):
+    """Execution unit for baseline benchmark on source (original) DDL."""
+
+    benchmark_run_id: int
+    benchmark_started_at: datetime
+    benchmark_id: str
+    connection_id: str
+    connection_dbms: str
+    source_database: str
+    source_table: str
+    source_table_ddl: TableDDL
+    query_plan: QueryPlan
+    max_iterations: int
+    insert_rows_limit: Optional[int]
+    celery: CeleryConfig
+
+
+class SourceBenchmarkResult(_FrozenModel):
+    """Baseline benchmark result for source DDL, propagated to all variant jobs."""
+
+    baseline_id: str = Field(default_factory=lambda: str(uuid4()))
+    benchmark_run_id: int
+    benchmark_started_at: Optional[datetime] = None
+    benchmark_id: str
+    source_database: str
+    source_table: str
+    source_table_ddl: str
+    score: Optional[float] = None
+    metrics: Dict[str, Any] = Field(default_factory=dict)
 
 
 class BenchmarkVariantResult(_FrozenModel):

@@ -1,4 +1,4 @@
-"""No-op execution adapter implementation."""
+"""No-op реализация адаптера выполнения."""
 
 from __future__ import annotations
 
@@ -7,18 +7,35 @@ from typing import Optional
 from ...contracts.execution import BenchmarkExecutionAdapter
 from ...contracts.result_store import BenchmarkResultStore
 from ...types import BenchmarkVariantResult, VariantJob
+from ...types import SourceBenchmarkJob, SourceBenchmarkResult
 
 
 class NoopExecutionAdapter(BenchmarkExecutionAdapter):
-    """Dry-run adapter that only returns planned metadata."""
+    """Dry-run адаптер, который возвращает только запланированные метаданные."""
 
     def __init__(self) -> None:
+        """Создаёт адаптер без привязанного result store."""
         self._store: Optional[BenchmarkResultStore] = None
 
     def bind_result_store(self, result_store: Optional[BenchmarkResultStore]) -> None:
+        """Запоминает store для тестового сохранения результатов."""
         self._store = result_store
 
+    def execute_source_benchmark(self, job: SourceBenchmarkJob) -> SourceBenchmarkResult:
+        """Возвращает baseline-результат без реального выполнения SQL."""
+        return SourceBenchmarkResult(
+            benchmark_run_id=job.benchmark_run_id,
+            benchmark_started_at=job.benchmark_started_at,
+            benchmark_id=job.benchmark_id,
+            source_database=job.source_database,
+            source_table=job.source_table,
+            source_table_ddl=job.source_table_ddl.to_ddl(),
+            score=None,
+            metrics={"status": "planned_only"},
+        )
+
     def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
+        """Возвращает dry-run результат и при наличии пишет его в store."""
         result = BenchmarkVariantResult(
             benchmark_run_id=job.benchmark_run_id,
             benchmark_started_at=job.benchmark_started_at,

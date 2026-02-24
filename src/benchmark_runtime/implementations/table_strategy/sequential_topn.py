@@ -1,4 +1,4 @@
-"""Sequential top-N table-level execution strategy implementation."""
+"""Реализации table-level стратегий для sequential top-N."""
 
 from __future__ import annotations
 
@@ -10,7 +10,13 @@ from src.clickhouse_ddl import TableDDL
 from src.combiner import iter_variants, total_variants
 
 from ...contracts.table_strategy import TableExecutionStrategy
-from ...types import QueryPlan, TableBenchmarkPlan, TopTypeVariant, VariantJob
+from ...types import (
+    QueryPlan,
+    SourceBenchmarkResult,
+    TableBenchmarkPlan,
+    TopTypeVariant,
+    VariantJob,
+)
 
 if TYPE_CHECKING:
     from src.benchmark_engine import BenchmarkRunner
@@ -24,6 +30,7 @@ def _require_result_store(
     runner: "BenchmarkRunner",
     strategy_key: str,
 ) -> "BenchmarkResultStore":
+    """Проверяет, что у runner есть result store, обязательный для top-N отбора."""
     store = runner._result_store
     if store is None:
         raise ValueError(
@@ -37,6 +44,7 @@ def _prepare_table_context(
     runner: "BenchmarkRunner",
     table_plan: TableBenchmarkPlan,
 ) -> Tuple[TableDDL, QueryPlan, Dict[str, int]]:
+    """Готовит исходный DDL, сырой query plan и эффективный порядок колонок."""
     source_ddl, raw_query_plan = runner._engine.prepare_table_context(table_plan)
     effective_column_order = runner._engine.resolve_column_order(
         table_plan=table_plan,
@@ -50,6 +58,7 @@ def _resolve_type_total(
     source_ddl: TableDDL,
     effective_column_order: Dict[str, int],
 ) -> int:
+    """Считает общее число вариантов для type-stage."""
     return total_variants(
         table=source_ddl,
         mode="types",
@@ -69,7 +78,9 @@ def _iter_type_jobs(
     type_total: int,
     benchmark_run_id: int,
     benchmark_started_at: datetime,
+    source_benchmark: SourceBenchmarkResult,
 ) -> Iterator[VariantJob]:
+    """Итерирует jobs первого этапа (`types`) для sequential top-N."""
     for variant_ddl, variant_meta in iter_variants(
         table=source_ddl,
         mode="types",
@@ -87,6 +98,7 @@ def _iter_type_jobs(
             benchmark_run_id=benchmark_run_id,
             benchmark_started_at=benchmark_started_at,
             job_mode="sequential",
+            source_benchmark=source_benchmark,
         )
 
 
@@ -96,6 +108,7 @@ def _resolve_top_type_variants(
     benchmark_run_id: int,
     type_total: int,
 ) -> list[TopTypeVariant]:
+    """Читает top-N type-вариантов из result store без ожидания."""
     if type_total <= 0:
         return []
     store = _require_result_store(runner, strategy_key=table_plan.strategy)
@@ -115,6 +128,7 @@ def _wait_for_type_stage_completion(
     benchmark_run_id: int,
     type_total: int,
 ) -> list[TopTypeVariant]:
+    """Ждёт завершения type-stage и возвращает ранжированный список вариантов."""
     if type_total <= 0:
         return []
     store = _require_result_store(runner, strategy_key=table_plan.strategy)
@@ -151,7 +165,9 @@ def _iter_index_jobs_from_top_variants(
     benchmark_run_id: int,
     benchmark_started_at: datetime,
     type_total: int,
+    source_benchmark: SourceBenchmarkResult,
 ) -> Iterator[VariantJob]:
+    """Итерирует jobs второго этапа (`indexes`) для выбранных top type-вариантов."""
     next_global_index = type_total
     for type_variant in top_variants:
         base_ddl = type_variant.variant_ddl.copy()
@@ -183,11 +199,12 @@ def _iter_index_jobs_from_top_variants(
                 benchmark_run_id=benchmark_run_id,
                 benchmark_started_at=benchmark_started_at,
                 job_mode="sequential",
+                source_benchmark=source_benchmark,
             )
 
 
 class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
-    """Synchronous two-stage strategy for `strategy="sequential_topn_strategy"`."""
+    """Синхронная двухэтапная стратегия `sequential_topn_strategy`."""
 
     def execute_table(
         self,
@@ -196,7 +213,9 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
         benchmark_run_id: int,
         benchmark_started_at: datetime,
     ) -> None:
+        """Запускает type-stage, ждёт top-N и затем запускает index-stage."""
         _require_result_store(runner, strategy_key=table_plan.strategy)
+        source_benchmark = runner._require_active_source_benchmark()
         source_ddl, raw_query_plan, effective_column_order = _prepare_table_context(
             runner=runner,
             table_plan=table_plan,
@@ -216,6 +235,7 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
             type_total=type_total,
             benchmark_run_id=benchmark_run_id,
             benchmark_started_at=benchmark_started_at,
+            source_benchmark=source_benchmark,
         ):
             runner._execute_and_store(job)
 
@@ -239,13 +259,14 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
             benchmark_run_id=benchmark_run_id,
             benchmark_started_at=benchmark_started_at,
             type_total=type_total,
+            source_benchmark=source_benchmark,
         ):
             runner._execute_and_store(job)
 
 
 class SequentialTopNDispatchTypesTableExecutionStrategy(TableExecutionStrategy):
     """
-    Dispatch-only stage-1 for sequential top-N.
+    Dispatch-only стратегия для stage-1 sequential top-N.
 
     Предназначена для асинхронного сценария:
       - launcher только отправляет type jobs;
@@ -259,6 +280,8 @@ class SequentialTopNDispatchTypesTableExecutionStrategy(TableExecutionStrategy):
         benchmark_run_id: int,
         benchmark_started_at: datetime,
     ) -> None:
+        """Отправляет только type-stage jobs без runner-side сохранения."""
+        source_benchmark = runner._require_active_source_benchmark()
         source_ddl, raw_query_plan, effective_column_order = _prepare_table_context(
             runner=runner,
             table_plan=table_plan,
@@ -277,16 +300,17 @@ class SequentialTopNDispatchTypesTableExecutionStrategy(TableExecutionStrategy):
             type_total=type_total,
             benchmark_run_id=benchmark_run_id,
             benchmark_started_at=benchmark_started_at,
+            source_benchmark=source_benchmark,
         ):
             runner._execute_without_store(job)
 
 
 class SequentialTopNDispatchIndexesTableExecutionStrategy(TableExecutionStrategy):
     """
-    Dispatch-only stage-2 for sequential top-N.
+    Dispatch-only стратегия для stage-2 sequential top-N.
 
     Ожидает, что type-stage уже завершён и top-N типовых вариантов
-    доступен в result-store (обычно это внешнее DB-хранилище).
+    доступен в result store (обычно это внешнее DB-хранилище).
     """
 
     def execute_table(
@@ -296,6 +320,8 @@ class SequentialTopNDispatchIndexesTableExecutionStrategy(TableExecutionStrategy
         benchmark_run_id: int,
         benchmark_started_at: datetime,
     ) -> None:
+        """Отправляет index-stage jobs для top-N type-вариантов из store."""
+        source_benchmark = runner._require_active_source_benchmark()
         source_ddl, raw_query_plan, effective_column_order = _prepare_table_context(
             runner=runner,
             table_plan=table_plan,
@@ -323,5 +349,6 @@ class SequentialTopNDispatchIndexesTableExecutionStrategy(TableExecutionStrategy
             benchmark_run_id=benchmark_run_id,
             benchmark_started_at=benchmark_started_at,
             type_total=type_total,
+            source_benchmark=source_benchmark,
         ):
             runner._execute_without_store(job)

@@ -16,6 +16,8 @@ from src.benchmark_engine import (
     FetcherMetadataProvider,
     MetadataProvider,
     QueryPlanBuilder,
+    SourceBenchmarkJob,
+    SourceBenchmarkResult,
     TableBenchmarkPlan,
     TopTypeVariant,
     TableSelector,
@@ -68,6 +70,7 @@ class StaticMetadataProvider(MetadataProvider):
         ddl_by_db_table: Dict[str, Dict[str, str]],
         column_sizes_by_db_table: Dict[str, Dict[str, Dict[str, int]]] | None = None,
     ) -> None:
+        """Готовит in-memory DDL и размеры колонок для тестов планировщика."""
         self._tables = {
             db: {tbl: TableDDL.from_ddl(ddl) for tbl, ddl in tables.items()}
             for db, tables in ddl_by_db_table.items()
@@ -75,27 +78,55 @@ class StaticMetadataProvider(MetadataProvider):
         self._column_sizes = column_sizes_by_db_table or {}
 
     def list_databases(self) -> List[str]:
+        """Возвращает список доступных БД."""
         return sorted(self._tables.keys())
 
     def list_tables(self, database: str) -> List[str]:
+        """Возвращает список таблиц в указанной БД."""
         return sorted(self._tables.get(database, {}).keys())
 
     def fetch_table_ddl(self, database: str, table: str) -> TableDDL:
+        """Возвращает копию DDL заданной таблицы."""
         return self._tables[database][table].copy()
 
     def fetch_column_sizes(self, database: str, table: str) -> Dict[str, int]:
+        """Возвращает размеры колонок для авто-ранжирования порядка колонок."""
         return dict(self._column_sizes.get(database, {}).get(table, {}))
 
 
 class RecordingExecutionAdapter(BenchmarkExecutionAdapter):
     def __init__(self) -> None:
+        """Инициализирует адаптер, который записывает все вызовы в память."""
         self.executed_jobs: List[VariantJob] = []
+        self.source_jobs: List[SourceBenchmarkJob] = []
+        self.source_results: List[SourceBenchmarkResult] = []
+        self.call_sequence: List[str] = []
         self._store: BenchmarkResultStore | None = None
 
     def bind_result_store(self, result_store: BenchmarkResultStore | None) -> None:
+        """Привязывает store для тестового сохранения variant-результатов."""
         self._store = result_store
 
+    def execute_source_benchmark(self, job: SourceBenchmarkJob) -> SourceBenchmarkResult:
+        """Фиксирует baseline-вызов и возвращает синтетический baseline-результат."""
+        self.call_sequence.append("source")
+        self.source_jobs.append(job)
+        result = SourceBenchmarkResult(
+            benchmark_run_id=job.benchmark_run_id,
+            benchmark_started_at=job.benchmark_started_at,
+            benchmark_id=job.benchmark_id,
+            source_database=job.source_database,
+            source_table=job.source_table,
+            source_table_ddl=job.source_table_ddl.to_ddl(),
+            score=1.0,
+            metrics={"status": "baseline_done"},
+        )
+        self.source_results.append(result)
+        return result
+
     def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
+        """Фиксирует variant-вызов и возвращает синтетический score."""
+        self.call_sequence.append("variant")
         self.executed_jobs.append(job)
         result = BenchmarkVariantResult(
             benchmark_run_id=job.benchmark_run_id,
@@ -113,13 +144,37 @@ class RecordingExecutionAdapter(BenchmarkExecutionAdapter):
 
 class SequentialScoringAdapter(BenchmarkExecutionAdapter):
     def __init__(self) -> None:
+        """Инициализирует адаптер со скорингом для тестов sequential top-N."""
         self.executed_jobs: List[VariantJob] = []
+        self.source_jobs: List[SourceBenchmarkJob] = []
+        self.source_results: List[SourceBenchmarkResult] = []
+        self.call_sequence: List[str] = []
         self._store: BenchmarkResultStore | None = None
 
     def bind_result_store(self, result_store: BenchmarkResultStore | None) -> None:
+        """Привязывает store для записи синтетических результатов."""
         self._store = result_store
 
+    def execute_source_benchmark(self, job: SourceBenchmarkJob) -> SourceBenchmarkResult:
+        """Возвращает baseline-результат для дальнейшей прокидки в variant jobs."""
+        self.call_sequence.append("source")
+        self.source_jobs.append(job)
+        result = SourceBenchmarkResult(
+            benchmark_run_id=job.benchmark_run_id,
+            benchmark_started_at=job.benchmark_started_at,
+            benchmark_id=job.benchmark_id,
+            source_database=job.source_database,
+            source_table=job.source_table,
+            source_table_ddl=job.source_table_ddl.to_ddl(),
+            score=1.0,
+            metrics={"status": "baseline_done"},
+        )
+        self.source_results.append(result)
+        return result
+
     def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
+        """Считает синтетический score для type/indexes этапов и пишет в store."""
+        self.call_sequence.append("variant")
         self.executed_jobs.append(job)
         user_id_type = job.variant_ddl.column("user_id").type
         if job.variant_meta.mode == "types":
@@ -146,15 +201,17 @@ class SequentialScoringAdapter(BenchmarkExecutionAdapter):
 class AsyncSelfPersistingSequentialAdapter(BenchmarkExecutionAdapter):
     """
     Имитирует async execution:
-    - launcher только dispatch'ит;
+    - launcher только отправляет задания;
     - реальные результаты сразу пишет self-провайдер (как будто воркер).
     """
 
     def __init__(self, store: BenchmarkResultStore) -> None:
+        """Сохраняет ссылку на store, который имитирует внешнее хранилище воркера."""
         self._store = store
         self.executed_jobs: List[VariantJob] = []
 
     def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
+        """Имитирует dispatch и немедленную запись результата со стороны воркера."""
         self.executed_jobs.append(job)
         user_id_type = job.variant_ddl.column("user_id").type
         if job.variant_meta.mode == "types":
@@ -176,7 +233,7 @@ class AsyncSelfPersistingSequentialAdapter(BenchmarkExecutionAdapter):
         # Эмулируем запись из воркера во внешнее хранилище.
         self._store.store_result(job, worker_result)
 
-        # Возвращаем ack-ответ launcher-у.
+        # Возвращаем подтверждение отправки инициатору запуска.
         return BenchmarkVariantResult(
             benchmark_run_id=job.benchmark_run_id,
             benchmark_id=job.benchmark_id,
@@ -190,12 +247,14 @@ class AsyncSelfPersistingSequentialAdapter(BenchmarkExecutionAdapter):
 
 
 class AsyncDispatchOnlyAdapter(BenchmarkExecutionAdapter):
-    """Имитирует async dispatch без runner-side store и без worker-side persistence."""
+    """Имитирует async dispatch без сохранения на стороне runner/воркера."""
 
     def __init__(self) -> None:
+        """Инициализирует коллекцию отправленных jobs."""
         self.executed_jobs: List[VariantJob] = []
 
     def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
+        """Возвращает ответ о dispatch без фактического выполнения."""
         self.executed_jobs.append(job)
         return BenchmarkVariantResult(
             benchmark_run_id=job.benchmark_run_id,
@@ -210,9 +269,10 @@ class AsyncDispatchOnlyAdapter(BenchmarkExecutionAdapter):
 
 
 class RecordingTableExecutionStrategy(TableExecutionStrategy):
-    """Стратегия table-level выполнения, которая только записывает факт вызова."""
+    """Стратегия выполнения таблицы, которая только фиксирует факт вызова."""
 
     def __init__(self) -> None:
+        """Хранит историю вызовов стратегии."""
         self.calls: List[tuple[str, str, int]] = []
 
     def execute_table(
@@ -222,6 +282,7 @@ class RecordingTableExecutionStrategy(TableExecutionStrategy):
         benchmark_run_id: int,
         benchmark_started_at: datetime,
     ) -> None:
+        """Записывает факт вызова без запуска variant jobs."""
         del runner, benchmark_started_at
         self.calls.append((table_plan.benchmark_id, table_plan.table, benchmark_run_id))
 
@@ -230,9 +291,11 @@ class NoTopVariantsResultStore(BenchmarkResultStore):
     """Хранилище, которое сохраняет stage1, но всегда возвращает пустой top-N."""
 
     def __init__(self) -> None:
+        """Создаёт in-memory список результатов для stage1."""
         self.records: List[BenchmarkVariantResult] = []
 
     def store_result(self, job: VariantJob, result: BenchmarkVariantResult) -> None:
+        """Сохраняет результат в локальный список."""
         self.records.append(result)
 
     def get_top_type_variants(
@@ -243,11 +306,13 @@ class NoTopVariantsResultStore(BenchmarkResultStore):
         source_table: str,
         top_n: int,
     ) -> List[TopTypeVariant]:
+        """Всегда возвращает пустой список top-N (для проверки timeout-пути)."""
         return []
 
 
 class PlannerEngineRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
+        """Готовит общий metadata provider и connection для тестов."""
         self.provider = StaticMetadataProvider(
             {"analytics": {"events": EVENTS_DDL, "sessions": SESSIONS_DDL}}
         )
@@ -262,6 +327,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         )
 
     def _root(self, benchmark: BenchmarkConfig, dbms: str = "clickhouse") -> BenchmarkRootConfig:
+        """Собирает минимальный корневой конфиг для одного benchmark."""
         conn = self.connection.model_copy(update={"dbms": dbms})
         return BenchmarkRootConfig(
             connections=[conn],
@@ -753,7 +819,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             celery=CeleryConfig(workers=1, threads_per_worker=1),
         )
 
-        # Извлекаем лимит для нового variant mode напрямую по ключу.
+        # Извлекаем лимит для нового режима варианта напрямую по ключу.
         self.assertEqual(
             BenchmarkEngine.resolve_insert_rows_limit(
                 table_plan=table_plan,
@@ -762,7 +828,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             ),
             444,
         )
-        # Если ключа для variant mode нет — fallback на job mode.
+        # Если ключа для режима варианта нет — берём запасной путь через режим задания.
         self.assertEqual(
             BenchmarkEngine.resolve_insert_rows_limit(
                 table_plan=table_plan,
@@ -796,16 +862,20 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         """Проверяет, что fetcher metadata provider handles optional fetch column sizes."""
         class FetcherNoSizes:
             def list_databases(self) -> List[str]:
+                """Возвращает фиксированный список БД."""
                 return ["analytics"]
 
             def list_tables(self, database: str) -> List[str]:
+                """Возвращает фиксированный список таблиц."""
                 return ["events"]
 
             def fetch_ddl(self, database: str, table: str) -> TableDDL:
+                """Возвращает тестовый DDL таблицы."""
                 return TableDDL.from_ddl(EVENTS_DDL)
 
         class FetcherWithSizes(FetcherNoSizes):
             def fetch_column_sizes(self, database: str, table: str) -> Dict[str, int]:
+                """Возвращает тестовые размеры колонок."""
                 return {"event_time": 1000}
 
         provider_without_sizes = FetcherMetadataProvider(FetcherNoSizes())
@@ -1000,6 +1070,52 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertTrue(
             result_store.records[0].tested_table_ddl.startswith("CREATE TABLE")
         )
+
+    def test_runner_executes_source_benchmark_before_variants_and_propagates_it(self) -> None:
+        """Проверяет baseline на source DDL и его прокидывание в variant jobs."""
+        benchmark = BenchmarkConfig(
+            id="bench_source_baseline",
+            connection_id="prod_ch",
+            strategy="types_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
+                ]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = RecordingExecutionAdapter()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=InMemoryBenchmarkResultStore(),
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual(adapter.call_sequence, ["source", "variant"])
+        self.assertEqual(len(adapter.source_jobs), 1)
+        self.assertEqual(len(adapter.source_results), 1)
+        self.assertEqual(len(adapter.executed_jobs), 1)
+
+        source_result = adapter.source_results[0]
+        job = adapter.executed_jobs[0]
+        source_benchmark = job.source_benchmark
+        self.assertIsNotNone(source_benchmark)
+        if source_benchmark is None:
+            self.fail("source_benchmark должен быть установлен в variant job")
+        self.assertEqual(source_benchmark.baseline_id, source_result.baseline_id)
+        self.assertEqual(source_benchmark.benchmark_run_id, job.benchmark_run_id)
+        self.assertEqual(source_benchmark.benchmark_id, job.benchmark_id)
+        self.assertEqual(source_benchmark.source_database, job.source_database)
+        self.assertEqual(source_benchmark.source_table, job.source_table)
 
     def test_result_store_prefers_worker_variant_params_and_ddl_when_provided(self) -> None:
         """Проверяет, что result store сохраняет worker-side variant params/DDL."""
@@ -1491,7 +1607,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             result_store=result_store,
             default_table_execution_strategy=default_strategy,
         )
-        # Убираем built-in стратегию для types, чтобы проверить fallback на default.
+        # Убираем встроенную стратегию для types, чтобы проверить резервное поведение.
         runner._table_execution_strategies.pop("types_strategy")
 
         run_id = runner.run()
@@ -1633,6 +1749,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         observed_max = {"value": 10}
 
         def max_id_getter() -> int:
+            """Возвращает текущее максимальное значение run_id из фикстуры."""
             return observed_max["value"]
 
         provider = MaxIdBenchmarkRunIdProvider(max_id_getter=max_id_getter)
@@ -1718,8 +1835,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
 
         run_id = runner.run()
 
-        # Stage 1: 2 type variants (UInt64/UInt32)
-        # Stage 2: top-1 (UInt32) gets 3 index variants (None + 2 indexes)
+        # Этап 1: 2 варианта типов (UInt64/UInt32).
+        # Этап 2: для top-1 (UInt32) запускаются 3 варианта индексов (None + 2 indexes).
         self.assertEqual(run_id, 1)
         self.assertEqual(len(result_store.records), 5)
         self.assertEqual(len(adapter.executed_jobs), 5)
@@ -1730,7 +1847,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(stages[:2], ["types", "types"])
         self.assertEqual(stages[2:], ["indexes", "indexes", "indexes"])
 
-        # Индексный этап должен идти по лучшему type-варианту (UInt32).
+        # Индексный этап должен идти по лучшему варианту типов (UInt32).
         indexed_job_types = [
             job.variant_ddl.column("user_id").type
             for job in adapter.executed_jobs
@@ -1757,6 +1874,68 @@ class PlannerEngineRunnerTests(unittest.TestCase):
 
         variant_tables = [job.variant_table for job in adapter.executed_jobs]
         self.assertEqual(len(variant_tables), len(set(variant_tables)))
+
+    def test_sequential_mode_propagates_source_benchmark_to_all_stage_jobs(self) -> None:
+        """Проверяет, что baseline source benchmark доступен во всех sequential jobs."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_source_baseline",
+            connection_id="prod_ch",
+            strategy="sequential_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            sequential_top_n=1,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt32",
+                        by_name="user_id",
+                        indexes=[
+                            IndexConfig(type="minmax", granularity=4),
+                            IndexConfig(type="bloom_filter(0.01)", granularity=2),
+                        ],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}")],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = SequentialScoringAdapter()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=InMemoryBenchmarkResultStore(),
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual(adapter.call_sequence[0], "source")
+        self.assertEqual(adapter.call_sequence.count("source"), 1)
+        self.assertGreater(len(adapter.executed_jobs), 0)
+        self.assertEqual(len(adapter.source_results), 1)
+
+        baseline_id = adapter.source_results[0].baseline_id
+        self.assertTrue(all(job.source_benchmark is not None for job in adapter.executed_jobs))
+        propagated_baseline_ids = {
+            job.source_benchmark.baseline_id
+            for job in adapter.executed_jobs
+            if job.source_benchmark is not None
+        }
+        self.assertEqual(propagated_baseline_ids, {baseline_id})
 
     def test_sequential_mode_uses_stage_limits_with_table_override(self) -> None:
         """Проверяет, что sequential mode uses stage limits with table override."""
@@ -2101,7 +2280,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         finally:
             sequential_topn_strategy_impl._TYPE_STAGE_WAIT_TIMEOUT_SEC = original_timeout
             sequential_topn_strategy_impl._TYPE_STAGE_WAIT_POLL_INTERVAL_SEC = original_poll
-        self.assertEqual(len(adapter.executed_jobs), 2)  # только type-stage
+        self.assertEqual(len(adapter.executed_jobs), 2)  # только этап вариантов типов
         self.assertEqual(
             [job.variant_meta.mode for job in adapter.executed_jobs],
             ["types", "types"],
@@ -2242,7 +2421,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             [job.variant_ddl.column("user_id").type for job in stage2_adapter.executed_jobs],
             ["UInt32", "UInt32", "UInt32"],
         )
-        # stage2 dispatch не должен добавлять launcher-side записи.
+        # Этап 2 отправки не должен добавлять записи со стороны инициатора запуска.
         self.assertEqual(len(shared_store.records), 2)
 
     def test_sequential_mode_uses_sequential_insert_rows_limit_fallback(self) -> None:

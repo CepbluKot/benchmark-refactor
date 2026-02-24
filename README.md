@@ -4,6 +4,9 @@
 
 Важно: текущий `main.py` — это demo-runner (in-memory таблицы + `NoopExecutionAdapter`).
 Для реального прогона на вашем ClickHouse нужен рабочий `BenchmarkExecutionAdapter`.
+И ещё важно: runner теперь по умолчанию перед любой strategy сначала запускает baseline
+на исходном DDL (`execute_source_benchmark`), а потом прокидывает этот baseline
+во все variant jobs через `VariantJob.source_benchmark`.
 
 ## Оглавление
 
@@ -55,9 +58,13 @@
 3. Для каждой таблицы применяются global + table override.
 4. Резолвятся правила из `rule_banks` и inline-правила.
 5. Строится `TableBenchmarkPlan`.
-6. Генерируются DDL-варианты и `VariantJob`.
-7. Каждый job выполняется через `BenchmarkExecutionAdapter`.
-8. `BenchmarkExecutionAdapter`/воркер сохраняет результат в `BenchmarkResultStore`.
+6. Перед запуском strategy runner выполняет baseline исходного DDL
+   (`SourceBenchmarkJob -> execute_source_benchmark`).
+7. Baseline-результат прикладывается к каждому `VariantJob`
+   (поле `VariantJob.source_benchmark`).
+8. Генерируются DDL-варианты и `VariantJob`.
+9. Каждый variant job выполняется через `BenchmarkExecutionAdapter`.
+10. `BenchmarkExecutionAdapter`/воркер сохраняет результат в `BenchmarkResultStore`.
 
 Если режим `sequential`:
 1. Сначала гоняются варианты `types`.
@@ -175,6 +182,10 @@ JSON-секции или `benchmark.project.json`.
 Что уходит:
 Вызовы в execution adapter.
 Важно:
+Перед любой table strategy runner сначала выполняет baseline исходного DDL
+и только потом запускает variant jobs.
+Один и тот же baseline-результат прокидывается во все variant jobs этой таблицы
+(`VariantJob.source_benchmark`).
 Для `sequential_topn_strategy` runner делает 2 этапа: сначала `types`, потом `indexes` только для top-N.
 `result_store` в `BenchmarkRunner` теперь опционален, но для top-N стратегий обязателен
 (`sequential_topn_strategy`, `sequential_topn_stage2_dispatch_strategy`).
@@ -195,9 +206,9 @@ Runner не пишет результаты в store. Сохранение вы�
 Зачем это нужно:
 Ядро не знает, как именно запускать SQL в вашем окружении; это инкапсулируется адаптером.
 Что приходит:
-`VariantJob`.
+`SourceBenchmarkJob` (для baseline исходного DDL) и `VariantJob` (для вариантов).
 Что уходит:
-`BenchmarkVariantResult` (score и typed-поля метрик).
+`SourceBenchmarkResult` и `BenchmarkVariantResult` (score и typed-поля метрик).
 
 10. Хранилище результатов (`BenchmarkResultStore`).
 Что это:
@@ -428,6 +439,12 @@ config = load_config("configs/benchmark.project.local.json")
 2. `BenchmarkExecutionAdapter`, который реально создаёт variant-таблицы, вставляет данные, гоняет warmup/test SQL и считает score.
 3. `BenchmarkResultStore` (обычно DB-backed), куда сохраняются результаты.
 
+Важно по `BenchmarkExecutionAdapter`:
+1. Нужно реализовать `execute_source_benchmark(job)` — baseline исходного DDL.
+2. Нужно реализовать `execute_variant(job)` — benchmark вариантов.
+3. `execute_source_benchmark(...)` вызывается runner-ом автоматически один раз на каждую таблицу
+   перед любой strategy.
+
 Примечание:
 1. Реальные интерфейсы лежат в `src/benchmark_runtime/contracts/*`.
 2. Встроенные реализации лежат в `src/benchmark_runtime/implementations/*`.
@@ -654,7 +671,11 @@ print(run_id)
 
 1. Реализуйте `BenchmarkExecutionAdapter`.
 2. Класс удобно размещать в `src/benchmark_runtime/implementations/` (например, отдельный подпакет `clickhouse/`).
-3. Внутри `execute_variant(job)` обычно делаются:
+3. Внутри `execute_source_benchmark(job)` обычно делаются:
+   - запуск baseline на исходной таблице;
+   - расчёт baseline-метрик/score;
+   - возврат `SourceBenchmarkResult` (который потом попадёт в `VariantJob.source_benchmark`).
+4. Внутри `execute_variant(job)` обычно делаются:
    - создание variant-таблицы;
    - `INSERT INTO ... SELECT ...` (с учётом `job.insert_rows_limit`);
    - warmup-запросы;

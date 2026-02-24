@@ -1,5 +1,5 @@
 """
-Core orchestration слоя бенчмарка (planner -> engine -> runner).
+Модуль оркестрации слоёв бенчмарка (planner -> engine -> runner).
 
 Поток данных в этом модуле:
   1) `BenchmarkPlanner` разворачивает JSON-конфиг в table-level планы;
@@ -50,6 +50,8 @@ from src.benchmark_runtime.types import (
     BenchmarkVariantResult,
     Query,
     QueryPlan,
+    SourceBenchmarkJob,
+    SourceBenchmarkResult,
     StoredBenchmarkResult,
     TableBenchmarkPlan,
     TableTarget,
@@ -62,12 +64,12 @@ from src.resolver import RuleResolver
 
 class TableSelector:
     """
-    Разворачивает selectors из `BenchmarkConfig` в список `TableTarget`.
+    Разворачивает селекторы из `BenchmarkConfig` в список `TableTarget`.
 
     Поддерживает все варианты:
       - `databases="*"`/`tables="*"`;
       - ручной список БД;
-      - ручной список таблиц (общий или map по БД).
+      - ручной список таблиц (общий или словарь по БД).
     """
 
     def select_targets(
@@ -75,7 +77,7 @@ class TableSelector:
         benchmark: BenchmarkConfig,
         provider: MetadataProvider,
     ) -> List[TableTarget]:
-        """Возвращает deduplicated список таблиц для конкретного benchmark."""
+        """Возвращает список таблиц без дубликатов для конкретного benchmark."""
         databases = self._resolve_databases(benchmark, provider)
         targets = self._resolve_tables(benchmark, databases, provider)
         return self._deduplicate(targets)
@@ -84,7 +86,7 @@ class TableSelector:
     def _resolve_databases(
         benchmark: BenchmarkConfig, provider: MetadataProvider
     ) -> List[str]:
-        """Разрешает selector `databases` в конкретный список имён БД."""
+        """Разрешает селектор `databases` в конкретный список имён БД."""
         if benchmark.databases == "*":
             return provider.list_databases()
         return list(benchmark.databases)
@@ -95,7 +97,7 @@ class TableSelector:
         databases: List[str],
         provider: MetadataProvider,
     ) -> List[TableTarget]:
-        """Разрешает selector `tables` для уже выбранного списка БД."""
+        """Разрешает селектор `tables` для уже выбранного списка БД."""
         selector = benchmark.tables
         targets: List[TableTarget] = []
 
@@ -139,10 +141,10 @@ class TableSelector:
 
 class QueryPlanBuilder:
     """
-    Строит query-plan для одной таблицы на основе `QueriesConfig`.
+    Строит план запросов для одной таблицы на основе `QueriesConfig`.
 
-    Сначала формирует набор запросов с `{table}` placeholder,
-    затем этот placeholder подставляется в имя конкретной variant-таблицы.
+    Сначала формирует набор запросов с шаблоном `{table}`,
+    затем этот шаблон подставляется в имя конкретной variant-таблицы.
     """
 
     def build(self, table_ddl: TableDDL, queries_config: QueriesConfig) -> QueryPlan:
@@ -231,7 +233,7 @@ class BenchmarkPlanner:
         benchmark_ids: Optional[Sequence[str]] = None,
     ) -> Iterator[TableBenchmarkPlan]:
         """
-        Итерирует table-level планы для выбранных benchmark_id.
+        Итерирует планы уровня таблиц для выбранных benchmark_id.
 
         Это последняя стадия перед генерацией вариантов DDL:
         дальше engine работает уже только с `TableBenchmarkPlan`.
@@ -375,7 +377,7 @@ class BenchmarkPlanner:
         benchmark: BenchmarkConfig,
         table_rule: Optional[TableRuleConfig],
     ) -> BenchmarkMode:
-        """Возвращает effective combiner-mode, соответствующий effective strategy."""
+        """Возвращает эффективный режим комбинатора для выбранной strategy."""
         strategy = BenchmarkPlanner._resolve_strategy(
             benchmark=benchmark,
             table_rule=table_rule,
@@ -390,7 +392,7 @@ class BenchmarkEngine:
     Для каждой исходной таблицы:
       1) читает исходный DDL;
       2) генерирует DDL-варианты через combiner;
-      3) готовит query-план для каждой variant-таблицы.
+      3) готовит план запросов для каждой variant-таблицы.
     """
 
     def __init__(
@@ -413,7 +415,7 @@ class BenchmarkEngine:
         self,
         table_plan: TableBenchmarkPlan,
     ) -> Tuple[TableDDL, QueryPlan]:
-        """Загружает исходный DDL и строит query-plan c placeholder'ом `{table}`."""
+        """Загружает исходный DDL и строит план запросов с шаблоном `{table}`."""
         provider = self._planner.provider_for_connection(table_plan.connection_id)
         source_ddl = provider.fetch_table_ddl(
             database=table_plan.database,
@@ -421,6 +423,47 @@ class BenchmarkEngine:
         )
         raw_query_plan = self._query_builder.build(source_ddl, table_plan.queries)
         return source_ddl, raw_query_plan
+
+    def build_source_benchmark_job(
+        self,
+        table_plan: TableBenchmarkPlan,
+        benchmark_run_id: int,
+        benchmark_started_at: datetime,
+    ) -> SourceBenchmarkJob:
+        """
+        Собирает baseline-job для исходного DDL таблицы.
+
+        Этот job выполняется перед генерацией variant jobs и его результат
+        прокидывается в каждый `VariantJob` как `source_benchmark`.
+        """
+        source_ddl, raw_query_plan = self.prepare_table_context(table_plan)
+        prepared_source_ddl = source_ddl.copy()
+        prepared_source_ddl.name = f"{table_plan.database}.{table_plan.table}"
+        rendered_query_plan = self._query_builder.render_for_table(
+            plan=raw_query_plan,
+            database=table_plan.database,
+            table=table_plan.table,
+        )
+        source_insert_rows_limit = self.resolve_insert_rows_limit(
+            table_plan=table_plan,
+            variant_mode=table_plan.mode,
+            job_mode=table_plan.mode,
+        )
+
+        return SourceBenchmarkJob(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_started_at=benchmark_started_at,
+            benchmark_id=table_plan.benchmark_id,
+            connection_id=table_plan.connection_id,
+            connection_dbms=table_plan.connection_dbms,
+            source_database=table_plan.database,
+            source_table=table_plan.table,
+            source_table_ddl=prepared_source_ddl,
+            query_plan=rendered_query_plan,
+            max_iterations=table_plan.max_iterations,
+            insert_rows_limit=source_insert_rows_limit,
+            celery=table_plan.celery,
+        )
 
     def resolve_column_order(
         self,
@@ -476,8 +519,9 @@ class BenchmarkEngine:
         benchmark_run_id: int,
         benchmark_started_at: datetime,
         job_mode: Optional[BenchmarkMode] = None,
+        source_benchmark: Optional[SourceBenchmarkResult] = None,
     ) -> VariantJob:
-        """Собирает `VariantJob` из уже подготовленного variant DDL и meta."""
+        """Собирает `VariantJob` из подготовленного variant DDL и его метаданных."""
         variant_database = table_plan.test_database or table_plan.database
         variant_table = variant_table_name(
             original_table=table_plan.table,
@@ -515,6 +559,7 @@ class BenchmarkEngine:
             insert_rows_limit=effective_insert_rows_limit,
             total_variants=total_variants,
             variant_ddl=prepared_ddl,
+            source_benchmark=source_benchmark,
             query_plan=rendered_query_plan,
             celery=table_plan.celery,
         )
@@ -553,6 +598,7 @@ class BenchmarkEngine:
         table_plan: TableBenchmarkPlan,
         benchmark_run_id: int = 1,
         benchmark_started_at: Optional[datetime] = None,
+        source_benchmark: Optional[SourceBenchmarkResult] = None,
     ) -> Iterator[VariantJob]:
         """
         Генерирует VariantJob для одного `TableBenchmarkPlan`.
@@ -591,6 +637,7 @@ class BenchmarkEngine:
                 total_variants=capped_total,
                 benchmark_run_id=benchmark_run_id,
                 benchmark_started_at=run_started_at,
+                source_benchmark=source_benchmark,
             )
 
     def iter_variant_jobs(
@@ -599,7 +646,7 @@ class BenchmarkEngine:
         benchmark_run_id: int = 1,
         benchmark_started_at: Optional[datetime] = None,
     ) -> Iterator[VariantJob]:
-        """Итерирует fully prepared задания на выполнение каждого варианта."""
+        """Итерирует полностью подготовленные задания на выполнение вариантов."""
         run_started_at = benchmark_started_at or datetime.now(timezone.utc)
         for table_plan in self.iter_table_plans(benchmark_ids=benchmark_ids):
             yield from self.iter_variant_jobs_for_table_plan(
@@ -614,7 +661,7 @@ class BenchmarkRunner:
     Верхнеуровневый фасад запуска бенчмарка.
 
     Объединяет генерацию заданий и их выполнение в один метод `run`.
-    Для каждого table-level strategy выбирается реализация исполнения.
+    Для каждой strategy уровня таблицы выбирается реализация исполнения.
     """
 
     def __init__(
@@ -641,6 +688,7 @@ class BenchmarkRunner:
             run_started_at_provider or (lambda: datetime.now(timezone.utc))
         )
         self._last_benchmark_started_at: Optional[datetime] = None
+        self._active_source_benchmark: Optional[SourceBenchmarkResult] = None
         self._execution_adapter.bind_result_store(result_store)
         self._default_table_execution_strategy = (
             default_table_execution_strategy or DefaultTableExecutionStrategy()
@@ -673,7 +721,7 @@ class BenchmarkRunner:
         overwrite: bool = False,
     ) -> None:
         """
-        Регистрирует table-level стратегию выполнения.
+        Регистрирует стратегию выполнения уровня таблицы.
 
         Использует strategy-key из `BenchmarkConfig.strategy`.
         """
@@ -702,13 +750,18 @@ class BenchmarkRunner:
           1) прогон type/codec-вариантов;
           2) выбор top-N через result-store и прогон индексных вариантов на их DDL.
 
-        Для асинхронного fire-and-forget потока можно использовать split-стратегии:
+        Для асинхронного потока без ожидания (fire-and-forget) можно использовать
+        разделённые стратегии:
           - `sequential_topn_stage1_dispatch_strategy`
           - `sequential_topn_stage2_dispatch_strategy`
-        где launcher только dispatch'ит jobs, а store наполняют воркеры.
+        где launcher только отправляет jobs, а store наполняют воркеры.
 
         Для каждого вызова фиксируется единый `benchmark_started_at` (UTC datetime),
         общий для всех benchmark/table/jobs в рамках этого запуска.
+
+        Перед исполнением любой strategy для таблицы runner всегда запускает
+        baseline-бенчмарк исходного DDL (`execute_source_benchmark`) и затем
+        прокидывает его результат в каждый `VariantJob.source_benchmark`.
         """
         run_id = benchmark_run_id if benchmark_run_id is not None else self._next_run_id()
         if run_id <= 0:
@@ -722,12 +775,20 @@ class BenchmarkRunner:
                 strategy_key,
                 self._default_table_execution_strategy,
             )
-            strategy.execute_table(
-                runner=self,
+            self._active_source_benchmark = self._execute_source_benchmark(
                 table_plan=table_plan,
                 benchmark_run_id=run_id,
                 benchmark_started_at=run_started_at,
             )
+            try:
+                strategy.execute_table(
+                    runner=self,
+                    table_plan=table_plan,
+                    benchmark_run_id=run_id,
+                    benchmark_started_at=run_started_at,
+                )
+            finally:
+                self._active_source_benchmark = None
         return run_id
 
     @property
@@ -742,12 +803,81 @@ class BenchmarkRunner:
         benchmark_started_at: datetime,
     ) -> None:
         """Стандартное выполнение table-plan: прогон всех VariantJob из engine."""
+        source_benchmark = self._require_active_source_benchmark()
         for job in self._engine.iter_variant_jobs_for_table_plan(
             table_plan,
             benchmark_run_id=benchmark_run_id,
             benchmark_started_at=benchmark_started_at,
+            source_benchmark=source_benchmark,
         ):
             self._execute_and_store(job)
+
+    def _execute_source_benchmark(
+        self,
+        table_plan: TableBenchmarkPlan,
+        benchmark_run_id: int,
+        benchmark_started_at: datetime,
+    ) -> SourceBenchmarkResult:
+        """
+        Выполняет baseline-бенчмарк исходного DDL для table-plan.
+
+        Результат используется как контекст для всех variant jobs текущей таблицы.
+        """
+        job = self._engine.build_source_benchmark_job(
+            table_plan=table_plan,
+            benchmark_run_id=benchmark_run_id,
+            benchmark_started_at=benchmark_started_at,
+        )
+        result = self._execution_adapter.execute_source_benchmark(job)
+        self._validate_source_benchmark_result(
+            job=job,
+            result=result,
+        )
+        return result
+
+    def _require_active_source_benchmark(self) -> SourceBenchmarkResult:
+        """Возвращает baseline-результат текущего table-plan или падает."""
+        if self._active_source_benchmark is None:
+            raise RuntimeError(
+                "source benchmark context отсутствует: "
+                "runner должен сначала выполнить _execute_source_benchmark"
+            )
+        return self._active_source_benchmark
+
+    @staticmethod
+    def _validate_source_benchmark_result(
+        job: SourceBenchmarkJob,
+        result: SourceBenchmarkResult,
+    ) -> None:
+        """Проверяет идентичность baseline-результата от execution adapter."""
+        if result.benchmark_run_id != job.benchmark_run_id:
+            raise ValueError(
+                "source benchmark result.benchmark_run_id "
+                "не совпадает с job.benchmark_run_id"
+            )
+        if result.benchmark_id != job.benchmark_id:
+            raise ValueError(
+                "source benchmark result.benchmark_id "
+                "не совпадает с job.benchmark_id"
+            )
+        if result.source_database != job.source_database:
+            raise ValueError(
+                "source benchmark result.source_database "
+                "не совпадает с job.source_database"
+            )
+        if result.source_table != job.source_table:
+            raise ValueError(
+                "source benchmark result.source_table "
+                "не совпадает с job.source_table"
+            )
+        if (
+            result.benchmark_started_at is not None
+            and result.benchmark_started_at != job.benchmark_started_at
+        ):
+            raise ValueError(
+                "source benchmark result.benchmark_started_at "
+                "не совпадает с job.benchmark_started_at"
+            )
 
     @staticmethod
     def _canonical_strategy_key(raw_key: str) -> str:
@@ -756,12 +886,12 @@ class BenchmarkRunner:
         return normalized
 
     def _next_run_id(self) -> int:
-        """Берёт следующий serial benchmark run id у configured provider."""
+        """Берёт следующий serial benchmark run id у настроенного provider."""
         return self._run_id_provider.next_benchmark_run_id()
 
     def _next_run_started_at(self) -> datetime:
         """
-        Возвращает start-time всего run в UTC.
+        Возвращает время старта всего run в UTC.
 
         Если provider вернул naive datetime, трактуем его как UTC.
         """
@@ -781,7 +911,7 @@ class BenchmarkRunner:
 
     def _execute_without_store(self, job: VariantJob) -> None:
         """
-        Выполняет/диспачит вариант (compat alias).
+        Выполняет/диспачит вариант (совместимый алиас).
 
         Исторически этот метод использовался dispatch-only стратегиями.
         Сейчас runner нигде не пишет в store, поэтому поведение эквивалентно

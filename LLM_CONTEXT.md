@@ -60,6 +60,10 @@
    - собирает `VariantJob`.
 
 3. `BenchmarkRunner` (`src/benchmark_engine.py`)
+   - перед любой table strategy запускает baseline исходного DDL
+     через `execution_adapter.execute_source_benchmark(...)`;
+   - сохраняет baseline-контекст таблицы и прокидывает его в
+     `VariantJob.source_benchmark` для всех variant jobs;
    - выбирает table execution strategy по `table_plan.strategy`;
    - вызывает execution adapter;
    - сам не сохраняет результат (сохраняет execution backend/воркер);
@@ -78,10 +82,12 @@
 5. `table_strategy.py` -> `TableExecutionStrategy`
 
 Важно по execution adapter:
-1. `execute_variant(job)` всегда вызывается runner-ом.
-2. Runner не пишет результаты в store.
-3. Сохранение результата должно происходить внутри execution backend/воркера.
-4. Опционально можно использовать `bind_result_store(result_store)` для in-process demo/test-реализаций.
+1. `execute_source_benchmark(job)` всегда вызывается runner-ом первым для каждой таблицы.
+2. `execute_variant(job)` вызывается после baseline.
+3. Runner валидирует identity baseline-результата (`benchmark_run_id`, `benchmark_id`, source-table).
+4. Runner не пишет результаты в store.
+5. Сохранение результата должно происходить внутри execution backend/воркера.
+6. Опционально можно использовать `bind_result_store(result_store)` для in-process demo/test-реализаций.
 
 ### 4.2 Built-in реализации
 
@@ -125,15 +131,18 @@
 2. `Query`
 3. `QueryPlan`
 4. `TableBenchmarkPlan`
-5. `VariantJob`
-6. `BenchmarkVariantResult`
-7. `StoredBenchmarkResult`
-8. `TopTypeVariant`
+5. `SourceBenchmarkJob`
+6. `SourceBenchmarkResult`
+7. `VariantJob`
+8. `BenchmarkVariantResult`
+9. `StoredBenchmarkResult`
+10. `TopTypeVariant`
 
 `VariantJob` содержит обе БД:
 1. `source_database` — где лежит исходная таблица;
 2. `variant_database` — где создаётся тестовая variant-таблица
    (если `test_database` не задан, равен `source_database`).
+3. `source_benchmark` — baseline-результат исходного DDL для этой таблицы.
 
 Ключевой формат хранения (`StoredBenchmarkResult`):
 
@@ -182,6 +191,7 @@
 ### 6.1 Обычные стратегии
 
 `TypesTableExecutionStrategy`, `IndexesTableExecutionStrategy`, `CombinedTableExecutionStrategy` запускают стандартный поток `runner._execute_regular_table(...)`.
+Baseline исходного DDL для них уже выполнен runner-ом заранее.
 
 ### 6.2 Sequential top-N стратегия
 
@@ -193,6 +203,7 @@
    - берет top-N через `result_store.get_top_type_variants(...)`.
 3. Стадия `indexes`:
    - для каждого top type-DDL генерирует index-варианты и выполняет их.
+4. Все jobs обеих стадий получают одинаковый `source_benchmark` от runner-а.
 
 Стратегия ставит внутренний wait-барьер после dispatch type-stage:
 ждёт, пока в store не появятся все `type_total` результатов,
@@ -383,8 +394,11 @@
 ### 13.4 Добавить production execution/storage/metadata
 
 1. `BenchmarkExecutionAdapter` для реального SQL-бенчмарка.
-2. `BenchmarkResultStore` для production persistence.
-3. `MetadataProvider` для источника метаданных.
+2. В адаптере реализовать оба метода:
+   - `execute_source_benchmark(job)` для baseline исходного DDL;
+   - `execute_variant(job)` для вариантов.
+3. `BenchmarkResultStore` для production persistence.
+4. `MetadataProvider` для источника метаданных.
 
 ## 14) Ограничения и подводные камни
 
