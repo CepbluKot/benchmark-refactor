@@ -30,8 +30,6 @@
 2. `indexes_strategy`
 3. `combined_strategy`
 4. `sequential_topn_strategy`
-5. `sequential_topn_stage1_dispatch_strategy`
-6. `sequential_topn_stage2_dispatch_strategy`
 
 Маппинг в `src/models.py`:
 
@@ -39,8 +37,6 @@
 2. `indexes_strategy -> indexes`
 3. `combined_strategy -> combined`
 4. `sequential_topn_strategy -> sequential`
-5. `sequential_topn_stage1_dispatch_strategy -> sequential`
-6. `sequential_topn_stage2_dispatch_strategy -> sequential`
 
 ## 3) Архитектура выполнения (planner -> engine -> runner)
 
@@ -108,8 +104,12 @@
    - `IndexesTableExecutionStrategy`
    - `CombinedTableExecutionStrategy`
    - `SequentialTopNTableExecutionStrategy`
-   - `SequentialTopNDispatchTypesTableExecutionStrategy`
-   - `SequentialTopNDispatchIndexesTableExecutionStrategy`
+6. `clickhouse_celery/`
+   - `CeleryClickHouseExecutionAdapter`
+   - `ClickHouseBenchmarkResultStore`
+   - worker tasks (`tasks.py`) для baseline/variant benchmark
+   - `TaskMonitorCelery` для progress-bar и ожидания Celery batch
+   - `settings.py` (RABBITMQ_* + CELERY_WORKER_CONCURRENCY + retry/stream-limit env, как в legacy)
 
 ### 4.3 Backward-compatible re-export
 
@@ -144,6 +144,10 @@
    (если `test_database` не задан, равен `source_database`).
 3. `source_benchmark` — baseline-результат исходного DDL для этой таблицы.
 
+`SourceBenchmarkJob` также содержит:
+1. `test_database` — БД для временной baseline-копии исходной таблицы
+   (если не задана, baseline-копия создаётся в `source_database`).
+
 Ключевой формат хранения (`StoredBenchmarkResult`):
 
 1. run-метаданные: `benchmark_run_id`, `benchmark_started_at`, `benchmark_id`.
@@ -155,6 +159,38 @@
 
 В `src/benchmark_runtime/types.py` есть helper `build_variant_params(...)`,
 который собирает стабильные параметры текущего варианта из `VariantMeta`.
+
+### 4.5 Детали clickhouse_celery runtime (важно не сломать)
+
+Файл: `src/benchmark_runtime/implementations/clickhouse_celery/tasks.py`.
+
+`run_source_benchmark(payload)`:
+1. Вычисляет `baseline_database = payload.test_database or payload.source_database`.
+2. Создаёт временную baseline-таблицу с именем `source_table__source_baseline__<uuid>`.
+3. Снимает baseline insert-метрики через `_measure_insert(...)`.
+4. Снимает baseline select-метрики через `_measure_select_queries(...)`.
+5. Возвращает baseline-метрики в `SourceBenchmarkResult.metrics`.
+6. Всегда удаляет временную baseline-таблицу в `finally`.
+
+`run_variant_benchmark(payload)`:
+1. Создаёт variant-таблицу в `variant_database`.
+2. Для insert-замеров использует `_measure_insert(...)`.
+3. Для индексных вариантов передаёт `tested_cols` из `variant_params.index_choices`
+   (legacy-совместимое поведение).
+4. Снимает select/size/index/compression-метрики, считает percentiles/speedup/score.
+5. Пишет результат через `ClickHouseBenchmarkResultStore.store_worker_result(...)`.
+6. Всегда удаляет variant-таблицу в `finally`.
+
+Низкоуровневые гарантии runtime:
+1. Streaming insert: приоритет `raw_stream/raw_insert` (clickhouse-connect),
+   fallback — `INSERT ... SELECT` + `system.query_log`.
+2. Strict-fill для insert с `numbers(...)`, чтобы можно было набрать нужное число строк,
+   даже если исходная таблица меньше.
+3. Пер-process stream semaphore (`acquire_stream_slot/release_stream_slot`) обязателен,
+   чтобы не открыть несколько stream-операций на одном инстансе.
+4. Retry/backoff для insert/select берётся из env:
+   `MAX_COPY_N_RETRIES`, `MAX_COPY_RETRY_SLEEP_SEC`, `MAX_COPY_RETRY_SLEEP_SEC_INCREMENT`.
+5. Ошибочные замеры маркируются метриками `-1` (удобно фильтровать downstream).
 
 ## 5) Генерация вариантов (variant_generation + combiner фасад)
 
@@ -204,6 +240,8 @@ Baseline исходного DDL для них уже выполнен runner-о�
 3. Стадия `indexes`:
    - для каждого top type-DDL генерирует index-варианты и выполняет их.
 4. Все jobs обеих стадий получают одинаковый `source_benchmark` от runner-а.
+5. Если execution adapter поддерживает hooks прогресса (`open_progress_scope`, `wait_for_dispatched_tasks`),
+   стратегия открывает progress-scope для stage1/stage2 и ставит explicit wait-барьер по Celery batch.
 
 Стратегия ставит внутренний wait-барьер после dispatch type-stage:
 ждёт, пока в store не появятся все `type_total` результатов,
@@ -214,24 +252,6 @@ Baseline исходного DDL для них уже выполнен runner-о�
 1. Должны быть результаты type-стадии.
 2. `sequential_top_n > 0`.
 3. store должен корректно вернуть top type-варианты.
-
-### 6.3 Sequential top-N dispatch (для Celery fire-and-forget)
-
-Если launcher не должен ждать и не должен писать результаты:
-
-1. `sequential_topn_stage1_dispatch_strategy`
-   - отправляет только type-stage jobs;
-   - использует `runner._execute_without_store(...)`.
-2. `sequential_topn_stage2_dispatch_strategy`
-   - читает top-N type-вариантов из `result_store`;
-   - отправляет index-stage jobs;
-   - launcher также ничего не пишет в store.
-
-Типовой поток:
-
-1. Запустить stage1 dispatch.
-2. Внешний процесс ждёт завершения всех type-задач и запись метрик воркерами.
-3. Запустить stage2 dispatch с тем же `benchmark_run_id`.
 
 ## 7) JSON-конфиг и валидация
 

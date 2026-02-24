@@ -6,14 +6,15 @@ Fetcher — подключение к ClickHouse и все операции с �
   - копирование данных INSERT INTO ... SELECT
   - выполнение запросов с замером метрик
 
-Зависимость: clickhouse-driver  (pip install clickhouse-driver)
-Импорт clickhouse_driver отложен до момента connect() — чтобы модуль
+Зависимость: clickhouse-connect  (pip install clickhouse-connect)
+Импорт clickhouse_connect отложен до момента connect() — чтобы модуль
 грузился даже без установленного драйвера (полезно для тестов и импортов).
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional
@@ -70,7 +71,7 @@ class FetcherError(Exception):
 
 class Fetcher:
     """
-    Тонкая обёртка над clickhouse_driver.Client.
+    Тонкая обёртка над clickhouse_connect client.
     Один экземпляр = одно соединение с одним хостом.
 
     Использование:
@@ -96,29 +97,30 @@ class Fetcher:
         if self._client is not None:
             return
         try:
-            from clickhouse_driver import Client
+            import clickhouse_connect
         except ImportError as e:
             raise FetcherError(
-                "clickhouse-driver не установлен. "
-                "Выполни: pip install clickhouse-driver"
+                "clickhouse-connect не установлен. "
+                "Выполни: pip install clickhouse-connect"
             ) from e
 
         logger.debug(
             "Connecting to %s:%d as %s",
             self._conn.host, self._conn.port, self._conn.login,
         )
-        self._client = Client(
+        self._client = clickhouse_connect.get_client(
             host=self._conn.host,
             port=self._conn.port,
-            user=self._conn.login,
+            username=self._conn.login,
             password=self._conn.password,
-            settings={"use_numpy": False},
         )
 
     def disconnect(self) -> None:
         """Закрывает текущее соединение (идемпотентно)."""
         if self._client is not None:
-            self._client.disconnect()
+            close_method = getattr(self._client, "close", None)
+            if callable(close_method):
+                close_method()
             self._client = None
             logger.debug("Disconnected from %s", self._conn.host)
 
@@ -139,16 +141,68 @@ class Fetcher:
             raise FetcherError(
                 "Нет подключения — вызови connect() или используй контекстный менеджер"
             )
-        try:
-            from clickhouse_driver.errors import Error as CHError
-        except ImportError:
-            CHError = Exception  # type: ignore[assignment,misc]
 
         try:
-            logger.debug("SQL: %s", query[:300].strip())
-            return self._client.execute(query, params or {})
-        except CHError as e:
+            rendered_query = self._bind_query_params(query, params)
+            logger.debug("SQL: %s", rendered_query[:300].strip())
+            if self._is_read_query(rendered_query):
+                result = self._client.query(rendered_query)
+                return list(result.result_rows or [])
+            self._client.command(rendered_query)
+            return []
+        except Exception as e:
             raise FetcherError(f"ClickHouse error: {e}") from e
+
+    @classmethod
+    def _bind_query_params(cls, query: str, params: Optional[dict]) -> str:
+        """
+        Подставляет `%(name)s` параметры в SQL как литералы.
+
+        Сохраняет обратную совместимость со старым форматом запросов.
+        """
+        if not params:
+            return query
+
+        pattern = re.compile(r"%\((?P<key>[A-Za-z_][A-Za-z0-9_]*)\)s")
+
+        def _replace(match: re.Match[str]) -> str:
+            key = match.group("key")
+            if key not in params:
+                raise FetcherError(f"Не найден SQL-параметр: {key}")
+            return cls._sql_literal(params[key])
+
+        return pattern.sub(_replace, query)
+
+    @staticmethod
+    def _sql_literal(value: object) -> str:
+        """Преобразует Python-значение в SQL-литерал ClickHouse."""
+        if value is None:
+            return "NULL"
+        if isinstance(value, bool):
+            return "1" if value else "0"
+        if isinstance(value, (int, float)):
+            return str(value)
+        escaped = str(value).replace("\\", "\\\\").replace("'", "\\'")
+        return f"'{escaped}'"
+
+    @staticmethod
+    def _strip_leading_sql_comments(query: str) -> str:
+        """Удаляет ведущие block comments и пробелы."""
+        stripped = query.lstrip()
+        while stripped.startswith("/*"):
+            end_pos = stripped.find("*/")
+            if end_pos == -1:
+                break
+            stripped = stripped[end_pos + 2 :].lstrip()
+        return stripped
+
+    @classmethod
+    def _is_read_query(cls, query: str) -> bool:
+        """Определяет, что запрос возвращает строки."""
+        normalized = cls._strip_leading_sql_comments(query).lower()
+        return normalized.startswith(
+            ("select", "with", "show", "describe", "desc", "explain")
+        )
 
     # ── обнаружение БД и таблиц ──────────────────────────────────────────────
 

@@ -1,5 +1,8 @@
 pydantic>=2.7,<3
 pydantic-settings>=2.3,<3
 python-dotenv>=1.0,<2
-clickhouse-driver>=0.2.7,<1
+clickhouse-connect>=0.7,<1
+celery>=5.4,<6
+tqdm>=4.66,<5
+numpy>=1.26,<3
 pytest>=8,<9

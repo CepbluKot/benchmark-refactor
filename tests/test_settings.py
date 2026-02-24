@@ -56,6 +56,49 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             settings.decode_celery_config()
 
+    def test_test_database_is_trimmed(self) -> None:
+        """Проверяет, что test_database trimится и сохраняется."""
+        settings = AppSettings(
+            _env_file=None,
+            **self._required_base_kwargs(),
+            test_database="  bench_tmp  ",
+        )
+        self.assertEqual(settings.test_database, "bench_tmp")
+
+    def test_test_database_empty_string_becomes_none(self) -> None:
+        """Проверяет, что пустой test_database трактуется как отсутствие override."""
+        settings = AppSettings(
+            _env_file=None,
+            **self._required_base_kwargs(),
+            test_database="   ",
+        )
+        self.assertIsNone(settings.test_database)
+
+    def test_result_connection_id_is_trimmed(self) -> None:
+        """Проверяет, что result_connection_id trimится."""
+        settings = AppSettings(
+            _env_file=None,
+            **self._required_base_kwargs(),
+            result_connection_id="  prod_ch  ",
+        )
+        self.assertEqual(settings.result_connection_id, "prod_ch")
+
+    def test_result_target_must_not_be_empty(self) -> None:
+        """Проверяет, что result_database/result_table не могут быть пустыми."""
+        with self.assertRaises(ValueError):
+            AppSettings(
+                _env_file=None,
+                **self._required_base_kwargs(),
+                result_database="  ",
+            )
+
+        with self.assertRaises(ValueError):
+            AppSettings(
+                _env_file=None,
+                **self._required_base_kwargs(),
+                result_table="  ",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,8 +21,6 @@ BenchmarkStrategy = Literal[
     "indexes_strategy",
     "combined_strategy",
     "sequential_topn_strategy",
-    "sequential_topn_stage1_dispatch_strategy",
-    "sequential_topn_stage2_dispatch_strategy",
 ]
 ColumnOrderMode = Literal["compressed_size_desc"]
 RuleSourceMode = Literal[
@@ -40,8 +38,6 @@ STRATEGY_TO_MODE: Dict[BenchmarkStrategy, BenchmarkMode] = {
     "indexes_strategy": "indexes",
     "combined_strategy": "combined",
     "sequential_topn_strategy": "sequential",
-    "sequential_topn_stage1_dispatch_strategy": "sequential",
-    "sequential_topn_stage2_dispatch_strategy": "sequential",
 }
 
 

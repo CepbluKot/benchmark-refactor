@@ -29,6 +29,26 @@ _TYPE_STAGE_WAIT_TIMEOUT_SEC = 3600.0
 logger = logging.getLogger(__name__)
 
 
+def _open_progress_scope_if_supported(
+    runner: "BenchmarkRunner",
+    scope_name: str,
+) -> None:
+    """Открывает progress-scope в adapter, если реализация поддерживает API."""
+    open_hook = getattr(runner._execution_adapter, "open_progress_scope", None)
+    if callable(open_hook):
+        open_hook(scope_name)
+
+
+def _wait_for_dispatched_tasks_if_supported(
+    runner: "BenchmarkRunner",
+    stage_label: str,
+) -> None:
+    """Ждёт завершения Celery-batch, если adapter поддерживает API ожидания."""
+    wait_hook = getattr(runner._execution_adapter, "wait_for_dispatched_tasks", None)
+    if callable(wait_hook):
+        wait_hook(stage_label=stage_label)
+
+
 def _require_result_store(
     runner: "BenchmarkRunner",
     strategy_key: str,
@@ -103,26 +123,6 @@ def _iter_type_jobs(
             job_mode="sequential",
             source_benchmark=source_benchmark,
         )
-
-
-def _resolve_top_type_variants(
-    runner: "BenchmarkRunner",
-    table_plan: TableBenchmarkPlan,
-    benchmark_run_id: int,
-    type_total: int,
-) -> list[TopTypeVariant]:
-    """Читает top-N type-вариантов из result store без ожидания."""
-    if type_total <= 0:
-        return []
-    store = _require_result_store(runner, strategy_key=table_plan.strategy)
-    top_n = min(table_plan.sequential_top_n, type_total)
-    return store.get_top_type_variants(
-        benchmark_run_id=benchmark_run_id,
-        benchmark_id=table_plan.benchmark_id,
-        source_database=table_plan.database,
-        source_table=table_plan.table,
-        top_n=top_n,
-    )
 
 
 def _wait_for_type_stage_completion(
@@ -263,6 +263,13 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
             table_plan.table,
             type_total,
         )
+        _open_progress_scope_if_supported(
+            runner=runner,
+            scope_name=(
+                f"sequential stage1 types: {table_plan.benchmark_id} "
+                f"{table_plan.database}.{table_plan.table}"
+            ),
+        )
 
         type_dispatched = 0
         for job in _iter_type_jobs(
@@ -286,6 +293,13 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
             table_plan.database,
             table_plan.table,
             type_dispatched,
+        )
+        _wait_for_dispatched_tasks_if_supported(
+            runner=runner,
+            stage_label=(
+                f"sequential stage1 types: {table_plan.benchmark_id} "
+                f"{table_plan.database}.{table_plan.table}"
+            ),
         )
 
         ranked_type_variants = _wait_for_type_stage_completion(
@@ -316,6 +330,13 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
             table_plan.table,
             len(top_variants),
         )
+        _open_progress_scope_if_supported(
+            runner=runner,
+            scope_name=(
+                f"sequential stage2 indexes: {table_plan.benchmark_id} "
+                f"{table_plan.database}.{table_plan.table}"
+            ),
+        )
         index_dispatched = 0
         for job in _iter_index_jobs_from_top_variants(
             runner=runner,
@@ -339,141 +360,10 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
             table_plan.table,
             index_dispatched,
         )
-
-
-class SequentialTopNDispatchTypesTableExecutionStrategy(TableExecutionStrategy):
-    """
-    Dispatch-only стратегия для stage-1 sequential top-N.
-
-    Предназначена для асинхронного сценария:
-      - launcher только отправляет type jobs;
-      - результаты сохраняются в БД Celery-воркерами.
-    """
-
-    def execute_table(
-        self,
-        runner: "BenchmarkRunner",
-        table_plan: TableBenchmarkPlan,
-        benchmark_run_id: int,
-        benchmark_started_at: datetime,
-    ) -> None:
-        """Отправляет только type-stage jobs без runner-side сохранения."""
-        logger.info(
-            "SequentialTopN stage1-dispatch: старт "
-            "(run_id=%d, benchmark=%s, table=%s.%s)",
-            benchmark_run_id,
-            table_plan.benchmark_id,
-            table_plan.database,
-            table_plan.table,
-        )
-        source_benchmark = runner._require_active_source_benchmark()
-        source_ddl, raw_query_plan, effective_column_order = _prepare_table_context(
+        _wait_for_dispatched_tasks_if_supported(
             runner=runner,
-            table_plan=table_plan,
-        )
-        type_total = _resolve_type_total(
-            table_plan=table_plan,
-            source_ddl=source_ddl,
-            effective_column_order=effective_column_order,
-        )
-        dispatched = 0
-        for job in _iter_type_jobs(
-            runner=runner,
-            table_plan=table_plan,
-            source_ddl=source_ddl,
-            raw_query_plan=raw_query_plan,
-            effective_column_order=effective_column_order,
-            type_total=type_total,
-            benchmark_run_id=benchmark_run_id,
-            benchmark_started_at=benchmark_started_at,
-            source_benchmark=source_benchmark,
-        ):
-            runner._execute_without_store(job)
-            dispatched += 1
-        logger.info(
-            "SequentialTopN stage1-dispatch: завершён "
-            "(run_id=%d, benchmark=%s, table=%s.%s, jobs=%d, expected=%d)",
-            benchmark_run_id,
-            table_plan.benchmark_id,
-            table_plan.database,
-            table_plan.table,
-            dispatched,
-            type_total,
-        )
-
-
-class SequentialTopNDispatchIndexesTableExecutionStrategy(TableExecutionStrategy):
-    """
-    Dispatch-only стратегия для stage-2 sequential top-N.
-
-    Ожидает, что type-stage уже завершён и top-N типовых вариантов
-    доступен в result store (обычно это внешнее DB-хранилище).
-    """
-
-    def execute_table(
-        self,
-        runner: "BenchmarkRunner",
-        table_plan: TableBenchmarkPlan,
-        benchmark_run_id: int,
-        benchmark_started_at: datetime,
-    ) -> None:
-        """Отправляет index-stage jobs для top-N type-вариантов из store."""
-        logger.info(
-            "SequentialTopN stage2-dispatch: старт "
-            "(run_id=%d, benchmark=%s, table=%s.%s)",
-            benchmark_run_id,
-            table_plan.benchmark_id,
-            table_plan.database,
-            table_plan.table,
-        )
-        source_benchmark = runner._require_active_source_benchmark()
-        source_ddl, raw_query_plan, effective_column_order = _prepare_table_context(
-            runner=runner,
-            table_plan=table_plan,
-        )
-        type_total = _resolve_type_total(
-            table_plan=table_plan,
-            source_ddl=source_ddl,
-            effective_column_order=effective_column_order,
-        )
-        top_variants = _resolve_top_type_variants(
-            runner=runner,
-            table_plan=table_plan,
-            benchmark_run_id=benchmark_run_id,
-            type_total=type_total,
-        )
-        if not top_variants:
-            logger.info(
-                "SequentialTopN stage2-dispatch: top-N пуст, этап пропущен "
-                "(run_id=%d, benchmark=%s, table=%s.%s)",
-                benchmark_run_id,
-                table_plan.benchmark_id,
-                table_plan.database,
-                table_plan.table,
-            )
-            return
-
-        dispatched = 0
-        for job in _iter_index_jobs_from_top_variants(
-            runner=runner,
-            table_plan=table_plan,
-            raw_query_plan=raw_query_plan,
-            effective_column_order=effective_column_order,
-            top_variants=top_variants,
-            benchmark_run_id=benchmark_run_id,
-            benchmark_started_at=benchmark_started_at,
-            type_total=type_total,
-            source_benchmark=source_benchmark,
-        ):
-            runner._execute_without_store(job)
-            dispatched += 1
-        logger.info(
-            "SequentialTopN stage2-dispatch: завершён "
-            "(run_id=%d, benchmark=%s, table=%s.%s, jobs=%d, top_n=%d)",
-            benchmark_run_id,
-            table_plan.benchmark_id,
-            table_plan.database,
-            table_plan.table,
-            dispatched,
-            len(top_variants),
+            stage_label=(
+                f"sequential stage2 indexes: {table_plan.benchmark_id} "
+                f"{table_plan.database}.{table_plan.table}"
+            ),
         )

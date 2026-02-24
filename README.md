@@ -2,11 +2,14 @@
 
 Инструмент для автоматического DDL-бенчмарка: перебирает варианты схемы таблиц (типы, кодеки, индексы), запускает тестовые запросы и помогает выбрать лучший вариант по `score`.
 
-Важно: текущий `main.py` — это demo-runner (in-memory таблицы + `NoopExecutionAdapter`).
-Для реального прогона на вашем ClickHouse нужен рабочий `BenchmarkExecutionAdapter`.
+`main.py` запускает production-пайплайн на ClickHouse + Celery:
+metadata через fetcher, исполнение через Celery-задачи, результаты в ClickHouse store.
 И ещё важно: runner теперь по умолчанию перед любой strategy сначала запускает baseline
 на исходном DDL (`execute_source_benchmark`), а потом прокидывает этот baseline
 во все variant jobs через `VariantJob.source_benchmark`.
+В ClickHouse+Celery runtime baseline включает не только `SELECT`, но и `INSERT`-замеры:
+воркер создаёт временную baseline-таблицу, копирует туда данные, снимает метрики,
+и удаляет эту таблицу в `finally`.
 
 ## Оглавление
 
@@ -60,6 +63,9 @@
 5. Строится `TableBenchmarkPlan`.
 6. Перед запуском strategy runner выполняет baseline исходного DDL
    (`SourceBenchmarkJob -> execute_source_benchmark`).
+   В ClickHouse runtime это отдельный прогон в воркере:
+   создаётся временная baseline-таблица в `test_database` (если задана, иначе в source БД),
+   снимаются baseline insert/select метрики, затем таблица удаляется.
 7. Baseline-результат прикладывается к каждому `VariantJob`
    (поле `VariantJob.source_benchmark`).
 8. Генерируются DDL-варианты и `VariantJob`.
@@ -188,17 +194,10 @@ JSON-секции или `benchmark.project.json`.
 (`VariantJob.source_benchmark`).
 Для `sequential_topn_strategy` runner делает 2 этапа: сначала `types`, потом `indexes` только для top-N.
 `result_store` в `BenchmarkRunner` теперь опционален, но для top-N стратегий обязателен
-(`sequential_topn_strategy`, `sequential_topn_stage2_dispatch_strategy`).
+(`sequential_topn_strategy`).
 Runner не пишет результаты в store. Сохранение выполняет execution backend (обычно Celery-воркер).
 `sequential_topn_strategy` внутри себя ставит wait-барьер: ждёт, пока в store появятся все результаты type-stage,
 и только потом выбирает top-N и запускает index-stage.
-Если нужен fire-and-forget через Celery (launcher не ждёт), используйте:
-- `sequential_topn_stage1_dispatch_strategy` — отправляет только types-stage.
-- `sequential_topn_stage2_dispatch_strategy` — читает top-N types из store и отправляет indexes-stage.
-Практический порядок запуска:
-1. Запускаете benchmark со `strategy=sequential_topn_stage1_dispatch_strategy`.
-2. Внешний процесс дожидается завершения всех type-задач и записи результатов воркерами.
-3. Повторно запускаете тот же benchmark (тот же `benchmark_id` и `benchmark_run_id`), но со `strategy=sequential_topn_stage2_dispatch_strategy`.
 
 9. Фактическое выполнение SQL (`BenchmarkExecutionAdapter`).
 Что это:
@@ -403,13 +402,33 @@ BENCH_LOG_LEVEL=INFO
 Поддерживаются уровни: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`
 (или числовое значение уровня logging).
 
+Если хочешь, чтобы все variant-таблицы по умолчанию создавались в одной тестовой БД,
+добавь в `.env`:
+
+```bash
+BENCH_TEST_DATABASE=bench_tmp
+```
+
+Это fallback: если в конкретном benchmark уже задан `test_database` в JSON,
+он имеет приоритет над `BENCH_TEST_DATABASE`.
+
+Параметры result-store (опционально):
+
+```bash
+BENCH_RESULT_CONNECTION_ID=prod_ch
+BENCH_RESULT_DATABASE=benchmark_results
+BENCH_RESULT_TABLE=combined_benchmark_results
+```
+
+Если `BENCH_RESULT_CONNECTION_ID` не задан, берётся первый connection из конфига.
+
 3. Запусти:
 
 ```bash
 ./venv/bin/python main.py
 ```
 
-Важно: это demo-runner (без реального SQL execution).
+Важно: для этого режима должны быть доступны ClickHouse и Celery broker/backend.
 
 ### Вариант B. File-mode через project JSON
 
@@ -443,33 +462,58 @@ config = load_config("configs/benchmark.project.local.json")
 
 ### Вариант C. Реальный запуск на своём ClickHouse
 
-Для реального прогона нужны 3 вещи:
-1. `MetadataProvider`, который читает реальные таблицы из ClickHouse.
-2. `BenchmarkExecutionAdapter`, который реально создаёт variant-таблицы, вставляет данные, гоняет warmup/test SQL и считает score.
-3. `BenchmarkResultStore` (обычно DB-backed), куда сохраняются результаты.
+Есть встроенный runtime для ClickHouse + Celery:
+1. `CeleryClickHouseExecutionAdapter` — отправляет benchmark jobs в Celery.
+2. `ClickHouseBenchmarkResultStore` — читает/пишет результаты в ClickHouse (нужен top-N для sequential).
+3. `TaskMonitorCelery` — progress bar по Celery events (используется адаптером автоматически).
 
-Важно по `BenchmarkExecutionAdapter`:
-1. Нужно реализовать `execute_source_benchmark(job)` — baseline исходного DDL.
-2. Нужно реализовать `execute_variant(job)` — benchmark вариантов.
-3. `execute_source_benchmark(...)` вызывается runner-ом автоматически один раз на каждую таблицу
-   перед любой strategy.
+Что важно:
+1. Baseline исходного DDL (`execute_source_benchmark`) тоже выполняется в Celery.
+2. Variant-результаты сохраняются в ClickHouse из Celery-воркера, не из launcher-процесса.
+3. Для `sequential_topn_strategy` launcher ждёт завершения stage1/stage2 через monitor-hook,
+   после чего делает top-N отбор.
+4. Baseline-задача в воркере создаёт временную baseline-таблицу и удаляет её в `finally`.
+5. Variant-задача всегда удаляет variant-таблицу в `finally`, даже при ошибке.
+6. Для индексных вариантов insert-замеры выполняются с фильтром по индексируемым колонкам
+   (legacy-совместимое поведение `tested_cols`).
+7. Ошибочные замеры помечаются значениями `< 0` (обычно `-1`), чтобы их можно было легко фильтровать.
 
-Примечание:
-1. Реальные интерфейсы лежат в `src/benchmark_runtime/contracts/*`.
-2. Встроенные реализации лежат в `src/benchmark_runtime/implementations/*`.
-3. Импорт через `benchmark_engine` сохранён для обратной совместимости.
+#### 1) Запусти Celery worker
 
-Минимальный шаблон:
+```bash
+export RABBITMQ_HOSTNAME='localhost'
+export RABBITMQ_LOGIN='guest'
+export RABBITMQ_PASSWORD='guest'
+export RABBITMQ_PORT='5672'
+export CELERY_WORKER_CONCURRENCY='4'
+export CLICKHOUSE_MANAGER_MAX_CONCURRENT_STREAMS_PER_PROCESS='1'
+export MAX_COPY_N_RETRIES='100'
+export MAX_COPY_RETRY_SLEEP_SEC='10'
+export MAX_COPY_RETRY_SLEEP_SEC_INCREMENT='2'
+# export CLICKHOUSE_STREAM_SLOT_ACQUIRE_TIMEOUT_SEC='5'
+
+# опционально можно переопределить готовыми URL
+# export BENCH_CELERY_BROKER_URL='pyamqp://guest:guest@localhost:5672//'
+# export BENCH_CELERY_BACKEND_URL='rpc://guest:guest@localhost:5672//'
+
+./venv/bin/celery -A src.benchmark_runtime.implementations.clickhouse_celery.tasks worker --loglevel=INFO
+```
+
+#### 2) Launcher-код
 
 ```python
-from loader import load_config
-from benchmark_engine import (
+from src.loader import load_config
+from src.benchmark_engine import (
     BenchmarkPlanner,
     BenchmarkEngine,
     BenchmarkRunner,
     FetcherMetadataProvider,
 )
-from fetcher import make_fetcher
+from src.fetcher import make_fetcher
+from src.benchmark_runtime import (
+    CeleryClickHouseExecutionAdapter,
+    ClickHouseBenchmarkResultStore,
+)
 
 config = load_config("configs/benchmark.project.local.json")
 connection = next(c for c in config.connections if c.id == "prod_ch")
@@ -479,16 +523,26 @@ provider = FetcherMetadataProvider(fetcher)
 planner = BenchmarkPlanner(config=config, providers_by_connection_id={"prod_ch": provider})
 engine = BenchmarkEngine(planner=planner)
 
+result_store = ClickHouseBenchmarkResultStore(
+    connection=connection,
+    database="benchmark_results",
+    table="combined_benchmark_results",
+)
+
 runner = BenchmarkRunner(
     engine=engine,
-    execution_adapter=YourClickHouseExecutionAdapter(fetcher),  # реализуете сами
-    result_store=YourResultStore(),  # реализуете сами
+    execution_adapter=CeleryClickHouseExecutionAdapter(
+        connections_by_id={c.id: c for c in config.connections},
+        result_database="benchmark_results",
+        result_table="combined_benchmark_results",
+    ),
+    result_store=result_store,
 )
 run_id = runner.run()
 print(run_id)
 ```
 
-Если нужен быстрый ориентир по структуре адаптера, посмотри:
+Если нужен быстрый ориентир по архитектуре и flow, посмотри:
 - `examples/example.py`
 - `examples/example_sequential_topn.py`
 - `synthetic_interface_playground.py` (синтетический отладочный playground с примерными реализациями интерфейсов)
@@ -573,7 +627,7 @@ print(run_id)
 Главные поля benchmark:
 - `id`, `connection_id`, `strategy`
 - `databases`, `tables`
-- `test_database` (опционально: отдельная БД для variant-таблиц)
+- `test_database` (опционально: отдельная БД для временной baseline-таблицы и variant-таблиц)
 - `global_rules`, `table_rules`
 - `max_iterations`, `sequential_top_n`
 - `insert_rows_limit`, `insert_rows_limits`
@@ -593,8 +647,6 @@ print(run_id)
 - `indexes_strategy`
 - `combined_strategy`
 - `sequential_topn_strategy`
-- `sequential_topn_stage1_dispatch_strategy`
-- `sequential_topn_stage2_dispatch_strategy`
 
 `queries.mode`:
 - `auto`
@@ -627,9 +679,6 @@ print(run_id)
 
 5. В `sequential` нет этапа индексов.
 Проверь, что есть `index_rules`, `sequential_top_n > 0`, и адаптер возвращает `score`.
-Если используете dispatch-стратегии, проверь, что после `sequential_topn_stage1_dispatch_strategy`
-внешний процесс действительно дождался завершения всех type-задач и только потом запускает
-`sequential_topn_stage2_dispatch_strategy` с тем же `benchmark_run_id`.
 
 6. Включён `global_bank_only`, но нет доступного bank.
 Либо укажи `global_rules.rule_bank`, либо настрой `default_rule_banks` для своего DBMS.
@@ -679,10 +728,14 @@ print(run_id)
 #### 3) Подключить реальный SQL-бенчмарк
 
 1. Реализуйте `BenchmarkExecutionAdapter`.
-2. Класс удобно размещать в `src/benchmark_runtime/implementations/` (например, отдельный подпакет `clickhouse/`).
+2. Класс удобно размещать в `src/benchmark_runtime/implementations/`.
+3. Готовая production-ориентированная реализация уже есть: `src/benchmark_runtime/implementations/clickhouse_celery/execution.py`.
 3. Внутри `execute_source_benchmark(job)` обычно делаются:
-   - запуск baseline на исходной таблице;
+   - создание временной baseline-таблицы (обычно в `job.test_database`, иначе в source БД);
+   - baseline insert-прогон (source -> baseline copy) с метриками;
+   - baseline select-прогон;
    - расчёт baseline-метрик/score;
+   - очистка временной baseline-таблицы в `finally`;
    - возврат `SourceBenchmarkResult` (который потом попадёт в `VariantJob.source_benchmark`).
 4. Внутри `execute_variant(job)` обычно делаются:
    - создание variant-таблицы;
@@ -690,7 +743,7 @@ print(run_id)
    - warmup-запросы;
    - test-запросы;
    - расчёт итогового `score`;
-   - сохранение результата в `BenchmarkResultStore` (обычно из воркера);
+   - сохранение результата в `BenchmarkResultStore` (обычно из Celery-воркера);
    - очистка временных таблиц.
 
 #### 4) Подключить реальный источник метаданных
@@ -716,17 +769,18 @@ print(run_id)
 5. `src/benchmark_runtime/implementations/inmemory/` — in-memory реализации (`result_store`, `run_id`).
 6. `src/benchmark_runtime/implementations/noop/` — `NoopExecutionAdapter`.
 7. `src/benchmark_runtime/implementations/fetcher/` — `FetcherMetadataProvider`.
-8. `src/benchmark_runtime/implementations/run_id/` — `MaxIdBenchmarkRunIdProvider`.
-9. `src/benchmark_runtime/implementations/table_strategy/` — built-in стратегии выполнения.
-10. `src/benchmark_runtime/types.py` — runtime DTO для planner/engine/runner.
-11. `src/variant_generation/contracts/` — контракт генерации вариантов.
-12. `src/variant_generation/implementations/` — built-in стратегии генерации (`types/indexes/combined/sequential`).
-13. `src/variant_generation/registry.py` — реестр стратегий генерации.
-14. `src/combiner.py` — backward-compatible фасад над `variant_generation`.
-15. `src/fetcher.py` — ClickHouse-fetcher.
-16. `validate_json_config.py` — CLI-валидатор JSON по пути.
-17. `configs/*.example.json` — примеры конфигов.
-18. `LLM_CONTEXT.md` — подробный технический контекст для LLM-агентов.
+8. `src/benchmark_runtime/implementations/clickhouse_celery/` — готовые ClickHouse+Celery реализации (`execution`, `result_store`, `tasks`, `progress`).
+9. `src/benchmark_runtime/implementations/run_id/` — `MaxIdBenchmarkRunIdProvider`.
+10. `src/benchmark_runtime/implementations/table_strategy/` — built-in стратегии выполнения.
+11. `src/benchmark_runtime/types.py` — runtime DTO для planner/engine/runner.
+12. `src/variant_generation/contracts/` — контракт генерации вариантов.
+13. `src/variant_generation/implementations/` — built-in стратегии генерации (`types/indexes/combined/sequential`).
+14. `src/variant_generation/registry.py` — реестр стратегий генерации.
+15. `src/combiner.py` — backward-compatible фасад над `variant_generation`.
+16. `src/fetcher.py` — ClickHouse-fetcher.
+17. `validate_json_config.py` — CLI-валидатор JSON по пути.
+18. `configs/*.example.json` — примеры конфигов.
+19. `LLM_CONTEXT.md` — подробный технический контекст для LLM-агентов.
 
 ### Что проверить после изменений
 

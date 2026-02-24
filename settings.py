@@ -6,6 +6,12 @@ JSON-конфиги передаются как base64-строки:
   - BENCH_CONNECTIONS_CONFIG_B64
   - BENCH_RULE_BANKS_CONFIG_B64
   - BENCH_BENCHMARKS_CONFIG_B64
+
+Дополнительные параметры launcher:
+  - BENCH_TEST_DATABASE
+  - BENCH_RESULT_CONNECTION_ID
+  - BENCH_RESULT_DATABASE
+  - BENCH_RESULT_TABLE
 """
 
 from __future__ import annotations
@@ -96,6 +102,10 @@ class AppSettings(BaseSettings):
 
     benchmark_ids: Annotated[List[str], NoDecode] = Field(default_factory=list)
     benchmark_run_id: Optional[int] = None
+    test_database: Optional[str] = None
+    result_connection_id: Optional[str] = None
+    result_database: str = "benchmark_results"
+    result_table: str = "combined_benchmark_results"
     log_level: str = "INFO"
 
     model_config = SettingsConfigDict(
@@ -138,6 +148,37 @@ class AppSettings(BaseSettings):
     def parse_log_level(cls, value: object) -> str:
         """Нормализует уровень логирования из окружения."""
         return _normalize_log_level(value)
+
+    @field_validator("test_database", mode="before")
+    @classmethod
+    def parse_test_database(cls, value: object) -> Optional[str]:
+        """Нормализует имя тестовой БД (или выключает override при пустом значении)."""
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            return None
+        return normalized
+
+    @field_validator("result_connection_id", mode="before")
+    @classmethod
+    def parse_result_connection_id(cls, value: object) -> Optional[str]:
+        """Нормализует id connection для result-store (или выключает override)."""
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            return None
+        return normalized
+
+    @field_validator("result_database", "result_table", mode="before")
+    @classmethod
+    def parse_non_empty_result_target(cls, value: object) -> str:
+        """Проверяет, что target result-store не пустой."""
+        normalized = str(value).strip()
+        if not normalized:
+            raise ValueError("result_database/result_table не должны быть пустыми")
+        return normalized
 
     def decode_celery_config(self) -> Dict[str, Any]:
         """Возвращает celery-конфиг из BENCH_CELERY_CONFIG_B64."""

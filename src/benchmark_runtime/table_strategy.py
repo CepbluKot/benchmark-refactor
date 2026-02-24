@@ -5,8 +5,6 @@ from .implementations.table_strategy.combined import CombinedTableExecutionStrat
 from .implementations.table_strategy.default import DefaultTableExecutionStrategy
 from .implementations.table_strategy.indexes import IndexesTableExecutionStrategy
 from .implementations.table_strategy.sequential_topn import (
-    SequentialTopNDispatchIndexesTableExecutionStrategy,
-    SequentialTopNDispatchTypesTableExecutionStrategy,
     SequentialTopNTableExecutionStrategy,
 )
 from .implementations.table_strategy.types import TypesTableExecutionStrategy
@@ -16,8 +14,6 @@ __all__ = [
     "TableExecutionStrategy",
     "DefaultTableExecutionStrategy",
     "IndexesTableExecutionStrategy",
-    "SequentialTopNDispatchIndexesTableExecutionStrategy",
-    "SequentialTopNDispatchTypesTableExecutionStrategy",
     "SequentialTopNTableExecutionStrategy",
     "TypesTableExecutionStrategy",
 ]

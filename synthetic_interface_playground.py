@@ -30,8 +30,6 @@ from src.benchmark_runtime.table_strategy import (
     CombinedTableExecutionStrategy,
     DefaultTableExecutionStrategy,
     IndexesTableExecutionStrategy,
-    SequentialTopNDispatchIndexesTableExecutionStrategy,
-    SequentialTopNDispatchTypesTableExecutionStrategy,
     SequentialTopNTableExecutionStrategy,
     TypesTableExecutionStrategy,
 )
@@ -405,14 +403,6 @@ def build_tracing_table_strategies() -> Dict[str, TableExecutionStrategy]:
         "sequential_topn_strategy": TracingTableExecutionStrategy(
             strategy_key="sequential_topn_strategy",
             delegate=SequentialTopNTableExecutionStrategy(),
-        ),
-        "sequential_topn_stage1_dispatch_strategy": TracingTableExecutionStrategy(
-            strategy_key="sequential_topn_stage1_dispatch_strategy",
-            delegate=SequentialTopNDispatchTypesTableExecutionStrategy(),
-        ),
-        "sequential_topn_stage2_dispatch_strategy": TracingTableExecutionStrategy(
-            strategy_key="sequential_topn_stage2_dispatch_strategy",
-            delegate=SequentialTopNDispatchIndexesTableExecutionStrategy(),
         ),
     }
 

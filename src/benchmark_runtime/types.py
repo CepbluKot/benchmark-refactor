@@ -104,6 +104,7 @@ class SourceBenchmarkJob(_FrozenModel):
     connection_id: str
     connection_dbms: str
     source_database: str
+    test_database: Optional[str] = None
     source_table: str
     source_table_ddl: TableDDL
     query_plan: QueryPlan
@@ -242,6 +243,9 @@ class BenchmarkVariantResult(_FrozenModel):
     source_table_select_bytes_per_second_measurements_percentiles_readable: List[str] = (
         Field(default_factory=list)
     )
+    tested_table_select_metrics_by_query_json: Optional[str] = None
+    source_table_select_metrics_by_query_json: Optional[str] = None
+    tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json: Optional[str] = None
     tested_table_consumed_compressed_size_bytes_by_each_column: Optional[str] = None
     source_table_consumed_compressed_size_bytes_by_each_column: Optional[str] = None
     tested_table_consumed_compressed_size_bytes_overall: Optional[float] = None
@@ -384,6 +388,9 @@ class StoredBenchmarkResult(_FrozenModel):
     source_table_select_bytes_per_second_measurements_percentiles_readable: List[str] = (
         Field(default_factory=list)
     )
+    tested_table_select_metrics_by_query_json: Optional[str] = None
+    source_table_select_metrics_by_query_json: Optional[str] = None
+    tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json: Optional[str] = None
 
     # ---------------------------  Compression results  ----------------------------
     tested_table_consumed_compressed_size_bytes_by_each_column: Optional[str] = None

@@ -41,8 +41,6 @@ from src.benchmark_runtime.table_strategy import (
     CombinedTableExecutionStrategy,
     DefaultTableExecutionStrategy,
     IndexesTableExecutionStrategy,
-    SequentialTopNDispatchIndexesTableExecutionStrategy,
-    SequentialTopNDispatchTypesTableExecutionStrategy,
     SequentialTopNTableExecutionStrategy,
     TableExecutionStrategy,
     TypesTableExecutionStrategy,
@@ -503,6 +501,7 @@ class BenchmarkEngine:
             connection_id=table_plan.connection_id,
             connection_dbms=table_plan.connection_dbms,
             source_database=table_plan.database,
+            test_database=table_plan.test_database,
             source_table=table_plan.table,
             source_table_ddl=prepared_source_ddl,
             query_plan=rendered_query_plan,
@@ -741,7 +740,7 @@ class BenchmarkRunner:
         Сохраняет engine и адаптер выполнения.
 
         `result_store` опционален. Он нужен стратегиям, которые читают top-N
-        (например, `sequential_topn_strategy` и stage2 dispatch).
+        (например, `sequential_topn_strategy`).
         """
         self._engine = engine
         self._execution_adapter = execution_adapter
@@ -761,12 +760,6 @@ class BenchmarkRunner:
             "indexes_strategy": IndexesTableExecutionStrategy(),
             "combined_strategy": CombinedTableExecutionStrategy(),
             "sequential_topn_strategy": SequentialTopNTableExecutionStrategy(),
-            "sequential_topn_stage1_dispatch_strategy": (
-                SequentialTopNDispatchTypesTableExecutionStrategy()
-            ),
-            "sequential_topn_stage2_dispatch_strategy": (
-                SequentialTopNDispatchIndexesTableExecutionStrategy()
-            ),
         }
         if table_execution_strategies:
             for strategy_key, strategy in table_execution_strategies.items():
@@ -817,12 +810,6 @@ class BenchmarkRunner:
         Для `strategy="sequential_topn_strategy"` используется двухфазный алгоритм:
           1) прогон type/codec-вариантов;
           2) выбор top-N через result-store и прогон индексных вариантов на их DDL.
-
-        Для асинхронного потока без ожидания (fire-and-forget) можно использовать
-        разделённые стратегии:
-          - `sequential_topn_stage1_dispatch_strategy`
-          - `sequential_topn_stage2_dispatch_strategy`
-        где launcher только отправляет jobs, а store наполняют воркеры.
 
         Для каждого вызова фиксируется единый `benchmark_started_at` (UTC datetime),
         общий для всех benchmark/table/jobs в рамках этого запуска.
@@ -879,6 +866,13 @@ class BenchmarkRunner:
                     table_plan.table,
                 )
             finally:
+                finalize_progress_hook = getattr(
+                    self._execution_adapter,
+                    "finalize_progress_scope",
+                    None,
+                )
+                if callable(finalize_progress_hook):
+                    finalize_progress_hook(wait=False)
                 self._active_source_benchmark = None
         logger.info("BenchmarkRunner: run завершён (run_id=%d)", run_id)
         return run_id
@@ -1030,27 +1024,6 @@ class BenchmarkRunner:
         """
         logger.debug(
             "BenchmarkRunner: dispatch variant job "
-            "(run_id=%d, benchmark=%s, table=%s.%s, variant=%s, mode=%s, index=%d)",
-            job.benchmark_run_id,
-            job.benchmark_id,
-            job.source_database,
-            job.source_table,
-            job.variant_table,
-            job.variant_meta.mode,
-            job.variant_meta.global_index,
-        )
-        self._execution_adapter.execute_variant(job)
-
-    def _execute_without_store(self, job: VariantJob) -> None:
-        """
-        Выполняет/диспачит вариант (совместимый алиас).
-
-        Исторически этот метод использовался dispatch-only стратегиями.
-        Сейчас runner нигде не пишет в store, поэтому поведение эквивалентно
-        `_execute_and_store`.
-        """
-        logger.debug(
-            "BenchmarkRunner: dispatch variant job (without_store alias) "
             "(run_id=%d, benchmark=%s, table=%s.%s, variant=%s, mode=%s, index=%d)",
             job.benchmark_run_id,
             job.benchmark_id,

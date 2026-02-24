@@ -183,6 +183,15 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
                 source_table_select_bytes_per_second_measurements_percentiles_readable=list(
                     result.source_table_select_bytes_per_second_measurements_percentiles_readable
                 ),
+                tested_table_select_metrics_by_query_json=(
+                    result.tested_table_select_metrics_by_query_json
+                ),
+                source_table_select_metrics_by_query_json=(
+                    result.source_table_select_metrics_by_query_json
+                ),
+                tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json=(
+                    result.tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json
+                ),
                 tested_table_consumed_compressed_size_bytes_by_each_column=(
                     result.tested_table_consumed_compressed_size_bytes_by_each_column
                 ),
