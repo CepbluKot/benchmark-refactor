@@ -18,11 +18,6 @@ from typing import Any, Dict, Optional, Sequence
 
 from pydantic import ValidationError
 
-ROOT_DIR = Path(__file__).resolve().parent
-SRC_DIR = ROOT_DIR / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
-
 from loader import load_config, parse_config_parts
 from models import (
     BenchmarkProjectConfig,

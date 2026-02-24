@@ -445,6 +445,7 @@ print(run_id)
 Если нужен быстрый ориентир по структуре адаптера, посмотри:
 - `examples/example.py`
 - `examples/example_sequential_topn.py`
+- `synthetic_interface_playground.py` (синтетический отладочный playground с примерными реализациями интерфейсов)
 
 <a id="validation"></a>
 ## Валидация JSON-конфигов

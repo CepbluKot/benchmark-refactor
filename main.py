@@ -7,14 +7,7 @@ Fetcher/подключения к ClickHouse.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Dict, List, Optional
-
-ROOT_DIR = Path(__file__).resolve().parent
-SRC_DIR = ROOT_DIR / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
 
 from benchmark_engine import (
     BenchmarkEngine,
