@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from functools import lru_cache
 from typing import Annotated, Any, Dict, List, Optional
 
@@ -58,6 +59,33 @@ def _decode_json_from_base64(value: str, field_name: str) -> Dict[str, Any]:
     return parsed
 
 
+def _normalize_log_level(value: object) -> str:
+    """Нормализует уровень логирования к одному из стандартных уровней."""
+    if value is None:
+        return "INFO"
+
+    normalized = str(value).strip().upper()
+    if not normalized:
+        return "INFO"
+
+    valid_levels = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
+    if normalized in valid_levels:
+        return normalized
+
+    # Поддерживаем также числовые уровни logging (например, 20).
+    try:
+        numeric = int(normalized)
+    except ValueError as exc:
+        raise ValueError(
+            "log_level должен быть одним из: CRITICAL, ERROR, WARNING, INFO, DEBUG, NOTSET "
+            "или числовым уровнем logging"
+        ) from exc
+
+    if numeric < logging.NOTSET:
+        raise ValueError("числовой log_level не может быть отрицательным")
+    return str(numeric)
+
+
 class AppSettings(BaseSettings):
     """Глобальные настройки запуска benchmark runner."""
 
@@ -68,6 +96,7 @@ class AppSettings(BaseSettings):
 
     benchmark_ids: Annotated[List[str], NoDecode] = Field(default_factory=list)
     benchmark_run_id: Optional[int] = None
+    log_level: str = "INFO"
 
     model_config = SettingsConfigDict(
         env_prefix="BENCH_",
@@ -103,6 +132,12 @@ class AppSettings(BaseSettings):
           - list из env/кода.
         """
         return _parse_benchmark_ids(value)
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def parse_log_level(cls, value: object) -> str:
+        """Нормализует уровень логирования из окружения."""
+        return _normalize_log_level(value)
 
     def decode_celery_config(self) -> Dict[str, Any]:
         """Возвращает celery-конфиг из BENCH_CELERY_CONFIG_B64."""

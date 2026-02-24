@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from ...contracts.execution import BenchmarkExecutionAdapter
 from ...contracts.result_store import BenchmarkResultStore
 from ...types import BenchmarkVariantResult, VariantJob
 from ...types import SourceBenchmarkJob, SourceBenchmarkResult
+
+logger = logging.getLogger(__name__)
 
 
 class NoopExecutionAdapter(BenchmarkExecutionAdapter):
@@ -23,6 +26,14 @@ class NoopExecutionAdapter(BenchmarkExecutionAdapter):
 
     def execute_source_benchmark(self, job: SourceBenchmarkJob) -> SourceBenchmarkResult:
         """Возвращает baseline-результат без реального выполнения SQL."""
+        logger.debug(
+            "NoopExecutionAdapter: source baseline job "
+            "(run_id=%d, benchmark=%s, table=%s.%s)",
+            job.benchmark_run_id,
+            job.benchmark_id,
+            job.source_database,
+            job.source_table,
+        )
         return SourceBenchmarkResult(
             benchmark_run_id=job.benchmark_run_id,
             benchmark_started_at=job.benchmark_started_at,
@@ -36,6 +47,17 @@ class NoopExecutionAdapter(BenchmarkExecutionAdapter):
 
     def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
         """Возвращает dry-run результат и при наличии пишет его в store."""
+        logger.debug(
+            "NoopExecutionAdapter: variant job "
+            "(run_id=%d, benchmark=%s, table=%s.%s, variant=%s, mode=%s, index=%d)",
+            job.benchmark_run_id,
+            job.benchmark_id,
+            job.source_database,
+            job.source_table,
+            job.variant_table,
+            job.variant_meta.mode,
+            job.variant_meta.global_index,
+        )
         result = BenchmarkVariantResult(
             benchmark_run_id=job.benchmark_run_id,
             benchmark_started_at=job.benchmark_started_at,

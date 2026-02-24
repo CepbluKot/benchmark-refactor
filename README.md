@@ -394,6 +394,15 @@ Runner не пишет результаты в store. Сохранение вы�
 ./venv/bin/python encode_configs_base64.py | sed 's/^export //' > .env
 ```
 
+При необходимости добавь в `.env` уровень логирования:
+
+```bash
+BENCH_LOG_LEVEL=INFO
+```
+
+Поддерживаются уровни: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`
+(или числовое значение уровня logging).
+
 3. Запусти:
 
 ```bash

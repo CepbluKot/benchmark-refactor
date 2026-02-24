@@ -7,6 +7,7 @@ Fetcher/подключения к ClickHouse.
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Optional
 
 from src.benchmark_engine import (
@@ -21,6 +22,8 @@ from src.clickhouse_ddl import TableDDL
 from src.loader import parse_config_parts
 
 from settings import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 USER_EVENTS_DDL = """
@@ -136,17 +139,42 @@ def _build_stub_providers(connection_ids: List[str]) -> Dict[str, MetadataProvid
             },
         },
     )
-    return {connection_id: stub for connection_id in connection_ids}
+    providers = {connection_id: stub for connection_id in connection_ids}
+    logger.debug(
+        "Сформированы stub metadata providers для connection_id=%s",
+        connection_ids,
+    )
+    return providers
+
+
+def _configure_logging(level_name: str) -> None:
+    """Настраивает формат и уровень логирования приложения."""
+    try:
+        level = int(level_name)
+    except ValueError:
+        level = getattr(logging, level_name.upper(), logging.INFO)
+
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
 
 
 def run_from_settings() -> int:
     """Запускает BenchmarkRunner по настройкам и возвращает run id."""
     app_settings = get_settings()
+    logger.info("Чтение и декодирование конфигов из переменных окружения")
     config = parse_config_parts(
         celery_raw=app_settings.decode_celery_config(),
         connections_raw=app_settings.decode_connections_config(),
         rule_banks_raw=app_settings.decode_rule_banks_config(),
         benchmarks_raw=app_settings.decode_benchmarks_config(),
+    )
+    logger.info(
+        "Конфиг загружен: connections=%d, benchmarks=%d",
+        len(config.connections),
+        len(config.benchmarks),
     )
 
     providers = _build_stub_providers(
@@ -164,14 +192,19 @@ def run_from_settings() -> int:
     )
 
     benchmark_ids: Optional[List[str]] = app_settings.benchmark_ids or None
-    return runner.run(
+    run_id = runner.run(
         benchmark_ids=benchmark_ids,
         benchmark_run_id=app_settings.benchmark_run_id,
     )
+    logger.info("Benchmark run завершён: benchmark_run_id=%d", run_id)
+    return run_id
 
 
 def main() -> None:
     """CLI entrypoint."""
+    app_settings = get_settings()
+    _configure_logging(app_settings.log_level)
+    logger.info("Старт benchmark launcher (log_level=%s)", app_settings.log_level)
     run_id = run_from_settings()
     print(f"Benchmark run completed. benchmark_run_id={run_id}")
 

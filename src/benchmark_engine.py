@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from src.clickhouse_ddl import TableDDL
@@ -62,6 +63,9 @@ from src.naming import variant_table_name
 from src.query_generator import generate_queries
 from src.resolver import RuleResolver
 
+logger = logging.getLogger(__name__)
+
+
 class TableSelector:
     """
     Разворачивает селекторы из `BenchmarkConfig` в список `TableTarget`.
@@ -80,7 +84,14 @@ class TableSelector:
         """Возвращает список таблиц без дубликатов для конкретного benchmark."""
         databases = self._resolve_databases(benchmark, provider)
         targets = self._resolve_tables(benchmark, databases, provider)
-        return self._deduplicate(targets)
+        deduplicated = self._deduplicate(targets)
+        logger.debug(
+            "TableSelector: benchmark=%s, databases=%d, targets=%d",
+            benchmark.id,
+            len(databases),
+            len(deduplicated),
+        )
+        return deduplicated
 
     @staticmethod
     def _resolve_databases(
@@ -168,7 +179,15 @@ class QueryPlanBuilder:
         else:
             tests = auto_queries + manual_queries
 
-        return QueryPlan(warmup_queries=warmups, test_queries=tests)
+        plan = QueryPlan(warmup_queries=warmups, test_queries=tests)
+        logger.debug(
+            "QueryPlanBuilder: table=%s, mode=%s, warmups=%d, tests=%d",
+            table_ddl.name,
+            queries_config.mode,
+            len(plan.warmup_queries),
+            len(plan.test_queries),
+        )
+        return plan
 
     @staticmethod
     def render_for_table(
@@ -331,6 +350,16 @@ class BenchmarkPlanner:
                     queries=queries,
                     celery=self._config.celery,
                 )
+                logger.debug(
+                    "BenchmarkPlanner: table plan создан "
+                    "(benchmark=%s, strategy=%s, mode=%s, table=%s.%s, test_db=%s)",
+                    benchmark.id,
+                    strategy,
+                    mode,
+                    target.database,
+                    target.table,
+                    test_database or target.database,
+                )
 
     @staticmethod
     def _find_table_rule(
@@ -422,6 +451,14 @@ class BenchmarkEngine:
             table=table_plan.table,
         )
         raw_query_plan = self._query_builder.build(source_ddl, table_plan.queries)
+        logger.debug(
+            "BenchmarkEngine: подготовлен table context "
+            "(benchmark=%s, table=%s.%s, strategy=%s)",
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+            table_plan.strategy,
+        )
         return source_ddl, raw_query_plan
 
     def build_source_benchmark_job(
@@ -448,6 +485,15 @@ class BenchmarkEngine:
             table_plan=table_plan,
             variant_mode=table_plan.mode,
             job_mode=table_plan.mode,
+        )
+        logger.debug(
+            "BenchmarkEngine: source baseline job собран "
+            "(benchmark=%s, table=%s.%s, run_id=%d, insert_rows_limit=%s)",
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+            benchmark_run_id,
+            source_insert_rows_limit,
         )
 
         return SourceBenchmarkJob(
@@ -620,6 +666,23 @@ class BenchmarkEngine:
             column_order=effective_column_order,
             max_iterations=table_plan.max_iterations,
         )
+        logger.info(
+            "BenchmarkEngine: генерация variant jobs "
+            "(benchmark=%s, strategy=%s, mode=%s, table=%s.%s, total=%d)",
+            table_plan.benchmark_id,
+            table_plan.strategy,
+            variant_mode,
+            table_plan.database,
+            table_plan.table,
+            capped_total,
+        )
+        if capped_total == 0:
+            logger.warning(
+                "BenchmarkEngine: нет вариантов для table=%s.%s, benchmark=%s",
+                table_plan.database,
+                table_plan.table,
+                table_plan.benchmark_id,
+            )
 
         for variant_ddl, variant_meta in iter_variants(
             table=source_ddl,
@@ -737,6 +800,11 @@ class BenchmarkRunner:
                 "Используй overwrite=True для замены."
             )
         self._table_execution_strategies[normalized_strategy_key] = strategy
+        logger.debug(
+            "BenchmarkRunner: зарегистрирована table strategy key=%s (overwrite=%s)",
+            normalized_strategy_key,
+            overwrite,
+        )
 
     def run(
         self,
@@ -768,12 +836,27 @@ class BenchmarkRunner:
             raise ValueError(f"benchmark_run_id должен быть > 0, получено: {run_id}")
         run_started_at = self._next_run_started_at()
         self._last_benchmark_started_at = run_started_at
+        logger.info(
+            "BenchmarkRunner: старт run (run_id=%d, started_at=%s, benchmark_ids=%s)",
+            run_id,
+            run_started_at.isoformat(),
+            list(benchmark_ids) if benchmark_ids else "all",
+        )
 
         for table_plan in self._engine.iter_table_plans(benchmark_ids=benchmark_ids):
             strategy_key = self._canonical_strategy_key(table_plan.strategy)
             strategy = self._table_execution_strategies.get(
                 strategy_key,
                 self._default_table_execution_strategy,
+            )
+            logger.info(
+                "BenchmarkRunner: старт table plan "
+                "(run_id=%d, benchmark=%s, table=%s.%s, strategy=%s)",
+                run_id,
+                table_plan.benchmark_id,
+                table_plan.database,
+                table_plan.table,
+                strategy_key,
             )
             self._active_source_benchmark = self._execute_source_benchmark(
                 table_plan=table_plan,
@@ -787,8 +870,17 @@ class BenchmarkRunner:
                     benchmark_run_id=run_id,
                     benchmark_started_at=run_started_at,
                 )
+                logger.info(
+                    "BenchmarkRunner: завершён table plan "
+                    "(run_id=%d, benchmark=%s, table=%s.%s)",
+                    run_id,
+                    table_plan.benchmark_id,
+                    table_plan.database,
+                    table_plan.table,
+                )
             finally:
                 self._active_source_benchmark = None
+        logger.info("BenchmarkRunner: run завершён (run_id=%d)", run_id)
         return run_id
 
     @property
@@ -804,6 +896,7 @@ class BenchmarkRunner:
     ) -> None:
         """Стандартное выполнение table-plan: прогон всех VariantJob из engine."""
         source_benchmark = self._require_active_source_benchmark()
+        dispatched_jobs = 0
         for job in self._engine.iter_variant_jobs_for_table_plan(
             table_plan,
             benchmark_run_id=benchmark_run_id,
@@ -811,6 +904,16 @@ class BenchmarkRunner:
             source_benchmark=source_benchmark,
         ):
             self._execute_and_store(job)
+            dispatched_jobs += 1
+        logger.info(
+            "BenchmarkRunner: table plan dispatch завершён "
+            "(run_id=%d, benchmark=%s, table=%s.%s, jobs=%d)",
+            benchmark_run_id,
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+            dispatched_jobs,
+        )
 
     def _execute_source_benchmark(
         self,
@@ -823,6 +926,14 @@ class BenchmarkRunner:
 
         Результат используется как контекст для всех variant jobs текущей таблицы.
         """
+        logger.info(
+            "BenchmarkRunner: запуск baseline "
+            "(run_id=%d, benchmark=%s, table=%s.%s)",
+            benchmark_run_id,
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+        )
         job = self._engine.build_source_benchmark_job(
             table_plan=table_plan,
             benchmark_run_id=benchmark_run_id,
@@ -832,6 +943,16 @@ class BenchmarkRunner:
         self._validate_source_benchmark_result(
             job=job,
             result=result,
+        )
+        logger.info(
+            "BenchmarkRunner: baseline завершён "
+            "(run_id=%d, benchmark=%s, table=%s.%s, baseline_id=%s, score=%s)",
+            benchmark_run_id,
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+            result.baseline_id,
+            result.score,
         )
         return result
 
@@ -907,6 +1028,17 @@ class BenchmarkRunner:
         Важно: runner не сохраняет результаты. Сохранение выполняет backend/воркер
         внутри execution adapter реализации.
         """
+        logger.debug(
+            "BenchmarkRunner: dispatch variant job "
+            "(run_id=%d, benchmark=%s, table=%s.%s, variant=%s, mode=%s, index=%d)",
+            job.benchmark_run_id,
+            job.benchmark_id,
+            job.source_database,
+            job.source_table,
+            job.variant_table,
+            job.variant_meta.mode,
+            job.variant_meta.global_index,
+        )
         self._execution_adapter.execute_variant(job)
 
     def _execute_without_store(self, job: VariantJob) -> None:
@@ -917,4 +1049,15 @@ class BenchmarkRunner:
         Сейчас runner нигде не пишет в store, поэтому поведение эквивалентно
         `_execute_and_store`.
         """
+        logger.debug(
+            "BenchmarkRunner: dispatch variant job (without_store alias) "
+            "(run_id=%d, benchmark=%s, table=%s.%s, variant=%s, mode=%s, index=%d)",
+            job.benchmark_run_id,
+            job.benchmark_id,
+            job.source_database,
+            job.source_table,
+            job.variant_table,
+            job.variant_meta.mode,
+            job.variant_meta.global_index,
+        )
         self._execution_adapter.execute_variant(job)

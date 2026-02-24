@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 from time import monotonic, sleep
 from typing import TYPE_CHECKING, Dict, Iterator, Tuple
 
@@ -24,6 +25,8 @@ if TYPE_CHECKING:
 
 _TYPE_STAGE_WAIT_POLL_INTERVAL_SEC = 0.5
 _TYPE_STAGE_WAIT_TIMEOUT_SEC = 3600.0
+
+logger = logging.getLogger(__name__)
 
 
 def _require_result_store(
@@ -134,6 +137,15 @@ def _wait_for_type_stage_completion(
     store = _require_result_store(runner, strategy_key=table_plan.strategy)
 
     deadline = monotonic() + _TYPE_STAGE_WAIT_TIMEOUT_SEC
+    logger.info(
+        "SequentialTopN: ожидание завершения type-stage "
+        "(run_id=%d, benchmark=%s, table=%s.%s, expected=%d)",
+        benchmark_run_id,
+        table_plan.benchmark_id,
+        table_plan.database,
+        table_plan.table,
+        type_total,
+    )
     while True:
         ranked = store.get_top_type_variants(
             benchmark_run_id=benchmark_run_id,
@@ -143,6 +155,15 @@ def _wait_for_type_stage_completion(
             top_n=type_total,
         )
         if len(ranked) >= type_total:
+            logger.info(
+                "SequentialTopN: type-stage завершён "
+                "(run_id=%d, benchmark=%s, table=%s.%s, ready=%d)",
+                benchmark_run_id,
+                table_plan.benchmark_id,
+                table_plan.database,
+                table_plan.table,
+                len(ranked),
+            )
             return ranked
 
         if monotonic() >= deadline:
@@ -215,6 +236,14 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
     ) -> None:
         """Запускает type-stage, ждёт top-N и затем запускает index-stage."""
         _require_result_store(runner, strategy_key=table_plan.strategy)
+        logger.info(
+            "SequentialTopN: старт стратегии "
+            "(run_id=%d, benchmark=%s, table=%s.%s)",
+            benchmark_run_id,
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+        )
         source_benchmark = runner._require_active_source_benchmark()
         source_ddl, raw_query_plan, effective_column_order = _prepare_table_context(
             runner=runner,
@@ -225,7 +254,17 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
             source_ddl=source_ddl,
             effective_column_order=effective_column_order,
         )
+        logger.info(
+            "SequentialTopN: type-stage dispatch "
+            "(run_id=%d, benchmark=%s, table=%s.%s, variants=%d)",
+            benchmark_run_id,
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+            type_total,
+        )
 
+        type_dispatched = 0
         for job in _iter_type_jobs(
             runner=runner,
             table_plan=table_plan,
@@ -238,6 +277,16 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
             source_benchmark=source_benchmark,
         ):
             runner._execute_and_store(job)
+            type_dispatched += 1
+        logger.info(
+            "SequentialTopN: type-stage dispatch завершён "
+            "(run_id=%d, benchmark=%s, table=%s.%s, jobs=%d)",
+            benchmark_run_id,
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+            type_dispatched,
+        )
 
         ranked_type_variants = _wait_for_type_stage_completion(
             runner=runner,
@@ -248,8 +297,26 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
         top_n = min(table_plan.sequential_top_n, type_total)
         top_variants = ranked_type_variants[:top_n]
         if not top_variants:
+            logger.info(
+                "SequentialTopN: top-N пуст, index-stage пропущен "
+                "(run_id=%d, benchmark=%s, table=%s.%s)",
+                benchmark_run_id,
+                table_plan.benchmark_id,
+                table_plan.database,
+                table_plan.table,
+            )
             return
 
+        logger.info(
+            "SequentialTopN: index-stage dispatch "
+            "(run_id=%d, benchmark=%s, table=%s.%s, top_n=%d)",
+            benchmark_run_id,
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+            len(top_variants),
+        )
+        index_dispatched = 0
         for job in _iter_index_jobs_from_top_variants(
             runner=runner,
             table_plan=table_plan,
@@ -262,6 +329,16 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
             source_benchmark=source_benchmark,
         ):
             runner._execute_and_store(job)
+            index_dispatched += 1
+        logger.info(
+            "SequentialTopN: index-stage dispatch завершён "
+            "(run_id=%d, benchmark=%s, table=%s.%s, jobs=%d)",
+            benchmark_run_id,
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+            index_dispatched,
+        )
 
 
 class SequentialTopNDispatchTypesTableExecutionStrategy(TableExecutionStrategy):
@@ -281,6 +358,14 @@ class SequentialTopNDispatchTypesTableExecutionStrategy(TableExecutionStrategy):
         benchmark_started_at: datetime,
     ) -> None:
         """Отправляет только type-stage jobs без runner-side сохранения."""
+        logger.info(
+            "SequentialTopN stage1-dispatch: старт "
+            "(run_id=%d, benchmark=%s, table=%s.%s)",
+            benchmark_run_id,
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+        )
         source_benchmark = runner._require_active_source_benchmark()
         source_ddl, raw_query_plan, effective_column_order = _prepare_table_context(
             runner=runner,
@@ -291,6 +376,7 @@ class SequentialTopNDispatchTypesTableExecutionStrategy(TableExecutionStrategy):
             source_ddl=source_ddl,
             effective_column_order=effective_column_order,
         )
+        dispatched = 0
         for job in _iter_type_jobs(
             runner=runner,
             table_plan=table_plan,
@@ -303,6 +389,17 @@ class SequentialTopNDispatchTypesTableExecutionStrategy(TableExecutionStrategy):
             source_benchmark=source_benchmark,
         ):
             runner._execute_without_store(job)
+            dispatched += 1
+        logger.info(
+            "SequentialTopN stage1-dispatch: завершён "
+            "(run_id=%d, benchmark=%s, table=%s.%s, jobs=%d, expected=%d)",
+            benchmark_run_id,
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+            dispatched,
+            type_total,
+        )
 
 
 class SequentialTopNDispatchIndexesTableExecutionStrategy(TableExecutionStrategy):
@@ -321,6 +418,14 @@ class SequentialTopNDispatchIndexesTableExecutionStrategy(TableExecutionStrategy
         benchmark_started_at: datetime,
     ) -> None:
         """Отправляет index-stage jobs для top-N type-вариантов из store."""
+        logger.info(
+            "SequentialTopN stage2-dispatch: старт "
+            "(run_id=%d, benchmark=%s, table=%s.%s)",
+            benchmark_run_id,
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+        )
         source_benchmark = runner._require_active_source_benchmark()
         source_ddl, raw_query_plan, effective_column_order = _prepare_table_context(
             runner=runner,
@@ -338,8 +443,17 @@ class SequentialTopNDispatchIndexesTableExecutionStrategy(TableExecutionStrategy
             type_total=type_total,
         )
         if not top_variants:
+            logger.info(
+                "SequentialTopN stage2-dispatch: top-N пуст, этап пропущен "
+                "(run_id=%d, benchmark=%s, table=%s.%s)",
+                benchmark_run_id,
+                table_plan.benchmark_id,
+                table_plan.database,
+                table_plan.table,
+            )
             return
 
+        dispatched = 0
         for job in _iter_index_jobs_from_top_variants(
             runner=runner,
             table_plan=table_plan,
@@ -352,3 +466,14 @@ class SequentialTopNDispatchIndexesTableExecutionStrategy(TableExecutionStrategy
             source_benchmark=source_benchmark,
         ):
             runner._execute_without_store(job)
+            dispatched += 1
+        logger.info(
+            "SequentialTopN stage2-dispatch: завершён "
+            "(run_id=%d, benchmark=%s, table=%s.%s, jobs=%d, top_n=%d)",
+            benchmark_run_id,
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+            dispatched,
+            len(top_variants),
+        )
