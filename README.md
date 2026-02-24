@@ -95,39 +95,117 @@ flowchart LR
 
 ### Слои по порядку
 
-1. Контракт конфигов (`src/models.py`):
-Фиксирует структуру JSON и валидирует значения до запуска.
+1. Контракт конфигов (`src/models.py`).
+Что это:
+Это «правила формы» для JSON. Здесь заранее описано, какие поля вообще разрешены и какие значения считаются корректными.
+Зачем это нужно:
+Чтобы поймать ошибки сразу на старте, а не посреди запуска бенчмарка.
+Что приходит:
+Сырые JSON-данные.
+Что уходит:
+Проверенные Python-объекты (`BenchmarkConfig`, `BenchmarkRootConfig` и т.д.).
 
-2. Сборка root-конфига (`src/loader.py`, `validate_json_config.py`):
-Склеивает секции и проверяет кросс-ссылки (`connection_id`, `rule_bank`, `default_rule_banks`).
+2. Сборка root-конфига (`src/loader.py`, `validate_json_config.py`).
+Что это:
+Слой, который собирает конфиг из частей (`connections`, `rule_banks`, `benchmarks`, `celery`) в один общий объект.
+Зачем это нужно:
+Чтобы проект работал как с одним файлом, так и с несколькими файлами, и чтобы ссылки между секциями были валидны.
+Что приходит:
+JSON-секции или `benchmark.project.json`.
+Что уходит:
+Единый `BenchmarkRootConfig`, готовый к планированию.
 
-3. Резолв правил (`src/resolver.py`):
-Собирает итоговые правила из global/table override, bank и inline.
+3. Резолв правил (`src/resolver.py`).
+Что это:
+Логика, которая решает, какие именно правила применять к таблице: глобальные, локальные, из банка правил или inline.
+Зачем это нужно:
+Чтобы не было конфликтов и двусмысленности в правилах мутации DDL.
+Что приходит:
+`global_rules`, `table_rules`, `rule_bank`/`default_rule_banks`.
+Что уходит:
+`ResolvedRules` с итоговыми `column_rules`, `index_rules`, `column_order`.
 
-4. Метаданные (`src/benchmark_runtime/contracts/metadata.py` + implementations):
-Дает список БД/таблиц, исходный DDL и размеры колонок (если нужны).
+4. Метаданные (`src/benchmark_runtime/contracts/metadata.py` + реализации).
+Что это:
+Абстракция над источником БД-метаданных.
+Зачем это нужно:
+Движок не привязывается к одному клиенту БД и может брать DDL/списки таблиц из разных реализаций.
+Что приходит:
+`connection_id`, `database`, `table`.
+Что уходит:
+Список БД/таблиц, исходный `TableDDL`, размеры колонок (если поддерживается).
 
-5. Планирование таблиц (`TableSelector`, `BenchmarkPlanner` в `src/benchmark_engine.py`):
-Раскрывает selectors и строит `TableBenchmarkPlan` с effective `strategy`, лимитами и queries.
+5. Планирование таблиц (`TableSelector`, `BenchmarkPlanner` в `src/benchmark_engine.py`).
+Что это:
+Слой, который превращает «общие пожелания» из конфига в конкретные планы по каждой таблице.
+Зачем это нужно:
+Чтобы runner работал уже с точными, детерминированными задачами.
+Что приходит:
+`BenchmarkRootConfig` + metadata provider.
+Что уходит:
+Поток `TableBenchmarkPlan` (один план на одну таблицу).
 
-6. Генерация DDL-вариантов (`src/variant_generation/*`, фасад `src/combiner.py`):
-По внутреннему mode (`types/indexes/combined/sequential`) выдает `(variant_ddl, VariantMeta)` и `total_variants`.
+6. Генерация DDL-вариантов (`src/variant_generation/*`, фасад `src/combiner.py`).
+Что это:
+Слой перебора схемы: создает версии таблицы с разными типами/кодеками/индексами.
+Зачем это нужно:
+Именно тут рождаются кандидаты, которые потом сравниваются по производительности.
+Что приходит:
+Исходный `TableDDL`, правила и внутренний `mode`.
+Что уходит:
+Пары `(variant_ddl, VariantMeta)` и оценка количества вариантов (`total_variants`).
 
-7. Подготовка execution jobs (`BenchmarkEngine`):
-Делает `VariantJob`, рендерит SQL с variant-таблицей и вычисляет итоговый `insert_rows_limit`.
+7. Подготовка execution jobs (`BenchmarkEngine`).
+Что это:
+Преобразователь «DDL-вариантов» в конкретные задания на запуск.
+Зачем это нужно:
+Чтобы адаптеру исполнения передавать уже полностью готовый job.
+Что приходит:
+`TableBenchmarkPlan`, варианты DDL, query-настройки.
+Что уходит:
+`VariantJob` с SQL-запросами, именем variant-таблицы и итоговым `insert_rows_limit`.
 
-8. Оркестрация выполнения (`BenchmarkRunner` + `TableExecutionStrategy`):
-Выбирает table strategy по `benchmark.strategy`.
-Для `sequential_topn_strategy` запускает 2 стадии: `types -> top-N -> indexes`.
+8. Оркестрация выполнения (`BenchmarkRunner` + `TableExecutionStrategy`).
+Что это:
+Координатор всего запуска.
+Зачем это нужно:
+Он выбирает стратегию исполнения по `benchmark.strategy` и определяет порядок запуска вариантов.
+Что приходит:
+`TableBenchmarkPlan`.
+Что уходит:
+Вызовы в execution adapter и записи в result store.
+Важно:
+Для `sequential_topn_strategy` runner делает 2 этапа: сначала `types`, потом `indexes` только для top-N.
 
-9. Фактическое выполнение SQL (`BenchmarkExecutionAdapter`):
-Создает/запускает варианты и возвращает `BenchmarkVariantResult` (score + payload).
+9. Фактическое выполнение SQL (`BenchmarkExecutionAdapter`).
+Что это:
+Точка, где реально выполняется SQL в БД.
+Зачем это нужно:
+Ядро не знает, как именно запускать SQL в вашем окружении; это инкапсулируется адаптером.
+Что приходит:
+`VariantJob`.
+Что уходит:
+`BenchmarkVariantResult` (score и дополнительные метрики в payload).
 
-10. Хранилище результатов (`BenchmarkResultStore`):
-Сразу сохраняет каждый результат и отдает top type-варианты для sequential стадии индексов.
+10. Хранилище результатов (`BenchmarkResultStore`).
+Что это:
+Слой сохранения и чтения результатов.
+Зачем это нужно:
+Результаты не держатся «кучей» в памяти и доступны для отборов top-N.
+Что приходит:
+`VariantJob` + `BenchmarkVariantResult`.
+Что уходит:
+Сохраненные записи и выборки top type-вариантов.
 
-11. Управление run-id (`BenchmarkRunIdProvider`):
-Выдает единый `benchmark_run_id` на весь запуск.
+11. Управление run-id (`BenchmarkRunIdProvider`).
+Что это:
+Источник идентификатора запуска бенчмарка.
+Зачем это нужно:
+Чтобы все результаты одного запуска имели общий `benchmark_run_id` и легко группировались.
+Что приходит:
+Сигнал нового запуска.
+Что уходит:
+Следующий корректный `benchmark_run_id`.
 
 ### Главное о границах ответственности
 
