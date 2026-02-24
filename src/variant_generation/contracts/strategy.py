@@ -5,9 +5,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from clickhouse_ddl import TableDDL
-from column_rules import ColumnRule
-from index_rules import IndexRule
+from src.clickhouse_ddl import TableDDL
+from src.column_rules import ColumnRule
+from src.index_rules import IndexRule
 
 from ..types import VariantMeta
 

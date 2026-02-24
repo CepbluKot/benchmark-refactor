@@ -15,7 +15,7 @@ from typing import Any, Dict, Optional, Union
 
 from pydantic import ValidationError
 
-from models import (
+from src.models import (
     BenchmarkConfig,
     BenchmarkProjectConfig,
     BenchmarkRootConfig,

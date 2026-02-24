@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from clickhouse_ddl import TableDDL
-from column_rules import ColumnRule
-from column_variants import iter_column_variants, total_column_variants
-from index_rules import IndexRule
+from src.clickhouse_ddl import TableDDL
+from src.column_rules import ColumnRule
+from src.column_variants import iter_column_variants, total_column_variants
+from src.index_rules import IndexRule
 
 from ..contracts import VariantGenerationStrategy
 from ..types import VariantMeta

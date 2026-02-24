@@ -18,8 +18,8 @@ from typing import Any, Dict, Optional, Sequence
 
 from pydantic import ValidationError
 
-from loader import load_config, parse_config_parts
-from models import (
+from src.loader import load_config, parse_config_parts
+from src.models import (
     BenchmarkProjectConfig,
     BenchmarkRootConfig,
     BenchmarksFileConfig,

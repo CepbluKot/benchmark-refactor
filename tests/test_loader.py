@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from loader import load_config, parse_config, parse_config_parts
+from src.loader import load_config, parse_config, parse_config_parts
 
 
 def _write_json(path: Path, payload: dict) -> None:

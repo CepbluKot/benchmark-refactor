@@ -5,13 +5,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from combiner import iter_variants, total_variants
+from src.combiner import iter_variants, total_variants
 
 from ...contracts.table_strategy import TableExecutionStrategy
 from ...types import TableBenchmarkPlan
 
 if TYPE_CHECKING:
-    from benchmark_engine import BenchmarkRunner
+    from src.benchmark_engine import BenchmarkRunner
 
 
 class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from clickhouse_ddl import TableDDL
+from src.clickhouse_ddl import TableDDL
 
 from ...contracts.metadata import MetadataProvider
 

@@ -18,8 +18,8 @@ import time
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional
 
-from models import ConnectionConfig
-from clickhouse_ddl import TableDDL
+from src.models import ConnectionConfig
+from src.clickhouse_ddl import TableDDL
 
 logger = logging.getLogger(__name__)
 

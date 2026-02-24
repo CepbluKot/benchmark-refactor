@@ -7,9 +7,9 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from clickhouse_ddl import TableDDL
-from combiner import VariantMeta
-from models import (
+from src.clickhouse_ddl import TableDDL
+from src.combiner import VariantMeta
+from src.models import (
     BenchmarkMode,
     BenchmarkStrategy,
     CeleryConfig,
@@ -17,7 +17,7 @@ from models import (
     InsertRowsLimitsConfig,
     QueriesConfig,
 )
-from resolver import ResolvedRules
+from src.resolver import ResolvedRules
 
 
 class _FrozenModel(BaseModel):

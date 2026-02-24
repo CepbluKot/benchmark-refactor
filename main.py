@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from benchmark_engine import (
+from src.benchmark_engine import (
     BenchmarkEngine,
     BenchmarkPlanner,
     BenchmarkRunner,
@@ -17,8 +17,8 @@ from benchmark_engine import (
     MetadataProvider,
     NoopExecutionAdapter,
 )
-from clickhouse_ddl import TableDDL
-from loader import parse_config_parts
+from src.clickhouse_ddl import TableDDL
+from src.loader import parse_config_parts
 
 from settings import get_settings
 

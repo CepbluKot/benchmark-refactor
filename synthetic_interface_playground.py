@@ -19,33 +19,33 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from benchmark_engine import BenchmarkEngine, BenchmarkPlanner, BenchmarkRunner
-from benchmark_runtime.contracts.execution import BenchmarkExecutionAdapter
-from benchmark_runtime.contracts.metadata import MetadataProvider
-from benchmark_runtime.contracts.result_store import BenchmarkResultStore
-from benchmark_runtime.contracts.run_id import BenchmarkRunIdProvider
-from benchmark_runtime.contracts.table_strategy import TableExecutionStrategy
-from benchmark_runtime.table_strategy import (
+from src.benchmark_engine import BenchmarkEngine, BenchmarkPlanner, BenchmarkRunner
+from src.benchmark_runtime.contracts.execution import BenchmarkExecutionAdapter
+from src.benchmark_runtime.contracts.metadata import MetadataProvider
+from src.benchmark_runtime.contracts.result_store import BenchmarkResultStore
+from src.benchmark_runtime.contracts.run_id import BenchmarkRunIdProvider
+from src.benchmark_runtime.contracts.table_strategy import TableExecutionStrategy
+from src.benchmark_runtime.table_strategy import (
     CombinedTableExecutionStrategy,
     DefaultTableExecutionStrategy,
     IndexesTableExecutionStrategy,
     SequentialTopNTableExecutionStrategy,
     TypesTableExecutionStrategy,
 )
-from benchmark_runtime.types import (
+from src.benchmark_runtime.types import (
     BenchmarkVariantResult,
     StoredBenchmarkResult,
     TableBenchmarkPlan,
     TopTypeVariant,
     VariantJob,
 )
-from clickhouse_ddl import TableDDL
-from column_rules import ColumnRule
-from index_rules import IndexRule
-from loader import parse_config_parts
-from variant_generation import get_variant_generation_strategy, register_variant_generation_strategy
-from variant_generation.contracts import VariantGenerationStrategy
-from variant_generation.types import VariantMeta
+from src.clickhouse_ddl import TableDDL
+from src.column_rules import ColumnRule
+from src.index_rules import IndexRule
+from src.loader import parse_config_parts
+from src.variant_generation import get_variant_generation_strategy, register_variant_generation_strategy
+from src.variant_generation.contracts import VariantGenerationStrategy
+from src.variant_generation.types import VariantMeta
 
 EVENTS_DDL = """
 CREATE TABLE analytics.events

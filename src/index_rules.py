@@ -8,7 +8,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 from typing import Iterator, List, Optional
 
-from clickhouse_ddl import ColumnDef, IndexDef
+from src.clickhouse_ddl import ColumnDef, IndexDef
 
 
 # ─── один вариант индекса для колонки ────────────────────────────────────────

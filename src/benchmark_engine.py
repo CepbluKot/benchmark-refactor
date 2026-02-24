@@ -12,9 +12,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
-from clickhouse_ddl import TableDDL
-from combiner import VariantMeta, iter_variants, total_variants
-from models import (
+from src.clickhouse_ddl import TableDDL
+from src.combiner import VariantMeta, iter_variants, total_variants
+from src.models import (
     BenchmarkConfig,
     BenchmarkMode,
     BenchmarkStrategy,
@@ -25,18 +25,18 @@ from models import (
     QueriesConfig,
     TableRuleConfig,
 )
-from benchmark_runtime.execution import BenchmarkExecutionAdapter, NoopExecutionAdapter
-from benchmark_runtime.metadata import FetcherMetadataProvider, MetadataProvider
-from benchmark_runtime.result_store import (
+from src.benchmark_runtime.execution import BenchmarkExecutionAdapter, NoopExecutionAdapter
+from src.benchmark_runtime.metadata import FetcherMetadataProvider, MetadataProvider
+from src.benchmark_runtime.result_store import (
     BenchmarkResultStore,
     InMemoryBenchmarkResultStore,
 )
-from benchmark_runtime.run_id import (
+from src.benchmark_runtime.run_id import (
     BenchmarkRunIdProvider,
     InMemoryBenchmarkRunIdProvider,
     MaxIdBenchmarkRunIdProvider,
 )
-from benchmark_runtime.table_strategy import (
+from src.benchmark_runtime.table_strategy import (
     CombinedTableExecutionStrategy,
     DefaultTableExecutionStrategy,
     IndexesTableExecutionStrategy,
@@ -44,7 +44,7 @@ from benchmark_runtime.table_strategy import (
     TableExecutionStrategy,
     TypesTableExecutionStrategy,
 )
-from benchmark_runtime.types import (
+from src.benchmark_runtime.types import (
     BenchmarkVariantResult,
     Query,
     QueryPlan,
@@ -54,9 +54,9 @@ from benchmark_runtime.types import (
     TopTypeVariant,
     VariantJob,
 )
-from naming import variant_table_name
-from query_generator import generate_queries
-from resolver import RuleResolver
+from src.naming import variant_table_name
+from src.query_generator import generate_queries
+from src.resolver import RuleResolver
 
 class TableSelector:
     """

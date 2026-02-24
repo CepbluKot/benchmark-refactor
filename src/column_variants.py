@@ -9,8 +9,8 @@ from copy import deepcopy
 from pydantic import BaseModel, Field
 from typing import Dict, Generator, List, Optional, Tuple
 
-from clickhouse_ddl import ColumnDef, TableDDL
-from column_rules import ColumnAlternatives, ColumnRule
+from src.clickhouse_ddl import ColumnDef, TableDDL
+from src.column_rules import ColumnAlternatives, ColumnRule
 
 
 # ─── метаданные варианта ──────────────────────────────────────────────────────

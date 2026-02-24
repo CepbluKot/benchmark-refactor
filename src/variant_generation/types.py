@@ -6,8 +6,8 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from column_variants import ColumnVariantMeta
-from index_variants import IndexVariantMeta
+from src.column_variants import ColumnVariantMeta
+from src.index_variants import IndexVariantMeta
 
 
 class VariantMeta(BaseModel):

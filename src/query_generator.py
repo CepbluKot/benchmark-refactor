@@ -21,7 +21,7 @@ import re
 from pydantic import BaseModel
 from typing import List, Optional
 
-from clickhouse_ddl import ColumnDef, TableDDL
+from src.clickhouse_ddl import ColumnDef, TableDDL
 
 
 # ─── типы колонок ────────────────────────────────────────────────────────────

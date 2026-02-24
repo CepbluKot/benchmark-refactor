@@ -16,7 +16,7 @@ from typing import Dict, List
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
-from benchmark_engine import (
+from src.benchmark_engine import (
     BenchmarkEngine,
     BenchmarkExecutionAdapter,
     BenchmarkPlanner,
@@ -26,8 +26,8 @@ from benchmark_engine import (
     MetadataProvider,
     VariantJob,
 )
-from clickhouse_ddl import TableDDL
-from loader import load_config
+from src.clickhouse_ddl import TableDDL
+from src.loader import load_config
 
 
 USER_EVENTS_DDL = """

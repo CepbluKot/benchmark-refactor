@@ -2,7 +2,7 @@ import unittest
 
 from pydantic import ValidationError
 
-from models import (
+from src.models import (
     BenchmarkConfig,
     BenchmarkProjectConfig,
     ColumnRuleConfig,
@@ -14,7 +14,7 @@ from models import (
     RulesConfig,
     TableRuleConfig,
 )
-from resolver import RuleResolver
+from src.resolver import RuleResolver
 
 
 class ModelsValidationTests(unittest.TestCase):

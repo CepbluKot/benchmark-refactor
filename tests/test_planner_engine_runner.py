@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timezone
 from typing import Dict, List
 
-from benchmark_engine import (
+from src.benchmark_engine import (
     BenchmarkEngine,
     BenchmarkExecutionAdapter,
     BenchmarkResultStore,
@@ -20,8 +20,8 @@ from benchmark_engine import (
     TableSelector,
     VariantJob,
 )
-from clickhouse_ddl import TableDDL
-from models import (
+from src.clickhouse_ddl import TableDDL
+from src.models import (
     BenchmarkConfig,
     BenchmarkRootConfig,
     CeleryConfig,
@@ -36,7 +36,7 @@ from models import (
     TableRuleConfig,
     TestQueryConfig as QueryConfigItem,
 )
-from resolver import ResolvedRules
+from src.resolver import ResolvedRules
 
 
 EVENTS_DDL = """

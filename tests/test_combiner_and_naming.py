@@ -1,8 +1,8 @@
 import unittest
 
-from clickhouse_ddl import TableDDL
-from column_rules import ColumnAlternatives, ColumnRule
-from combiner import (
+from src.clickhouse_ddl import TableDDL
+from src.column_rules import ColumnAlternatives, ColumnRule
+from src.combiner import (
     MODE_VARIANT_STRATEGIES,
     VariantGenerationStrategy,
     VariantMeta,
@@ -10,8 +10,8 @@ from combiner import (
     register_variant_generation_strategy,
     total_variants,
 )
-from index_rules import IndexAlternatives, IndexRule, IndexVariant
-from naming import is_variant_table, parse_variant_name, variant_table_name
+from src.index_rules import IndexAlternatives, IndexRule, IndexVariant
+from src.naming import is_variant_table, parse_variant_name, variant_table_name
 
 
 DDL = """

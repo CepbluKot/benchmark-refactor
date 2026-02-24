@@ -1,6 +1,6 @@
 import unittest
 
-from clickhouse_ddl import IndexDef, TableDDL
+from src.clickhouse_ddl import IndexDef, TableDDL
 
 
 DDL = """

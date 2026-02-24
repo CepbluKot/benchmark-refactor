@@ -9,7 +9,7 @@ import itertools
 from pydantic import BaseModel, Field
 from typing import Iterator, List, Optional, Tuple
 
-from clickhouse_ddl import ColumnDef
+from src.clickhouse_ddl import ColumnDef
 
 
 # ─── альтернативы для одной колонки ──────────────────────────────────────────

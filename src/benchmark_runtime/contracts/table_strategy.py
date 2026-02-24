@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from ..types import TableBenchmarkPlan
 
 if TYPE_CHECKING:
-    from benchmark_engine import BenchmarkRunner
+    from src.benchmark_engine import BenchmarkRunner
 
 
 class TableExecutionStrategy(ABC):

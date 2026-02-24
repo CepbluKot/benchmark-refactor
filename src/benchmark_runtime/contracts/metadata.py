@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Dict, List
 
-from clickhouse_ddl import TableDDL
+from src.clickhouse_ddl import TableDDL
 
 
 class MetadataProvider(ABC):

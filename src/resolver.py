@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
-from column_rules import ColumnAlternatives, ColumnRule
-from index_rules import IndexAlternatives, IndexRule, IndexVariant
-from models import (
+from src.column_rules import ColumnAlternatives, ColumnRule
+from src.index_rules import IndexAlternatives, IndexRule, IndexVariant
+from src.models import (
     ColumnRuleConfig,
     IndexRuleConfig,
     RuleBankConfig,

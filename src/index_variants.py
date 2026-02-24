@@ -16,8 +16,8 @@ from copy import deepcopy
 from pydantic import BaseModel, Field
 from typing import Dict, Generator, List, Optional, Tuple
 
-from clickhouse_ddl import IndexDef, TableDDL
-from index_rules import IndexAlternatives, IndexRule
+from src.clickhouse_ddl import IndexDef, TableDDL
+from src.index_rules import IndexAlternatives, IndexRule
 
 
 # ─── метаданные варианта ──────────────────────────────────────────────────────

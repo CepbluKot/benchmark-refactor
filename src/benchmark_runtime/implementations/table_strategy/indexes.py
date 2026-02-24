@@ -9,7 +9,7 @@ from ...contracts.table_strategy import TableExecutionStrategy
 from ...types import TableBenchmarkPlan
 
 if TYPE_CHECKING:
-    from benchmark_engine import BenchmarkRunner
+    from src.benchmark_engine import BenchmarkRunner
 
 
 class IndexesTableExecutionStrategy(TableExecutionStrategy):

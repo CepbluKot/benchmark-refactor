@@ -1,8 +1,8 @@
 import unittest
 
-from clickhouse_ddl import ColumnDef
-from column_rules import ColumnAlternatives, ColumnRule
-from index_rules import IndexAlternatives, IndexRule, IndexVariant
+from src.clickhouse_ddl import ColumnDef
+from src.column_rules import ColumnAlternatives, ColumnRule
+from src.index_rules import IndexAlternatives, IndexRule, IndexVariant
 
 
 class RuleMatchingTests(unittest.TestCase):

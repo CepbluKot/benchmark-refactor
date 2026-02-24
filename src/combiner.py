@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from typing import Dict, Generator, List, Optional, Tuple
 
-from clickhouse_ddl import TableDDL
-from column_rules import ColumnRule
-from index_rules import IndexRule
-from variant_generation import (
+from src.clickhouse_ddl import TableDDL
+from src.column_rules import ColumnRule
+from src.index_rules import IndexRule
+from src.variant_generation import (
     CombinedVariantGenerationStrategy,
     IndexesVariantGenerationStrategy,
     MODE_VARIANT_STRATEGIES,
