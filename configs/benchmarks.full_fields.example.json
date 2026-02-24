@@ -1,0 +1,150 @@
+{
+  "benchmarks": [
+    {
+      "id": "bench_all_fields_full_example",
+      "connection_id": "prod_ch",
+      "mode": "combined",
+      "global_rules": {
+        "rule_bank": "clickhouse_universal_baseline",
+        "column_rules": [
+          {
+            "by_type": "UInt64",
+            "types": [
+              "UInt64",
+              "UInt32"
+            ],
+            "codecs": [
+              "CODEC(Delta(8), LZ4)",
+              "CODEC(ZSTD(1))"
+            ]
+          }
+        ],
+        "index_rules": [
+          {
+            "by_type": "UInt64",
+            "indexes": [
+              {
+                "type": "minmax",
+                "granularity": 4
+              },
+              {
+                "type": "set(100)",
+                "granularity": 2
+              }
+            ]
+          }
+        ],
+        "column_order": {
+          "event_time": 1,
+          "user_id": 2,
+          "revenue": 3
+        }
+      },
+      "column_order_mode": "compressed_size_desc",
+      "databases": [
+        "analytics",
+        "marketing"
+      ],
+      "tables": {
+        "analytics": [
+          "user_events",
+          "partner_stats"
+        ],
+        "marketing": "*"
+      },
+      "max_iterations": 25,
+      "sequential_top_n": 5,
+      "insert_rows_limit": 1000000,
+      "insert_rows_limits": {
+        "types": 800000,
+        "indexes": 300000,
+        "combined": 1200000,
+        "sequential": 500000,
+        "future_custom_mode": 150000
+      },
+      "column_rules_mode": "global_bank_with_inline_priority",
+      "index_rules_mode": "global_bank_with_inline_priority",
+      "queries": {
+        "mode": "auto_with_manual",
+        "warmup_queries": [
+          "SELECT count() FROM {table}",
+          "SELECT min(event_time), max(event_time) FROM {table}"
+        ],
+        "test_queries": [
+          {
+            "query": "SELECT count() FROM {table} WHERE event_time >= now() - INTERVAL 7 DAY",
+            "weight": 2.0
+          },
+          {
+            "query": "SELECT user_id, sum(revenue) FROM {table} GROUP BY user_id ORDER BY sum(revenue) DESC LIMIT 100",
+            "weight": 1.5
+          }
+        ]
+      },
+      "table_rules": [
+        {
+          "database": "analytics",
+          "table": "user_events",
+          "rules": {
+            "rule_bank": "clickhouse_universal_baseline",
+            "column_rules": [
+              {
+                "by_type": "Nullable(Decimal(18,4))",
+                "by_name": "revenue",
+                "types": [
+                  "Nullable(Decimal(18,4))",
+                  "Nullable(Float64)"
+                ],
+                "codecs": [
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(5))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_type": "Nullable(Decimal(18,4))",
+                "by_name": "revenue",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": 8
+                  }
+                ]
+              }
+            ],
+            "column_order": {
+              "revenue": 1,
+              "event_time": 2,
+              "user_id": 3
+            }
+          },
+          "column_order_mode": "compressed_size_desc",
+          "queries": {
+            "mode": "manual",
+            "warmup_queries": [
+              "SELECT count() FROM {table}"
+            ],
+            "test_queries": [
+              {
+                "query": "SELECT sum(revenue) FROM {table}",
+                "weight": 1.0
+              }
+            ]
+          },
+          "max_iterations": 12,
+          "sequential_top_n": 3,
+          "insert_rows_limit": 250000,
+          "insert_rows_limits": {
+            "types": 200000,
+            "indexes": 100000,
+            "combined": 280000,
+            "sequential": 150000,
+            "future_custom_mode": 90000
+          },
+          "mode": "sequential"
+        }
+      ]
+    }
+  ]
+}
