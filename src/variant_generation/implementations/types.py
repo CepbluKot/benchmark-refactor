@@ -1,0 +1,42 @@
+"""Types-only variant-generation strategy."""
+
+from __future__ import annotations
+
+from typing import Dict, Iterable, List, Optional, Tuple
+
+from clickhouse_ddl import TableDDL
+from column_rules import ColumnRule
+from column_variants import iter_column_variants, total_column_variants
+from index_rules import IndexRule
+
+from ..contracts import VariantGenerationStrategy
+from ..types import VariantMeta
+
+
+class TypesVariantGenerationStrategy(VariantGenerationStrategy):
+    """Generates only type/codec variants."""
+
+    def iter_variants(
+        self,
+        table: TableDDL,
+        column_rules: List[ColumnRule],
+        index_rules: List[IndexRule],
+        column_order: Optional[Dict[str, int]] = None,
+    ) -> Iterable[Tuple[TableDDL, VariantMeta]]:
+        del index_rules
+        for variant, col_meta in iter_column_variants(table, column_rules, column_order):
+            yield variant, VariantMeta(
+                global_index=0,
+                mode="types",
+                column_meta=col_meta,
+            )
+
+    def total_variants(
+        self,
+        table: TableDDL,
+        column_rules: List[ColumnRule],
+        index_rules: List[IndexRule],
+        column_order: Optional[Dict[str, int]] = None,
+    ) -> int:
+        del index_rules
+        return total_column_variants(table, column_rules, column_order)

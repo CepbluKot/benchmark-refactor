@@ -9,7 +9,7 @@
     {
       "id": "bench_sequential_topn",
       "connection_id": "prod_ch",
-      "mode": "sequential",
+      "strategy": "sequential_topn_strategy",
       "databases": [
         "analytics"
       ],

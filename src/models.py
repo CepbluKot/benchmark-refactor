@@ -16,6 +16,12 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 BenchmarkMode = Literal["types", "indexes", "sequential", "combined"]
+BenchmarkStrategy = Literal[
+    "types_strategy",
+    "indexes_strategy",
+    "combined_strategy",
+    "sequential_topn_strategy",
+]
 ColumnOrderMode = Literal["compressed_size_desc"]
 RuleSourceMode = Literal[
     "global_bank_only",
@@ -25,6 +31,14 @@ RuleSourceMode = Literal[
 DatabasesSelector = Union[Literal["*"], List[str]]
 TableListSelector = Union[Literal["*"], List[str]]
 TablesSelector = Union[Literal["*"], List[str], Dict[str, TableListSelector]]
+
+
+STRATEGY_TO_MODE: Dict[BenchmarkStrategy, BenchmarkMode] = {
+    "types_strategy": "types",
+    "indexes_strategy": "indexes",
+    "combined_strategy": "combined",
+    "sequential_topn_strategy": "sequential",
+}
 
 
 class _Base(BaseModel):
@@ -259,7 +273,7 @@ class TableRuleConfig(_Base):
       - sequential_top_n;
       - insert_rows_limit;
       - insert_rows_limits;
-      - mode;
+      - strategy;
       - queries.
     """
 
@@ -272,7 +286,7 @@ class TableRuleConfig(_Base):
     sequential_top_n: Optional[int] = Field(default=None, gt=0)
     insert_rows_limit: Optional[int] = Field(default=None, gt=0)
     insert_rows_limits: Optional[InsertRowsLimitsConfig] = None
-    mode: Optional[BenchmarkMode] = None
+    strategy: Optional[BenchmarkStrategy] = None
 
     @field_validator("database", "table")
     @classmethod
@@ -313,6 +327,7 @@ class BenchmarkConfig(_Base):
       - какое подключение использовать (`connection_id`);
       - какие БД/таблицы включить;
       - глобальные правила и table-level override;
+      - strategy исполнения таблицы (table-level execution strategy);
       - режим резолвинга column/index правил относительно глобального rule bank;
       - режим вычисления `column_order` (опционально);
       - ограничение по итерациям и режим комбинатора.
@@ -323,7 +338,7 @@ class BenchmarkConfig(_Base):
 
     id: str
     connection_id: str
-    mode: BenchmarkMode
+    strategy: BenchmarkStrategy
     global_rules: RulesConfig = Field(default_factory=RulesConfig)
     column_order_mode: Optional[ColumnOrderMode] = None
 
@@ -375,6 +390,7 @@ class BenchmarkConfig(_Base):
                     f"table_rules содержит дубликат для {tr.database}.{tr.table}"
                 )
             seen.add(key)
+
         return self
 
 

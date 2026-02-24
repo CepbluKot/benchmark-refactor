@@ -39,7 +39,7 @@ class ModelsValidationTests(unittest.TestCase):
             BenchmarkConfig(
                 id="bench",
                 connection_id="conn",
-                mode="types",
+                strategy="types_strategy",
                 databases=["analytics"],
                 tables=["events"],
                 table_rules=[
@@ -55,7 +55,7 @@ class ModelsValidationTests(unittest.TestCase):
                 {
                     "id": "bench",
                     "connection_id": "conn",
-                    "mode": "types",
+                    "strategy": "types_strategy",
                     "databases": ["analytics"],
                     "tables": ["events"],
                     "celery": {"workers": 2, "threads_per_worker": 1},
@@ -69,10 +69,49 @@ class ModelsValidationTests(unittest.TestCase):
                 {
                     "id": "bench",
                     "connection_id": "conn",
-                    "mode": "types",
+                    "strategy": "types_strategy",
                     "databases": ["analytics"],
                     "tables": ["events"],
                     "column_rules_mode": "unknown_mode",
+                }
+            )
+
+    def test_benchmark_config_accepts_strategy(self) -> None:
+        """Проверяет, что benchmark config accepts strategy."""
+        benchmark = BenchmarkConfig(
+            id="bench_strategy_only",
+            connection_id="conn",
+            strategy="types_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            global_rules=RulesConfig(
+                column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64"])]
+            ),
+        )
+        self.assertEqual(benchmark.strategy, "types_strategy")
+
+    def test_benchmark_config_rejects_legacy_mode_field(self) -> None:
+        """Проверяет, что benchmark config rejects legacy mode field."""
+        with self.assertRaises(ValidationError):
+            BenchmarkConfig.model_validate(
+                {
+                    "id": "bench_legacy_mode_field",
+                    "connection_id": "conn",
+                    "mode": "types",
+                    "strategy": "types_strategy",
+                    "databases": ["analytics"],
+                    "tables": ["events"],
+                }
+            )
+
+    def test_table_rule_rejects_legacy_mode_field(self) -> None:
+        """Проверяет, что table rule rejects legacy mode field."""
+        with self.assertRaises(ValidationError):
+            TableRuleConfig.model_validate(
+                {
+                    "database": "analytics",
+                    "table": "events",
+                    "mode": "types",
                 }
             )
 
@@ -98,7 +137,7 @@ class ModelsValidationTests(unittest.TestCase):
             BenchmarkConfig(
                 id="bench",
                 connection_id="conn",
-                mode="types",
+                strategy="types_strategy",
                 databases=["analytics"],
                 tables=["events"],
                 global_rules=RulesConfig(
@@ -122,7 +161,7 @@ class ModelsValidationTests(unittest.TestCase):
             BenchmarkConfig(
                 id="bench",
                 connection_id="conn",
-                mode="types",
+                strategy="types_strategy",
                 databases=["analytics"],
                 tables=["events"],
                 global_rules=RulesConfig(
@@ -146,7 +185,7 @@ class ModelsValidationTests(unittest.TestCase):
             {
                 "id": "bench_future_insert_limits",
                 "connection_id": "conn",
-                "mode": "types",
+                "strategy": "types_strategy",
                 "databases": ["analytics"],
                 "tables": ["events"],
                 "global_rules": {
@@ -169,7 +208,7 @@ class ModelsValidationTests(unittest.TestCase):
                 {
                     "id": "bench_invalid_future_mode_limit",
                     "connection_id": "conn",
-                    "mode": "types",
+                    "strategy": "types_strategy",
                     "databases": ["analytics"],
                     "tables": ["events"],
                     "global_rules": {

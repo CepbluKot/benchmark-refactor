@@ -261,7 +261,7 @@ class RuleResolver:
         if mode == "inline_only":
             return inline, False
 
-        # mode=None — legacy fallback.
+        # mode=None: default behavior (inline if задано, иначе bank).
         if inline_rules is not None:
             return inline, False
         return bank_rules, bank is not None
@@ -291,7 +291,7 @@ class RuleResolver:
         if mode == "inline_only":
             return inline, False
 
-        # mode=None — legacy fallback.
+        # mode=None: default behavior (inline if задано, иначе bank).
         if inline_rules is not None:
             return inline, False
         return bank_rules, bank is not None

@@ -55,7 +55,7 @@ class LoaderTests(unittest.TestCase):
                         {
                             "id": "bench_a",
                             "connection_id": "prod_ch",
-                            "mode": "types",
+                            "strategy": "types_strategy",
                             "databases": ["analytics"],
                             "tables": ["events"],
                             "max_iterations": 3,
@@ -111,7 +111,7 @@ class LoaderTests(unittest.TestCase):
                         {
                             "id": "bench_bad",
                             "connection_id": "missing_conn",
-                            "mode": "types",
+                            "strategy": "types_strategy",
                             "databases": ["analytics"],
                             "tables": ["events"],
                             "global_rules": {
@@ -169,7 +169,7 @@ class LoaderTests(unittest.TestCase):
                     {
                         "id": "bench_inline",
                         "connection_id": "prod_ch",
-                        "mode": "types",
+                        "strategy": "types_strategy",
                         "databases": ["analytics"],
                         "tables": ["events"],
                         "max_iterations": 1,
@@ -206,7 +206,7 @@ class LoaderTests(unittest.TestCase):
                     {
                         "id": "bench_inline_parts",
                         "connection_id": "prod_ch",
-                        "mode": "types",
+                        "strategy": "types_strategy",
                         "databases": ["analytics"],
                         "tables": ["events"],
                         "global_rules": {
@@ -272,7 +272,7 @@ class LoaderTests(unittest.TestCase):
                     {
                         "id": "bench_env_parts",
                         "connection_id": "prod_ch",
-                        "mode": "types",
+                        "strategy": "types_strategy",
                         "databases": ["analytics"],
                         "tables": ["events"],
                         "global_rules": {

@@ -53,7 +53,7 @@ def _benchmarks_payload(
             {
                 "id": "bench_types",
                 "connection_id": connection_id,
-                "mode": "types",
+                "strategy": "types_strategy",
                 "databases": ["analytics"],
                 "tables": ["events"],
                 "global_rules": {"rule_bank": rule_bank},

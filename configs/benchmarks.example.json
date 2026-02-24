@@ -1,10 +1,9 @@
 {
   "benchmarks": [
- 
     {
       "id": "bench_mixed_selectors",
       "connection_id": "prod_ch",
-      "mode": "combined",
+      "strategy": "combined_strategy",
       "column_rules_mode": "inline_only",
       "index_rules_mode": "inline_only",
       "column_order_mode": "compressed_size_desc",
@@ -48,7 +47,7 @@
             "indexes": 120000,
             "sequential": 180000
           },
-          "mode": "sequential",
+          "strategy": "sequential_topn_strategy",
           "rules": {
             "column_rules": [
               {
@@ -68,11 +67,17 @@
               {
                 "by_type": "Nullable(Decimal(18,4))",
                 "indexes": [
-                  {"type": "bloom_filter(0.01)", "granularity": 228},
-
-                  {"type": "bloom_filter(0.01)", "granularity": 123}
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": 228
+                  },
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": 123
+                  }
                 ]
-              }]
+              }
+            ]
           },
           "queries": {
             "mode": "manual",
@@ -88,6 +93,54 @@
           }
         }
       ]
+    },
+    {
+      "id": "bench_types_only_example",
+      "connection_id": "prod_ch",
+      "strategy": "types_strategy",
+      "databases": [
+        "analytics"
+      ],
+      "tables": {
+        "analytics": [
+          "user_events"
+        ]
+      },
+      "max_iterations": 3,
+      "insert_rows_limit": 300000,
+      "insert_rows_limits": {
+        "types": 250000
+      },
+      "global_rules": {
+        "rule_bank": "clickhouse_universal_baseline"
+      },
+      "queries": {
+        "mode": "auto"
+      }
+    },
+    {
+      "id": "bench_indexes_only_example",
+      "connection_id": "prod_ch",
+      "strategy": "indexes_strategy",
+      "databases": [
+        "analytics"
+      ],
+      "tables": {
+        "analytics": [
+          "user_events"
+        ]
+      },
+      "max_iterations": 3,
+      "insert_rows_limit": 200000,
+      "insert_rows_limits": {
+        "indexes": 120000
+      },
+      "global_rules": {
+        "rule_bank": "clickhouse_universal_baseline"
+      },
+      "queries": {
+        "mode": "auto"
+      }
     }
   ]
 }

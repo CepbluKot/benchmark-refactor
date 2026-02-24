@@ -9,352 +9,54 @@ Core orchestration слоя бенчмарка (planner -> engine -> runner).
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
-
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from clickhouse_ddl import TableDDL
 from combiner import VariantMeta, iter_variants, total_variants
 from models import (
     BenchmarkConfig,
     BenchmarkMode,
+    BenchmarkStrategy,
     BenchmarkRootConfig,
-    CeleryConfig,
-    ColumnOrderMode,
     ConnectionConfig,
     InsertRowsLimitsConfig,
+    STRATEGY_TO_MODE,
     QueriesConfig,
     TableRuleConfig,
 )
+from benchmark_runtime.execution import BenchmarkExecutionAdapter, NoopExecutionAdapter
+from benchmark_runtime.metadata import FetcherMetadataProvider, MetadataProvider
+from benchmark_runtime.result_store import (
+    BenchmarkResultStore,
+    InMemoryBenchmarkResultStore,
+)
+from benchmark_runtime.run_id import (
+    BenchmarkRunIdProvider,
+    InMemoryBenchmarkRunIdProvider,
+    MaxIdBenchmarkRunIdProvider,
+)
+from benchmark_runtime.table_strategy import (
+    CombinedTableExecutionStrategy,
+    DefaultTableExecutionStrategy,
+    IndexesTableExecutionStrategy,
+    SequentialTopNTableExecutionStrategy,
+    TableExecutionStrategy,
+    TypesTableExecutionStrategy,
+)
+from benchmark_runtime.types import (
+    BenchmarkVariantResult,
+    Query,
+    QueryPlan,
+    StoredBenchmarkResult,
+    TableBenchmarkPlan,
+    TableTarget,
+    TopTypeVariant,
+    VariantJob,
+)
 from naming import variant_table_name
 from query_generator import generate_queries
-from resolver import ResolvedRules, RuleResolver
-
-
-class _FrozenModel(BaseModel):
-    """Общая immutable-база для runtime DTO внутри движка."""
-
-    model_config = ConfigDict(
-        frozen=True,
-        extra="forbid",
-        arbitrary_types_allowed=True,
-    )
-
-
-class TableTarget(_FrozenModel):
-    """Конкретная таблица-цель (`database.table`) после раскрытия селекторов."""
-
-    database: str
-    table: str
-
-
-class Query(_FrozenModel):
-    """Тестовый SQL-запрос."""
-
-    query: str
-
-
-class QueryPlan(_FrozenModel):
-    """Готовый набор warmup/test запросов для одной variant-таблицы."""
-
-    warmup_queries: List[str]
-    test_queries: List[Query]
-
-
-class TableBenchmarkPlan(_FrozenModel):
-    """
-    Table-level план, сформированный planner'ом до этапа генерации вариантов.
-
-    Этот объект уже учитывает merge:
-      - global/table rules,
-      - global/table max_iterations,
-      - global/table column_order_mode,
-      - global/table insert_rows_limit,
-      - global/table insert_rows_limits,
-      - global/table queries,
-      - глобальный celery-конфиг запуска.
-    """
-
-    benchmark_id: str
-    connection_id: str
-    connection_dbms: str
-    database: str
-    table: str
-    mode: BenchmarkMode
-    max_iterations: int
-    sequential_top_n: int
-    insert_rows_limit: Optional[int]
-    insert_rows_limits: Optional[InsertRowsLimitsConfig]
-    column_order_mode: Optional[ColumnOrderMode]
-    rules: ResolvedRules
-    queries: QueriesConfig
-    celery: CeleryConfig
-
-
-class VariantJob(_FrozenModel):
-    """
-    Полная единица выполнения для конкретного варианта DDL.
-
-    Содержит всё, что нужно execution-слою:
-      - DDL variant-таблицы;
-      - query-план;
-      - run-level контекст (`benchmark_run_id`, `benchmark_started_at`);
-      - runtime-параметры (mode, max_iterations, insert_rows_limit, celery);
-      - метаданные варианта (индекс, total и т.д.).
-    """
-
-    benchmark_run_id: int
-    benchmark_started_at: datetime
-    benchmark_id: str
-    connection_id: str
-    connection_dbms: str
-    source_database: str
-    source_table: str
-    variant_table: str
-    variant_meta: VariantMeta
-    mode: BenchmarkMode
-    max_iterations: int
-    insert_rows_limit: Optional[int]
-    total_variants: int
-    variant_ddl: TableDDL
-    query_plan: QueryPlan
-    celery: CeleryConfig
-
-
-class BenchmarkVariantResult(_FrozenModel):
-    """
-    Результат выполнения одного `VariantJob`.
-
-    Заполняется execution-адаптером и передаётся в result-store для персистентного
-    сохранения (например, в БД).
-    """
-
-    benchmark_run_id: int
-    benchmark_started_at: Optional[datetime] = None
-    benchmark_id: str
-    source_database: str
-    source_table: str
-    variant_table: str
-    variant_index: int
-    score: Optional[float] = None
-    payload: Dict[str, Any] = Field(default_factory=dict)
-
-
-class StoredBenchmarkResult(_FrozenModel):
-    """
-    Нормализованная запись результата в persistence-слое.
-
-    Это DTO для result-store, чтобы runner не хранил результаты в оперативной
-    памяти и не зависел от конкретной схемы таблиц в БД.
-    """
-
-    benchmark_run_id: int
-    benchmark_started_at: datetime
-    benchmark_id: str
-    source_database: str
-    source_table: str
-    variant_table: str
-    variant_index: int
-    variant_mode: str
-    score: Optional[float] = None
-    variant_ddl: TableDDL
-    payload: Dict[str, Any] = Field(default_factory=dict)
-
-
-class TopTypeVariant(_FrozenModel):
-    """Кандидат из top-N type/codeс этапа для перехода на index-этап."""
-
-    variant_index: int
-    variant_ddl: TableDDL
-    score: Optional[float] = None
-
-
-class BenchmarkResultStore(ABC):
-    """
-    Контракт персистентного хранения результатов.
-
-    В production реализации обычно пишут результаты в БД и читают top-N
-    type-варианты SQL-запросом.
-    """
-
-    @abstractmethod
-    def store_result(
-        self,
-        job: VariantJob,
-        result: BenchmarkVariantResult,
-    ) -> None:
-        """Сохраняет результат выполнения одного `VariantJob`."""
-        pass
-
-    @abstractmethod
-    def get_top_type_variants(
-        self,
-        benchmark_run_id: int,
-        benchmark_id: str,
-        source_database: str,
-        source_table: str,
-        top_n: int,
-    ) -> List[TopTypeVariant]:
-        """
-        Возвращает top-N type/codec DDL для sequential-этапа индексов.
-
-        Ожидаемый порядок: по score убыв., `score=None` в конце.
-        """
-        pass
-
-
-class InMemoryBenchmarkResultStore(BenchmarkResultStore):
-    """
-    In-memory реализация result-store.
-
-    Нужна для тестов и dry-run примеров. Для production следует заменить
-    на DB-backed реализацию.
-    """
-
-    def __init__(self) -> None:
-        self._records: List[StoredBenchmarkResult] = []
-
-    @property
-    def records(self) -> List[StoredBenchmarkResult]:
-        """Возвращает копию сохранённых записей (удобно в тестах)."""
-        return list(self._records)
-
-    def store_result(
-        self,
-        job: VariantJob,
-        result: BenchmarkVariantResult,
-    ) -> None:
-        """Сохраняет результат и снимок variant DDL в памяти."""
-        if result.benchmark_run_id != job.benchmark_run_id:
-            raise ValueError(
-                "result.benchmark_run_id не совпадает с job.benchmark_run_id"
-            )
-        if (
-            result.benchmark_started_at is not None
-            and result.benchmark_started_at != job.benchmark_started_at
-        ):
-            raise ValueError(
-                "result.benchmark_started_at не совпадает с job.benchmark_started_at"
-            )
-        if result.benchmark_id != job.benchmark_id:
-            raise ValueError("result.benchmark_id не совпадает с job.benchmark_id")
-
-        self._records.append(
-            StoredBenchmarkResult(
-                benchmark_run_id=job.benchmark_run_id,
-                benchmark_started_at=job.benchmark_started_at,
-                benchmark_id=job.benchmark_id,
-                source_database=job.source_database,
-                source_table=job.source_table,
-                variant_table=job.variant_table,
-                variant_index=job.variant_meta.global_index,
-                variant_mode=job.variant_meta.mode,
-                score=result.score,
-                variant_ddl=job.variant_ddl.copy(),
-                payload=dict(result.payload),
-            )
-        )
-
-    def get_top_type_variants(
-        self,
-        benchmark_run_id: int,
-        benchmark_id: str,
-        source_database: str,
-        source_table: str,
-        top_n: int,
-    ) -> List[TopTypeVariant]:
-        """Ранжирует сохранённые type-варианты и отдаёт top-N."""
-        if top_n <= 0:
-            return []
-
-        candidates = [
-            record
-            for record in self._records
-            if record.benchmark_run_id == benchmark_run_id
-            and record.benchmark_id == benchmark_id
-            and record.source_database == source_database
-            and record.source_table == source_table
-            and record.variant_mode == "types"
-        ]
-        ranked = sorted(
-            candidates,
-            key=lambda record: (
-                record.score is None,
-                -(record.score if record.score is not None else 0.0),
-                record.variant_index,
-            ),
-        )
-        return [
-            TopTypeVariant(
-                variant_index=record.variant_index,
-                variant_ddl=record.variant_ddl.copy(),
-                score=record.score,
-            )
-            for record in ranked[:top_n]
-        ]
-
-
-class MetadataProvider(ABC):
-    """
-    Абстракция доступа к метаданным источника.
-
-    Позволяет planner/engine работать с любым backend'ом (реальный Fetcher,
-    тестовый in-memory provider, mock и т.п.).
-    """
-
-    @abstractmethod
-    def list_databases(self) -> List[str]:
-        """Возвращает список доступных БД для селектора `databases="*"`."""
-        pass
-
-    @abstractmethod
-    def list_tables(self, database: str) -> List[str]:
-        """Возвращает таблицы БД для селектора `tables="*"`."""
-        pass
-
-    @abstractmethod
-    def fetch_table_ddl(self, database: str, table: str) -> TableDDL:
-        """Читает и парсит DDL исходной таблицы в `TableDDL`."""
-        pass
-
-    def fetch_column_sizes(self, database: str, table: str) -> Dict[str, int]:
-        """
-        Возвращает map `column_name -> compressed_bytes` для исходной таблицы.
-
-        Базовая реализация возвращает пустой словарь; backend может переопределить
-        метод для поддержки авто-вычисления `column_order`.
-        """
-        return {}
-
-
-class FetcherMetadataProvider(MetadataProvider):
-    """Адаптер над существующим `Fetcher` для контракта `MetadataProvider`."""
-
-    def __init__(self, fetcher: Any) -> None:
-        """Сохраняет объект fetcher с совместимыми методами list*/fetch_ddl."""
-        self._fetcher = fetcher
-
-    def list_databases(self) -> List[str]:
-        """Проксирует список БД из fetcher."""
-        return self._fetcher.list_databases()
-
-    def list_tables(self, database: str) -> List[str]:
-        """Проксирует список таблиц по БД из fetcher."""
-        return self._fetcher.list_tables(database)
-
-    def fetch_table_ddl(self, database: str, table: str) -> TableDDL:
-        """Проксирует получение DDL таблицы из fetcher."""
-        return self._fetcher.fetch_ddl(database, table)
-
-    def fetch_column_sizes(self, database: str, table: str) -> Dict[str, int]:
-        """Проксирует получение размерности колонок из fetcher."""
-        fetch_method = getattr(self._fetcher, "fetch_column_sizes", None)
-        if fetch_method is None:
-            return {}
-        return fetch_method(database, table)
-
+from resolver import RuleResolver
 
 class TableSelector:
     """
@@ -491,7 +193,7 @@ class BenchmarkPlanner:
     На этом этапе происходит ключевой merge:
       - выбор целевых таблиц;
       - merge global/local rules;
-      - выбор mode/max_iterations/queries с учетом table override;
+      - выбор strategy/max_iterations/queries с учетом table override;
       - привязка глобального celery-конфига.
     """
 
@@ -565,7 +267,10 @@ class BenchmarkPlanner:
                     )
 
                 mode: BenchmarkMode = (
-                    table_rule.mode if table_rule and table_rule.mode else benchmark.mode
+                    self._resolve_mode(benchmark=benchmark, table_rule=table_rule)
+                )
+                strategy: BenchmarkStrategy = (
+                    self._resolve_strategy(benchmark=benchmark, table_rule=table_rule)
                 )
                 max_iterations = (
                     table_rule.max_iterations
@@ -605,6 +310,7 @@ class BenchmarkPlanner:
                     connection_dbms=connection.dbms,
                     database=target.database,
                     table=target.table,
+                    strategy=strategy,
                     mode=mode,
                     max_iterations=max_iterations,
                     sequential_top_n=sequential_top_n,
@@ -638,6 +344,35 @@ class BenchmarkPlanner:
         if benchmark_insert_rows_limits is not None:
             return benchmark_insert_rows_limits.model_copy(deep=True)
         return None
+
+    @staticmethod
+    def _resolve_strategy(
+        benchmark: BenchmarkConfig,
+        table_rule: Optional[TableRuleConfig],
+    ) -> BenchmarkStrategy:
+        """
+        Возвращает эффективную strategy для таблицы.
+
+        Приоритет:
+          1) table_rule.strategy;
+          2) benchmark.strategy.
+        """
+        if table_rule is not None:
+            if table_rule.strategy is not None:
+                return table_rule.strategy
+        return benchmark.strategy
+
+    @staticmethod
+    def _resolve_mode(
+        benchmark: BenchmarkConfig,
+        table_rule: Optional[TableRuleConfig],
+    ) -> BenchmarkMode:
+        """Возвращает effective combiner-mode, соответствующий effective strategy."""
+        strategy = BenchmarkPlanner._resolve_strategy(
+            benchmark=benchmark,
+            table_rule=table_rule,
+        )
+        return STRATEGY_TO_MODE[strategy]
 
 
 class BenchmarkEngine:
@@ -786,7 +521,7 @@ class BenchmarkEngine:
         Приоритет:
           1) `insert_rows_limits[variant_mode]`;
           2) `insert_rows_limits[job_mode or table_plan.mode]`;
-          3) `insert_rows_limit` (legacy/fallback).
+          3) `insert_rows_limit` (общий fallback).
         """
         mode_limits = table_plan.insert_rows_limits
         if mode_limits is None:
@@ -864,233 +599,12 @@ class BenchmarkEngine:
             )
 
 
-class BenchmarkExecutionAdapter(ABC):
-    """
-    Контракт между engine и реальным исполнителем бенчмарка.
-
-    Любая интеграция (Celery, sync worker, внешний сервис) должна уметь
-    принять `VariantJob` и вернуть `BenchmarkVariantResult`.
-    """
-
-    @abstractmethod
-    def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
-        """Выполняет один вариант и возвращает результат замеров."""
-        pass
-
-
-class NoopExecutionAdapter(BenchmarkExecutionAdapter):
-    """Заглушка, полезна для dry-run и отладки плана."""
-
-    def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
-        """Возвращает технический результат без фактического выполнения SQL."""
-        return BenchmarkVariantResult(
-            benchmark_run_id=job.benchmark_run_id,
-            benchmark_started_at=job.benchmark_started_at,
-            benchmark_id=job.benchmark_id,
-            source_database=job.source_database,
-            source_table=job.source_table,
-            variant_table=job.variant_table,
-            variant_index=job.variant_meta.global_index,
-            score=None,
-            payload={"status": "planned_only"},
-        )
-
-
-class BenchmarkRunIdProvider(ABC):
-    """
-    Источник run-level benchmark id.
-
-    Контракт: вернуть целое число > 0, общее для всего текущего запуска конфига.
-    """
-
-    @abstractmethod
-    def next_benchmark_run_id(self) -> int:
-        """Возвращает следующий run id (обычно max(existing)+1)."""
-        pass
-
-
-class InMemoryBenchmarkRunIdProvider(BenchmarkRunIdProvider):
-    """Простой serial run id provider в памяти процесса (1, 2, 3, ...)."""
-
-    def __init__(self, start_from: int = 0) -> None:
-        self._last_run_id = start_from
-
-    def next_benchmark_run_id(self) -> int:
-        self._last_run_id += 1
-        return self._last_run_id
-
-
-class MaxIdBenchmarkRunIdProvider(BenchmarkRunIdProvider):
-    """
-    Provider, который строит следующий run id из `max(existing_id)` в хранилище.
-
-    `max_id_getter` должен вернуть максимальный уже сохранённый id или `None`,
-    если записей ещё нет.
-    """
-
-    def __init__(self, max_id_getter: Callable[[], Optional[int]]) -> None:
-        self._max_id_getter = max_id_getter
-        self._reserved_last_id = 0
-
-    def next_benchmark_run_id(self) -> int:
-        observed_max = self._max_id_getter()
-        observed = int(observed_max) if observed_max is not None else 0
-        if observed < 0:
-            raise ValueError(
-                f"max_id_getter вернул отрицательный benchmark id: {observed}"
-            )
-        next_id = max(observed, self._reserved_last_id) + 1
-        self._reserved_last_id = next_id
-        return next_id
-
-
-class TableExecutionStrategy(ABC):
-    """
-    Стратегия выполнения table-level плана.
-
-    Позволяет подключать особую оркестрацию под конкретный `BenchmarkMode`
-    (например, двухэтапный `sequential`).
-    """
-
-    @abstractmethod
-    def execute_table(
-        self,
-        runner: "BenchmarkRunner",
-        table_plan: TableBenchmarkPlan,
-        benchmark_run_id: int,
-        benchmark_started_at: datetime,
-    ) -> None:
-        """Выполняет table_plan целиком и персистит результаты через runner."""
-        pass
-
-
-class DefaultTableExecutionStrategy(TableExecutionStrategy):
-    """Стандартное выполнение: один проход по VariantJob из engine."""
-
-    def execute_table(
-        self,
-        runner: "BenchmarkRunner",
-        table_plan: TableBenchmarkPlan,
-        benchmark_run_id: int,
-        benchmark_started_at: datetime,
-    ) -> None:
-        runner._execute_regular_table(
-            table_plan=table_plan,
-            benchmark_run_id=benchmark_run_id,
-            benchmark_started_at=benchmark_started_at,
-        )
-
-
-class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
-    """
-    Спец-оркестрация для `mode="sequential"`:
-      1) прогон всех type/codec вариантов;
-      2) выбор top-N по score из result-store;
-      3) прогон index-вариантов на top-N DDL.
-    """
-
-    def execute_table(
-        self,
-        runner: "BenchmarkRunner",
-        table_plan: TableBenchmarkPlan,
-        benchmark_run_id: int,
-        benchmark_started_at: datetime,
-    ) -> None:
-        source_ddl, raw_query_plan = runner._engine.prepare_table_context(table_plan)
-        effective_column_order = runner._engine.resolve_column_order(
-            table_plan=table_plan,
-            source_ddl=source_ddl,
-        )
-
-        type_total = total_variants(
-            table=source_ddl,
-            mode="types",
-            column_rules=table_plan.rules.column_rules,
-            index_rules=table_plan.rules.index_rules,
-            column_order=effective_column_order,
-            max_iterations=table_plan.max_iterations,
-        )
-
-        for variant_ddl, variant_meta in iter_variants(
-            table=source_ddl,
-            mode="types",
-            column_rules=table_plan.rules.column_rules,
-            index_rules=table_plan.rules.index_rules,
-            column_order=effective_column_order,
-            max_iterations=table_plan.max_iterations,
-        ):
-
-            var_txt = variant_ddl.to_ddl()
-            print(var_txt)
-            job = runner._engine.build_variant_job(
-                table_plan=table_plan,
-                raw_query_plan=raw_query_plan,
-                variant_ddl=variant_ddl,
-                variant_meta=variant_meta,
-                total_variants=type_total,
-                benchmark_run_id=benchmark_run_id,
-                benchmark_started_at=benchmark_started_at,
-                job_mode="sequential",
-            )
-            runner._execute_and_store(job)
-
-        if type_total <= 0:
-            return
-
-        top_n = min(table_plan.sequential_top_n, type_total)
-        top_variants = runner._result_store.get_top_type_variants(
-            benchmark_run_id=benchmark_run_id,
-            benchmark_id=table_plan.benchmark_id,
-            source_database=table_plan.database,
-            source_table=table_plan.table,
-            top_n=top_n,
-        )
-        if not top_variants:
-            return
-        print('---')
-        next_global_index = type_total
-        for type_variant in top_variants:
-            base_ddl = type_variant.variant_ddl.copy()
-            index_total = total_variants(
-                table=base_ddl,
-                mode="indexes",
-                column_rules=table_plan.rules.column_rules,
-                index_rules=table_plan.rules.index_rules,
-                column_order=effective_column_order,
-                max_iterations=table_plan.max_iterations,
-            )
-
-            for variant_ddl, index_meta in iter_variants(
-                table=base_ddl,
-                mode="indexes",
-                column_rules=table_plan.rules.column_rules,
-                index_rules=table_plan.rules.index_rules,
-                column_order=effective_column_order,
-                max_iterations=table_plan.max_iterations,
-            ):
-                var_txt = variant_ddl.to_ddl()
-                print(var_txt)
-                index_meta.global_index = next_global_index
-                next_global_index += 1
-                index_job = runner._engine.build_variant_job(
-                    table_plan=table_plan,
-                    raw_query_plan=raw_query_plan,
-                    variant_ddl=variant_ddl,
-                    variant_meta=index_meta,
-                    total_variants=index_total,
-                    benchmark_run_id=benchmark_run_id,
-                    benchmark_started_at=benchmark_started_at,
-                    job_mode="sequential",
-                )
-                runner._execute_and_store(index_job)
-
-
 class BenchmarkRunner:
     """
     Верхнеуровневый фасад запуска бенчмарка.
 
     Объединяет генерацию заданий и их выполнение в один метод `run`.
-    Для каждого mode выбирается стратегия исполнения table-level плана.
+    Для каждого table-level strategy выбирается реализация исполнения.
     """
 
     def __init__(
@@ -1116,33 +630,43 @@ class BenchmarkRunner:
             default_table_execution_strategy or DefaultTableExecutionStrategy()
         )
         self._table_execution_strategies: Dict[str, TableExecutionStrategy] = {
-            "sequential": SequentialTopNTableExecutionStrategy(),
+            "types_strategy": TypesTableExecutionStrategy(),
+            "indexes_strategy": IndexesTableExecutionStrategy(),
+            "combined_strategy": CombinedTableExecutionStrategy(),
+            "sequential_topn_strategy": SequentialTopNTableExecutionStrategy(),
         }
         if table_execution_strategies:
-            for mode, strategy in table_execution_strategies.items():
+            for strategy_key, strategy in table_execution_strategies.items():
                 self.register_table_execution_strategy(
-                    mode=mode,
+                    strategy_key=strategy_key,
                     strategy=strategy,
                     overwrite=True,
                 )
 
     def register_table_execution_strategy(
         self,
-        mode: str,
+        strategy_key: str,
         strategy: TableExecutionStrategy,
         *,
         overwrite: bool = False,
     ) -> None:
-        """Регистрирует стратегию выполнения для конкретного режима."""
-        normalized_mode = mode.strip()
-        if not normalized_mode:
-            raise ValueError("mode не должен быть пустым")
-        if normalized_mode in self._table_execution_strategies and not overwrite:
+        """
+        Регистрирует table-level стратегию выполнения.
+
+        Использует strategy-key из `BenchmarkConfig.strategy`.
+        """
+        normalized_strategy_key = self._canonical_strategy_key(strategy_key)
+        if not normalized_strategy_key:
+            raise ValueError("strategy key не должен быть пустым")
+        if (
+            normalized_strategy_key in self._table_execution_strategies
+            and not overwrite
+        ):
             raise ValueError(
-                f"Стратегия выполнения для mode={normalized_mode!r} уже зарегистрирована. "
+                f"Стратегия выполнения для key={normalized_strategy_key!r} уже зарегистрирована. "
                 "Используй overwrite=True для замены."
             )
-        self._table_execution_strategies[normalized_mode] = strategy
+        self._table_execution_strategies[normalized_strategy_key] = strategy
 
     def run(
         self,
@@ -1152,7 +676,7 @@ class BenchmarkRunner:
         """
         Выполняет все VariantJob и возвращает run-level `benchmark_run_id`.
 
-        Для `mode="sequential"` используется двухфазный алгоритм:
+        Для `strategy="sequential_topn_strategy"` используется двухфазный алгоритм:
           1) прогон type/codec-вариантов;
           2) выбор top-N через result-store и прогон индексных вариантов на их DDL.
 
@@ -1166,8 +690,9 @@ class BenchmarkRunner:
         self._last_benchmark_started_at = run_started_at
 
         for table_plan in self._engine.iter_table_plans(benchmark_ids=benchmark_ids):
+            strategy_key = self._canonical_strategy_key(table_plan.strategy)
             strategy = self._table_execution_strategies.get(
-                table_plan.mode,
+                strategy_key,
                 self._default_table_execution_strategy,
             )
             strategy.execute_table(
@@ -1196,6 +721,12 @@ class BenchmarkRunner:
             benchmark_started_at=benchmark_started_at,
         ):
             self._execute_and_store(job)
+
+    @staticmethod
+    def _canonical_strategy_key(raw_key: str) -> str:
+        """Нормализует strategy key."""
+        normalized = raw_key.strip()
+        return normalized
 
     def _next_run_id(self) -> int:
         """Берёт следующий serial benchmark run id у configured provider."""

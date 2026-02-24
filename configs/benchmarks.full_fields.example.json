@@ -3,7 +3,7 @@
     {
       "id": "bench_all_fields_full_example",
       "connection_id": "prod_ch",
-      "mode": "combined",
+      "strategy": "combined_strategy",
       "global_rules": {
         "rule_bank": "clickhouse_universal_baseline",
         "column_rules": [
@@ -142,7 +142,7 @@
             "sequential": 150000,
             "future_custom_mode": 90000
           },
-          "mode": "sequential"
+          "strategy": "sequential_topn_strategy"
         }
       ]
     }

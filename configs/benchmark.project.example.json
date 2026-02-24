@@ -9,7 +9,7 @@
     {
       "id": "bench_default_rules_auto_discovery",
       "connection_id": "prod_ch",
-      "mode": "types",
+      "strategy": "types_strategy",
       "column_rules_mode": "global_bank_only",
       "index_rules_mode": "global_bank_only",
       "databases": "*",
@@ -26,7 +26,7 @@
     {
       "id": "bench_mixed_selectors",
       "connection_id": "prod_ch",
-      "mode": "combined",
+      "strategy": "combined_strategy",
       "column_rules_mode": "global_bank_with_inline_priority",
       "index_rules_mode": "global_bank_with_inline_priority",
       "databases": [
@@ -67,7 +67,7 @@
             "types": 300000,
             "indexes": 120000
           },
-          "mode": "sequential",
+          "strategy": "sequential_topn_strategy",
           "rules": {
             "column_rules": [
               {

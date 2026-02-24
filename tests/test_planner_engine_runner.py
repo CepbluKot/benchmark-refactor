@@ -200,7 +200,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_selector",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events", "events"],
             global_rules=RulesConfig(
@@ -221,7 +221,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_overrides",
             connection_id="prod_ch",
-            mode="combined",
+            strategy="combined_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=10,
@@ -244,7 +244,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                 TableRuleConfig(
                     database="analytics",
                     table="events",
-                    mode="sequential",
+                    strategy="sequential_topn_strategy",
                     max_iterations=2,
                     insert_rows_limit=25_000,
                     insert_rows_limits=InsertRowsLimitsConfig(
@@ -302,7 +302,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_rule_modes",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             column_rules_mode="global_bank_with_inline_priority",
@@ -365,7 +365,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_no_rules",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             global_rules=RulesConfig(),
@@ -383,7 +383,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_missing_provider",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             global_rules=RulesConfig(
@@ -408,7 +408,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         bench_a = BenchmarkConfig(
             id="bench_a",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             global_rules=common_rules,
@@ -416,7 +416,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         bench_b = BenchmarkConfig(
             id="bench_b",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["sessions"],
             global_rules=common_rules,
@@ -443,7 +443,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_types",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=1,
@@ -507,7 +507,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_auto_column_order",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             column_order_mode="compressed_size_desc",
             databases=["analytics"],
             tables=["events"],
@@ -562,7 +562,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_auto_index_order",
             connection_id="prod_ch",
-            mode="indexes",
+            strategy="indexes_strategy",
             column_order_mode="compressed_size_desc",
             databases=["analytics"],
             tables=["events"],
@@ -606,6 +606,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             connection_dbms="clickhouse",
             database="analytics",
             table="events",
+            strategy="types_strategy",
             mode="types",
             max_iterations=1,
             sequential_top_n=1,
@@ -700,7 +701,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_result_store_validations",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=1,
@@ -763,7 +764,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_result_store_topn",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=2,
@@ -830,7 +831,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_run",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=1,
@@ -875,7 +876,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_bad_run_id",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             global_rules=RulesConfig(
@@ -901,7 +902,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_run_id_serial",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=1,
@@ -939,7 +940,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_run_started_at",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=1,
@@ -999,7 +1000,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark_z = BenchmarkConfig(
             id="bench_z",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=1,
@@ -1012,7 +1013,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark_a = BenchmarkConfig(
             id="bench_a",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=1,
@@ -1047,12 +1048,12 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         executed_benchmark_ids = [job.benchmark_id for job in adapter.executed_jobs]
         self.assertEqual(executed_benchmark_ids, ["bench_a", "bench_z"])
 
-    def test_runner_can_register_mode_execution_strategy(self) -> None:
-        """Проверяет, что runner can register mode execution strategy."""
+    def test_runner_can_register_strategy_execution_strategy(self) -> None:
+        """Проверяет, что runner can register strategy execution strategy."""
         benchmark = BenchmarkConfig(
             id="bench_custom_mode_strategy",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=1,
@@ -1073,7 +1074,11 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             execution_adapter=adapter,
             result_store=result_store,
         )
-        runner.register_table_execution_strategy("types", strategy)
+        runner.register_table_execution_strategy(
+            "types_strategy",
+            strategy,
+            overwrite=True,
+        )
 
         run_id = runner.run()
         self.assertEqual(run_id, 1)
@@ -1081,12 +1086,12 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(len(adapter.executed_jobs), 0)
         self.assertEqual(len(result_store.records), 0)
 
-    def test_runner_accepts_constructor_mode_execution_strategies(self) -> None:
-        """Проверяет, что runner accepts constructor mode execution strategies."""
+    def test_runner_accepts_constructor_strategy_execution_strategies(self) -> None:
+        """Проверяет, что runner accepts constructor strategy execution strategies."""
         benchmark = BenchmarkConfig(
             id="bench_ctor_custom_mode_strategy",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=1,
@@ -1106,7 +1111,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             engine=engine,
             execution_adapter=adapter,
             result_store=result_store,
-            table_execution_strategies={"types": strategy},
+            table_execution_strategies={"types_strategy": strategy},
         )
 
         run_id = runner.run()
@@ -1115,12 +1120,96 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(len(adapter.executed_jobs), 0)
         self.assertEqual(len(result_store.records), 0)
 
+    def test_runner_uses_strategy_field_from_config(self) -> None:
+        """Проверяет, что runner uses strategy field from config."""
+        common_rules = RulesConfig(
+            column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])],
+            index_rules=[
+                IndexRuleConfig(
+                    by_type="UInt64",
+                    indexes=[IndexConfig(type="minmax", granularity=4)],
+                )
+            ],
+        )
+        benchmarks = [
+            BenchmarkConfig(
+                id="bench_strategy_types",
+                connection_id="prod_ch",
+                strategy="types_strategy",
+                databases=["analytics"],
+                tables=["events"],
+                max_iterations=1,
+                global_rules=common_rules,
+            ),
+            BenchmarkConfig(
+                id="bench_strategy_indexes",
+                connection_id="prod_ch",
+                strategy="indexes_strategy",
+                databases=["analytics"],
+                tables=["events"],
+                max_iterations=1,
+                global_rules=common_rules,
+            ),
+            BenchmarkConfig(
+                id="bench_strategy_combined",
+                connection_id="prod_ch",
+                strategy="combined_strategy",
+                databases=["analytics"],
+                tables=["events"],
+                max_iterations=1,
+                global_rules=common_rules,
+            ),
+        ]
+        planner = BenchmarkPlanner(
+            config=BenchmarkRootConfig(
+                connections=[self.connection],
+                benchmarks=benchmarks,
+                rule_banks={},
+                default_rule_banks={},
+                celery=CeleryConfig(workers=2, threads_per_worker=1),
+            ),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = RecordingExecutionAdapter()
+        result_store = InMemoryBenchmarkResultStore()
+        types_strategy = RecordingTableExecutionStrategy()
+        indexes_strategy = RecordingTableExecutionStrategy()
+        combined_strategy = RecordingTableExecutionStrategy()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+            table_execution_strategies={
+                "types_strategy": types_strategy,
+                "indexes_strategy": indexes_strategy,
+                "combined_strategy": combined_strategy,
+            },
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual(
+            types_strategy.calls,
+            [("bench_strategy_types", "events", 1)],
+        )
+        self.assertEqual(
+            indexes_strategy.calls,
+            [("bench_strategy_indexes", "events", 1)],
+        )
+        self.assertEqual(
+            combined_strategy.calls,
+            [("bench_strategy_combined", "events", 1)],
+        )
+        self.assertEqual(len(adapter.executed_jobs), 0)
+        self.assertEqual(len(result_store.records), 0)
+
     def test_runner_uses_injected_default_table_execution_strategy(self) -> None:
         """Проверяет, что runner uses injected default table execution strategy."""
         benchmark = BenchmarkConfig(
             id="bench_custom_default_strategy",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=1,
@@ -1142,6 +1231,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             result_store=result_store,
             default_table_execution_strategy=default_strategy,
         )
+        # Убираем built-in стратегию для types, чтобы проверить fallback на default.
+        runner._table_execution_strategies.pop("types_strategy")
 
         run_id = runner.run()
         self.assertEqual(run_id, 1)
@@ -1149,12 +1240,12 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(len(adapter.executed_jobs), 0)
         self.assertEqual(len(result_store.records), 0)
 
-    def test_runner_rejects_duplicate_mode_execution_strategy_without_overwrite(self) -> None:
-        """Проверяет, что runner rejects duplicate mode execution strategy without overwrite."""
+    def test_runner_rejects_duplicate_strategy_execution_strategy_without_overwrite(self) -> None:
+        """Проверяет, что runner rejects duplicate strategy execution strategy without overwrite."""
         benchmark = BenchmarkConfig(
             id="bench_duplicate_strategy",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=1,
@@ -1175,16 +1266,16 @@ class PlannerEngineRunnerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "уже зарегистрирована"):
             runner.register_table_execution_strategy(
-                "sequential",
+                "sequential_topn_strategy",
                 RecordingTableExecutionStrategy(),
             )
 
-    def test_runner_register_mode_execution_strategy_rejects_empty_mode(self) -> None:
-        """Проверяет, что runner register mode execution strategy rejects empty mode."""
+    def test_runner_register_strategy_execution_strategy_rejects_empty_key(self) -> None:
+        """Проверяет, что runner register strategy execution strategy rejects empty key."""
         benchmark = BenchmarkConfig(
             id="bench_empty_mode_strategy",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=1,
@@ -1209,12 +1300,12 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                 RecordingTableExecutionStrategy(),
             )
 
-    def test_runner_register_mode_execution_strategy_allows_overwrite(self) -> None:
-        """Проверяет, что runner register mode execution strategy allows overwrite."""
+    def test_runner_register_strategy_execution_strategy_allows_overwrite(self) -> None:
+        """Проверяет, что runner register strategy execution strategy allows overwrite."""
         benchmark = BenchmarkConfig(
             id="bench_override_sequential_strategy",
             connection_id="prod_ch",
-            mode="sequential",
+            strategy="sequential_topn_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=1,
@@ -1243,7 +1334,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             result_store=result_store,
         )
         runner.register_table_execution_strategy(
-            "sequential",
+            "sequential_topn_strategy",
             sequential_override,
             overwrite=True,
         )
@@ -1262,7 +1353,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_run_id_from_max",
             connection_id="prod_ch",
-            mode="types",
+            strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=1,
@@ -1316,7 +1407,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_sequential_topn",
             connection_id="prod_ch",
-            mode="sequential",
+            strategy="sequential_topn_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=10,
@@ -1412,7 +1503,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_sequential_stage_limits_override",
             connection_id="prod_ch",
-            mode="combined",
+            strategy="combined_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=10,
@@ -1448,7 +1539,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                 TableRuleConfig(
                     database="analytics",
                     table="events",
-                    mode="sequential",
+                    strategy="sequential_topn_strategy",
                     insert_rows_limits=InsertRowsLimitsConfig(indexes=777),
                 )
             ],
@@ -1496,7 +1587,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_sequential_no_top",
             connection_id="prod_ch",
-            mode="sequential",
+            strategy="sequential_topn_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=10,
@@ -1551,7 +1642,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         benchmark = BenchmarkConfig(
             id="bench_sequential_insert_rows_fallback",
             connection_id="prod_ch",
-            mode="sequential",
+            strategy="sequential_topn_strategy",
             databases=["analytics"],
             tables=["events"],
             max_iterations=10,
