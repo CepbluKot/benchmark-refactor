@@ -100,6 +100,7 @@ class VariantJob(_FrozenModel):
     Содержит всё, что нужно execution-слою:
       - DDL variant-таблицы;
       - query-план;
+      - run-level контекст (`benchmark_run_id`, `benchmark_started_at`);
       - runtime-параметры (mode, max_iterations, insert_rows_limit, celery);
       - метаданные варианта (индекс, total и т.д.).
     """
@@ -1149,6 +1150,9 @@ class BenchmarkRunner:
         Для `mode="sequential"` используется двухфазный алгоритм:
           1) прогон type/codec-вариантов;
           2) выбор top-N через result-store и прогон индексных вариантов на их DDL.
+
+        Для каждого вызова фиксируется единый `benchmark_started_at` (UTC datetime),
+        общий для всех benchmark/table/jobs в рамках этого запуска.
         """
         run_id = benchmark_run_id if benchmark_run_id is not None else self._next_run_id()
         if run_id <= 0:
