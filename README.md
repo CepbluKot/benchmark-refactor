@@ -729,3 +729,374 @@ run_id = runner.run()
 Для примера выше:
 - для всех таблиц в `sequential`: type-stage = `800000`, index-stage = `300000`;
 - для `analytics.user_events`: index-stage переопределён в `120000`, type-stage остаётся `800000`.
+
+## 17. CLI валидации JSON по пути
+
+Добавлена утилита `validate_json_config.py`, которая валидирует JSON по моделям
+и в нужных режимах проверяет кросс-ссылки.
+
+Запуск:
+
+```bash
+./venv/bin/python validate_json_config.py --help
+```
+
+### 17.1 Валидация одного файла (`single`)
+
+```bash
+./venv/bin/python validate_json_config.py single --type celery --path configs/celery.example.json
+./venv/bin/python validate_json_config.py single --type connections --path configs/connections.example.json
+./venv/bin/python validate_json_config.py single --type rule_banks --path configs/rule_banks.example.json
+./venv/bin/python validate_json_config.py single --type benchmarks --path configs/benchmarks.example.json
+./venv/bin/python validate_json_config.py single --type project --path configs/benchmark.project.example.json
+```
+
+Поддерживаемые `--type`: `celery`, `connections`, `rule_banks`, `benchmarks`, `project`, `root`.
+
+### 17.2 Валидация 4 секций и ссылок (`parts`)
+
+```bash
+./venv/bin/python validate_json_config.py parts \
+  --celery-path configs/celery.example.json \
+  --connections-path configs/connections.example.json \
+  --rule-banks-path configs/rule_banks.example.json \
+  --benchmarks-path configs/benchmarks.example.json
+```
+
+Этот режим проверяет:
+1. Каждую секцию по своей модели.
+2. Сборку в единый `BenchmarkRootConfig`.
+3. Ссылки `connection_id`, `rule_bank`, `default_rule_banks`.
+
+### 17.3 Валидация project-конфига (`project`)
+
+```bash
+./venv/bin/python validate_json_config.py project --path configs/benchmark.project.example.json
+```
+
+Этот режим:
+1. Валидирует `BenchmarkProjectConfig`.
+2. Загружает и валидирует связанные файлы.
+3. Проверяет кросс-ссылки между секциями.
+
+Коды завершения:
+1. `0` — всё валидно.
+2. `1` — ошибка валидации/JSON/ссылок.
+
+## 18. Полный состав JSON-файлов
+
+Ниже перечислен контракт каждого JSON-файла, который поддерживается движком.
+Все неизвестные поля запрещены (кроме `insert_rows_limits` custom mode-ключей).
+
+### 18.1 `celery.json` (`CeleryConfig`)
+
+Пример:
+
+```json
+{
+  "workers": 4,
+  "threads_per_worker": 2
+}
+```
+
+Поля:
+
+| Поле | Тип | Обязательное | Значение |
+|---|---|---|---|
+| `workers` | `int` | нет | `> 0`, default `4` |
+| `threads_per_worker` | `int` | нет | `> 0`, default `2` |
+
+### 18.2 `connections.json` (`ConnectionsFileConfig`)
+
+Корень:
+
+| Поле | Тип | Обязательное | Значение |
+|---|---|---|---|
+| `connections` | `list[ConnectionConfig]` | да | список не может быть пустым |
+
+Элемент `ConnectionConfig`:
+
+| Поле | Тип | Обязательное | Значение |
+|---|---|---|---|
+| `id` | `str` | да | уникальный id подключения |
+| `dbms` | `str` | нет | default `clickhouse`, lower-case |
+| `credential_type` | `str` | нет | default `password`, lower-case |
+| `host` | `str` | да | адрес хоста |
+| `port` | `int` | да | `1..65535` |
+| `login` | `str` | да | логин |
+| `password` | `str` | да | пароль |
+
+### 18.3 `rule_banks.json` (`RuleBanksFileConfig`)
+
+Корень:
+
+| Поле | Тип | Обязательное | Значение |
+|---|---|---|---|
+| `rule_banks` | `dict[str, RuleBankConfig]` | нет | default `{}` |
+| `default_rule_banks` | `dict[str, str]` | нет | default `{}`, ключи DBMS нормализуются в lower-case |
+
+`RuleBankConfig`:
+
+| Поле | Тип | Обязательное | Значение |
+|---|---|---|---|
+| `column_rules` | `list[ColumnRuleConfig]` | нет | default `[]` |
+| `index_rules` | `list[IndexRuleConfig]` | нет | default `[]` |
+| `column_order` | `dict[str, int]` | нет | приоритет колонок вручную |
+
+`ColumnRuleConfig`:
+
+| Поле | Тип | Обязательное | Значение |
+|---|---|---|---|
+| `by_type` | `str \| null` | условно | обязателен, если задан `by_name` |
+| `by_name` | `str \| null` | условно | можно задавать вместе с `by_type` |
+| `types` | `list[str]` | нет | альтернативные типы |
+| `codecs` | `list[str]` | нет | альтернативные кодеки |
+
+`IndexRuleConfig`:
+
+| Поле | Тип | Обязательное | Значение |
+|---|---|---|---|
+| `by_type` | `str \| null` | условно | обязателен, если задан `by_name` |
+| `by_name` | `str \| null` | условно | можно задавать вместе с `by_type` |
+| `indexes` | `list[IndexConfig]` | нет | варианты индексов |
+
+`IndexConfig`:
+
+| Поле | Тип | Обязательное | Значение |
+|---|---|---|---|
+| `type` | `str` | да | тип skip-индекса |
+| `granularity` | `int` | нет | `>= 1`, default `1` |
+
+### 18.4 `benchmarks.json` (`BenchmarksFileConfig`)
+
+Корень:
+
+| Поле | Тип | Обязательное | Значение |
+|---|---|---|---|
+| `benchmarks` | `list[BenchmarkConfig]` | да | список не может быть пустым |
+
+`BenchmarkConfig`:
+
+| Поле | Тип | Обязательное | Значение |
+|---|---|---|---|
+| `id` | `str` | да | уникальный id бенчмарка |
+| `connection_id` | `str` | да | ссылка на `connections[].id` |
+| `mode` | `types \| indexes \| sequential \| combined` | да | режим перебора |
+| `global_rules` | `RulesConfig` | нет | default `{}` |
+| `column_order_mode` | `compressed_size_desc \| null` | нет | авто-ранжирование колонок |
+| `databases` | `"*" \| list[str]` | нет | default `"*"` |
+| `tables` | `"*" \| list[str] \| dict[str, "*" \| list[str]]` | нет | default `"*"` |
+| `max_iterations` | `int` | нет | `> 0`, default `100` |
+| `sequential_top_n` | `int` | нет | `> 0`, default `1` |
+| `insert_rows_limit` | `int \| null` | нет | `> 0` |
+| `insert_rows_limits` | `InsertRowsLimitsConfig \| null` | нет | лимиты по mode/stage |
+| `column_rules_mode` | `global_bank_only \| global_bank_with_inline_priority \| inline_only \| null` | нет | источник column rules |
+| `index_rules_mode` | `global_bank_only \| global_bank_with_inline_priority \| inline_only \| null` | нет | источник index rules |
+| `queries` | `QueriesConfig` | нет | default `{"mode":"auto"}` |
+| `table_rules` | `list[TableRuleConfig]` | нет | default `[]` |
+
+`RulesConfig`:
+
+| Поле | Тип | Обязательное | Значение |
+|---|---|---|---|
+| `rule_bank` | `str \| null` | нет | ссылка на `rule_banks` |
+| `column_rules` | `list[ColumnRuleConfig] \| null` | нет | inline override |
+| `index_rules` | `list[IndexRuleConfig] \| null` | нет | inline override |
+| `column_order` | `dict[str, int] \| null` | нет | inline override |
+
+`QueriesConfig`:
+
+| Поле | Тип | Обязательное | Значение |
+|---|---|---|---|
+| `mode` | `auto \| manual \| auto_with_manual` | нет | default `auto` |
+| `warmup_queries` | `list[str]` | нет | default `[]` |
+| `test_queries` | `list[TestQueryConfig]` | нет | для `manual` обязателен минимум 1 |
+
+`TestQueryConfig`:
+
+| Поле | Тип | Обязательное | Значение |
+|---|---|---|---|
+| `query` | `str` | да | SQL с `{table}` |
+| `weight` | `float` | нет | `> 0`, default `1.0` |
+
+`TableRuleConfig`:
+
+| Поле | Тип | Обязательное | Значение |
+|---|---|---|---|
+| `database` | `str` | да | имя БД, не пустое |
+| `table` | `str` | да | имя таблицы, не пустое |
+| `rules` | `RulesConfig` | нет | default `{}` |
+| `column_order_mode` | `compressed_size_desc \| null` | нет | локальный override |
+| `queries` | `QueriesConfig \| null` | нет | локальный override |
+| `max_iterations` | `int \| null` | нет | `> 0`, локальный override |
+| `sequential_top_n` | `int \| null` | нет | `> 0`, локальный override |
+| `insert_rows_limit` | `int \| null` | нет | `> 0`, локальный override |
+| `insert_rows_limits` | `InsertRowsLimitsConfig \| null` | нет | локальный override |
+| `mode` | `types \| indexes \| sequential \| combined \| null` | нет | локальный override |
+
+`InsertRowsLimitsConfig`:
+
+| Поле | Тип | Обязательное | Значение |
+|---|---|---|---|
+| `types` | `int \| null` | нет | `> 0` |
+| `indexes` | `int \| null` | нет | `> 0` |
+| `combined` | `int \| null` | нет | `> 0` |
+| `sequential` | `int \| null` | нет | `> 0` |
+| `<custom_mode_key>` | `int` | нет | любое непустое имя ключа, значение `> 0` |
+
+### 18.5 `benchmark.project.json` (`BenchmarkProjectConfig`)
+
+Используется в file-mode как обёртка, которая ссылается на отдельные JSON-файлы.
+
+| Поле | Тип | Обязательное | Значение |
+|---|---|---|---|
+| `connections_file` | `str` | да | путь к connections JSON |
+| `rule_banks_file` | `str` | да | путь к rule_banks JSON |
+| `benchmarks` | `list[BenchmarkConfig] \| null` | условно | inline benchmark-список |
+| `benchmarks_file` | `str \| null` | условно | путь к benchmarks JSON |
+| `celery` | `CeleryConfig` | нет | default `{"workers":4,"threads_per_worker":2}` |
+
+Требование:
+1. Нужно указать ровно один источник benchmark-ов: либо `benchmarks`, либо `benchmarks_file`.
+
+## 19. Пошаговый гайд: с нуля до запуска
+
+### 19.1 Создай 4 базовых JSON-файла
+
+1. `configs/celery.local.json`:
+
+```json
+{
+  "workers": 4,
+  "threads_per_worker": 2
+}
+```
+
+2. `configs/connections.local.json`:
+
+```json
+{
+  "connections": [
+    {
+      "id": "prod_ch",
+      "dbms": "clickhouse",
+      "credential_type": "password",
+      "host": "127.0.0.1",
+      "port": 9000,
+      "login": "bench_user",
+      "password": "secret"
+    }
+  ]
+}
+```
+
+3. `configs/rule_banks.local.json`:
+
+```json
+{
+  "rule_banks": {
+    "baseline": {
+      "column_rules": [
+        {
+          "by_type": "UInt64",
+          "types": ["UInt64", "UInt32"],
+          "codecs": ["CODEC(Delta(8), LZ4)", "CODEC(T64, ZSTD(1))"]
+        }
+      ],
+      "index_rules": [
+        {
+          "by_type": "UInt64",
+          "indexes": [
+            {"type": "minmax", "granularity": 4},
+            {"type": "bloom_filter(0.01)", "granularity": 2}
+          ]
+        }
+      ]
+    }
+  },
+  "default_rule_banks": {
+    "clickhouse": "baseline"
+  }
+}
+```
+
+4. `configs/benchmarks.local.json`:
+
+```json
+{
+  "benchmarks": [
+    {
+      "id": "bench_seq",
+      "connection_id": "prod_ch",
+      "mode": "sequential",
+      "databases": ["analytics"],
+      "tables": ["user_events"],
+      "max_iterations": 20,
+      "sequential_top_n": 2,
+      "insert_rows_limit": 1000000,
+      "insert_rows_limits": {
+        "types": 800000,
+        "indexes": 300000,
+        "sequential": 500000
+      },
+      "global_rules": {
+        "rule_bank": "baseline"
+      },
+      "queries": {
+        "mode": "auto"
+      }
+    }
+  ]
+}
+```
+
+### 19.2 Провалидируй конфиги перед запуском
+
+```bash
+./venv/bin/python validate_json_config.py parts \
+  --celery-path configs/celery.local.json \
+  --connections-path configs/connections.local.json \
+  --rule-banks-path configs/rule_banks.local.json \
+  --benchmarks-path configs/benchmarks.local.json
+```
+
+### 19.3 Запусти benchmark через текущий `main.py` (env-mode)
+
+1. Открой `encode_configs_base64.py` и выставь пути:
+   `CELERY_JSON_PATH`, `CONNECTIONS_JSON_PATH`, `RULE_BANKS_JSON_PATH`, `BENCHMARKS_JSON_PATH`.
+2. Сгенерируй `.env`:
+
+```bash
+./venv/bin/python encode_configs_base64.py | sed 's/^export //' > .env
+```
+
+3. Запусти:
+
+```bash
+./venv/bin/python main.py
+```
+
+### 19.4 Альтернатива: file-mode через project JSON
+
+1. Создай `configs/benchmark.project.local.json`:
+
+```json
+{
+  "connections_file": "connections.local.json",
+  "rule_banks_file": "rule_banks.local.json",
+  "benchmarks_file": "benchmarks.local.json",
+  "celery": {
+    "workers": 4,
+    "threads_per_worker": 2
+  }
+}
+```
+
+2. Проверь:
+
+```bash
+./venv/bin/python validate_json_config.py project --path configs/benchmark.project.local.json
+```
+
+3. Используй `load_config(...)`/`parse_config(...)` в своем раннере file-mode.
+   Текущий `main.py` в репозитории работает через env-mode и `parse_config_parts(...)`.

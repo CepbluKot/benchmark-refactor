@@ -1019,6 +1019,9 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
             column_order=effective_column_order,
             max_iterations=table_plan.max_iterations,
         ):
+
+            var_txt = variant_ddl.to_ddl()
+            print(var_txt)
             job = runner._engine.build_variant_job(
                 table_plan=table_plan,
                 raw_query_plan=raw_query_plan,
@@ -1044,7 +1047,7 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
         )
         if not top_variants:
             return
-
+        print('---')
         next_global_index = type_total
         for type_variant in top_variants:
             base_ddl = type_variant.variant_ddl.copy()
@@ -1065,6 +1068,8 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
                 column_order=effective_column_order,
                 max_iterations=table_plan.max_iterations,
             ):
+                var_txt = variant_ddl.to_ddl()
+                print(var_txt)
                 index_meta.global_index = next_global_index
                 next_global_index += 1
                 index_job = runner._engine.build_variant_job(

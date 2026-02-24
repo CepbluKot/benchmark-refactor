@@ -1,38 +1,20 @@
 {
   "benchmarks": [
-    {
-      "id": "bench_default_rules_auto_discovery",
-      "connection_id": "prod_ch",
-      "mode": "types",
-      "column_rules_mode": "global_bank_only",
-      "index_rules_mode": "global_bank_only",
-      "databases": "*",
-      "tables": "*",
-      "max_iterations": 3,
-      "insert_rows_limit": 1000000,
-      "insert_rows_limits": {
-        "types": 1500000
-      },
-      "queries": {
-        "mode": "auto"
-      }
-    },
+ 
     {
       "id": "bench_mixed_selectors",
       "connection_id": "prod_ch",
       "mode": "combined",
-      "column_rules_mode": "global_bank_with_inline_priority",
-      "index_rules_mode": "global_bank_with_inline_priority",
+      "column_rules_mode": "inline_only",
+      "index_rules_mode": "inline_only",
       "column_order_mode": "compressed_size_desc",
       "databases": [
-        "analytics",
-        "marketing"
+        "analytics"
       ],
       "tables": {
         "analytics": [
           "user_events"
-        ],
-        "marketing": "*"
+        ]
       },
       "max_iterations": 5,
       "insert_rows_limit": 5000000,
@@ -86,7 +68,9 @@
               {
                 "by_type": "Nullable(Decimal(18,4))",
                 "indexes": [
-                  {"type": "bloom_filter(0.01)", "granularity": 228}
+                  {"type": "bloom_filter(0.01)", "granularity": 228},
+
+                  {"type": "bloom_filter(0.01)", "granularity": 123}
                 ]
               }]
           },
