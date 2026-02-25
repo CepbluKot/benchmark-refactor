@@ -22,6 +22,7 @@ class VariantGenerationStrategy(ABC):
         column_rules: List[ColumnRule],
         index_rules: List[IndexRule],
         column_order: Optional[Dict[str, int]] = None,
+        table_index_granularity_values: Optional[List[int]] = None,
     ) -> Iterable[Tuple[TableDDL, VariantMeta]]:
         """Lazily yields `(variant_ddl, variant_meta)`."""
         pass
@@ -33,6 +34,7 @@ class VariantGenerationStrategy(ABC):
         column_rules: List[ColumnRule],
         index_rules: List[IndexRule],
         column_order: Optional[Dict[str, int]] = None,
+        table_index_granularity_values: Optional[List[int]] = None,
     ) -> int:
         """Returns total count without materializing all variants."""
         pass

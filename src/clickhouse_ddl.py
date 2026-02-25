@@ -371,6 +371,96 @@ class TableDDL(BaseModel):
                 return idx
         return None
 
+    def get_index_granularity(self) -> Optional[int]:
+        """
+        Возвращает `SETTINGS index_granularity`, если он задан в DDL.
+
+        Ищет ключ в первом `SETTINGS ...` блоке из `other_table_options`.
+        """
+        for option in self.other_table_options:
+            if not re.match(r"^\s*SETTINGS\b", option, flags=re.IGNORECASE):
+                continue
+            body = re.sub(
+                r"^\s*SETTINGS\b",
+                "",
+                option,
+                flags=re.IGNORECASE,
+            ).strip()
+            for assignment in self._split_top_level_commas(body):
+                if re.match(
+                    r"^\s*`?index_granularity`?\s*=",
+                    assignment,
+                    flags=re.IGNORECASE,
+                ):
+                    _, _, right = assignment.partition("=")
+                    raw_value = right.strip().strip("`")
+                    try:
+                        return int(raw_value)
+                    except ValueError:
+                        return None
+        return None
+
+    def set_index_granularity(self, value: int) -> None:
+        """
+        Устанавливает `SETTINGS index_granularity = <value>` в DDL.
+
+        Если `SETTINGS` уже есть, обновляет/добавляет ключ внутри него.
+        Заодно удаляет дубли `index_granularity` во всех SETTINGS-блоках,
+        чтобы в итоговом DDL ключ встречался только один раз.
+        Если нет — добавляет новый `SETTINGS`-блок в `other_table_options`.
+        """
+        if value <= 0:
+            raise ValueError("index_granularity должен быть > 0")
+
+        target_assignment = f"index_granularity = {int(value)}"
+        settings_indices = [
+            idx
+            for idx, option in enumerate(self.other_table_options)
+            if re.match(r"^\s*SETTINGS\b", option, flags=re.IGNORECASE)
+        ]
+        if not settings_indices:
+            self.other_table_options.append(f"SETTINGS {target_assignment}")
+            return
+
+        first_settings_idx = settings_indices[0]
+        for idx in settings_indices:
+            body = re.sub(
+                r"^\s*SETTINGS\b",
+                "",
+                self.other_table_options[idx],
+                flags=re.IGNORECASE,
+            ).strip()
+            assignments = self._split_top_level_commas(body) if body else []
+
+            normalized_assignments: list[str] = []
+            seen_index_granularity = False
+            for assignment in assignments:
+                if re.match(
+                    r"^\s*`?index_granularity`?\s*=",
+                    assignment,
+                    flags=re.IGNORECASE,
+                ):
+                    if idx == first_settings_idx and not seen_index_granularity:
+                        normalized_assignments.append(target_assignment)
+                        seen_index_granularity = True
+                    continue
+                normalized_assignments.append(assignment.strip())
+
+            if idx == first_settings_idx and not seen_index_granularity:
+                normalized_assignments.append(target_assignment)
+
+            if normalized_assignments:
+                self.other_table_options[idx] = (
+                    "SETTINGS " + ", ".join(normalized_assignments)
+                )
+            else:
+                # Пустой SETTINGS-блок удаляем.
+                self.other_table_options[idx] = ""
+
+        self.other_table_options = [
+            option for option in self.other_table_options if option.strip()
+        ]
+
 
 # ─── пример использования ────────────────────────────────────────────────────
 

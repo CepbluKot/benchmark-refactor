@@ -29,6 +29,24 @@ class ModelsValidationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ColumnRuleConfig(by_name="user_id")
 
+    def test_column_rule_rejects_empty_auto_compressions_datatype(self) -> None:
+        """Проверяет, что auto_compressions_datatype не может быть пустым."""
+        with self.assertRaises(ValidationError):
+            ColumnRuleConfig(
+                by_type="String",
+                auto_generate_alternatives=True,
+                auto_compressions_datatype="   ",
+            )
+
+    def test_index_rule_rejects_empty_auto_indexes_datatype(self) -> None:
+        """Проверяет, что auto_indexes_datatype не может быть пустым."""
+        with self.assertRaises(ValidationError):
+            IndexRuleConfig(
+                by_type="String",
+                auto_generate_indexes=True,
+                auto_indexes_datatype="   ",
+            )
+
     def test_queries_manual_requires_test_queries(self) -> None:
         """Проверяет, что queries manual requires test queries."""
         with self.assertRaises(ValidationError):
@@ -356,6 +374,7 @@ class ModelsValidationTests(unittest.TestCase):
                 },
                 "max_type_benchmarks": 9,
                 "max_index_benchmarks": 11,
+                "table_index_granularity_values": [8192, 16384],
                 "table_rules": [
                     {
                         "database": "analytics",
@@ -377,6 +396,7 @@ class ModelsValidationTests(unittest.TestCase):
                         },
                         "max_type_benchmarks": 6,
                         "max_index_benchmarks": 7,
+                        "table_index_granularity_values": [4096, 8192, 4096],
                     }
                 ],
             }
@@ -394,6 +414,7 @@ class ModelsValidationTests(unittest.TestCase):
         self.assertEqual(bench.max_benchmarks_limits.sequential, 8)
         self.assertEqual(bench.max_type_benchmarks, 9)
         self.assertEqual(bench.max_index_benchmarks, 11)
+        self.assertEqual(bench.index_granularity_values, [8192, 16384])
         self.assertIsNotNone(bench.insert_rows_limits)
         self.assertEqual(bench.insert_rows_limits.for_mode("types"), 100)
         self.assertEqual(bench.insert_rows_limits.for_mode("future_mode_x"), 33)
@@ -411,9 +432,36 @@ class ModelsValidationTests(unittest.TestCase):
         self.assertEqual(table_rule.max_benchmarks_limits.indexes, 7)
         self.assertEqual(table_rule.max_type_benchmarks, 6)
         self.assertEqual(table_rule.max_index_benchmarks, 7)
+        self.assertEqual(table_rule.index_granularity_values, [4096, 8192])
         self.assertIsNotNone(table_rule.insert_rows_limits)
         self.assertEqual(table_rule.insert_rows_limits.for_mode("types"), 88)
         self.assertEqual(table_rule.insert_rows_limits.for_mode("future_mode_y"), 22)
+
+    def test_index_granularity_values_reject_invalid_values(self) -> None:
+        """Проверяет валидацию index_granularity_values."""
+        with self.assertRaises(ValidationError):
+            BenchmarkConfig.model_validate(
+                {
+                    "id": "bench_invalid_index_granularity_values",
+                    "connection_id": "conn",
+                    "strategy": "types_strategy",
+                    "databases": ["analytics"],
+                    "tables": ["events"],
+                    "index_granularity_values": [],
+                }
+            )
+
+        with self.assertRaises(ValidationError):
+            BenchmarkConfig.model_validate(
+                {
+                    "id": "bench_invalid_index_granularity_values",
+                    "connection_id": "conn",
+                    "strategy": "types_strategy",
+                    "databases": ["analytics"],
+                    "tables": ["events"],
+                    "index_granularity_values": [0, 8192],
+                }
+            )
 
 
 class RuleResolverTests(unittest.TestCase):
@@ -612,6 +660,128 @@ class RuleResolverTests(unittest.TestCase):
                 index_rules_mode="inline_only",
                 global_rules=RulesConfig(),
             )
+
+    def test_auto_generate_alternatives_adds_codecs_from_legacy_generator(self) -> None:
+        """Проверяет, что auto_generate_alternatives добавляет legacy-кодеки."""
+        resolver = RuleResolver(banks={})
+        rules = RulesConfig(
+            column_rules=[
+                ColumnRuleConfig(
+                    by_type="String",
+                    types=["String", "LowCardinality(String)"],
+                    auto_generate_alternatives=True,
+                    auto_compressions_datatype="String",
+                )
+            ]
+        )
+
+        resolved = resolver.resolve(rules, dbms="clickhouse")
+        self.assertEqual(len(resolved.column_rules), 1)
+        alternatives = resolved.column_rules[0].alternatives
+
+        self.assertIn("String", alternatives.types)
+        self.assertIn("LowCardinality(String)", alternatives.types)
+        self.assertIn("CODEC(LZ4)", alternatives.codecs)
+        self.assertIn("CODEC(ZSTD(1))", alternatives.codecs)
+        self.assertIn("CODEC(ZSTD(5))", alternatives.codecs)
+
+    def test_auto_generate_alternatives_uses_by_type_when_types_empty(self) -> None:
+        """Проверяет fallback на by_type для авто-генерации, если types пустой."""
+        resolver = RuleResolver(banks={})
+        rules = RulesConfig(
+            column_rules=[
+                ColumnRuleConfig(
+                    by_type="Int32",
+                    auto_generate_alternatives=True,
+                )
+            ]
+        )
+
+        resolved = resolver.resolve(rules, dbms="clickhouse")
+        alternatives = resolved.column_rules[0].alternatives
+        self.assertIn("Int32", alternatives.types)
+        self.assertIn("CODEC(LZ4)", alternatives.codecs)
+        self.assertIn("CODEC(Delta, ZSTD(1))", alternatives.codecs)
+
+    def test_auto_generate_indexes_uses_by_type_when_indexes_empty(self) -> None:
+        """Проверяет fallback на by_type для авто-генерации индексов."""
+        resolver = RuleResolver(banks={})
+        rules = RulesConfig(
+            index_rules=[
+                IndexRuleConfig(
+                    by_type="String",
+                    auto_generate_indexes=True,
+                )
+            ]
+        )
+
+        resolved = resolver.resolve(rules, dbms="clickhouse")
+        self.assertEqual(len(resolved.index_rules), 1)
+        variants = resolved.index_rules[0].alternatives.variants
+        variant_pairs = {(item.index_type, item.granularity) for item in variants}
+
+        self.assertIn(("ngrambf_v1(3, 256, 2, 0)", 1), variant_pairs)
+
+    def test_auto_generate_indexes_adds_minmax_for_range_types(self) -> None:
+        """Проверяет minmax в авто-индексах для range-типов."""
+        resolver = RuleResolver(banks={})
+        datatypes = [
+            "Int8",
+            "Int16",
+            "Int32",
+            "Int64",
+            "Float32",
+            "Float64",
+            "Decimal(10, 2)",
+            "Date",
+            "DateTime",
+        ]
+
+        for datatype in datatypes:
+            with self.subTest(datatype=datatype):
+                rules = RulesConfig(
+                    index_rules=[
+                        IndexRuleConfig(
+                            by_type=datatype,
+                            auto_generate_indexes=True,
+                        )
+                    ]
+                )
+                resolved = resolver.resolve(rules, dbms="clickhouse")
+                variants = resolved.index_rules[0].alternatives.variants
+                variant_pairs = {(item.index_type, item.granularity) for item in variants}
+                self.assertIn(("minmax", 4), variant_pairs)
+
+    def test_auto_generate_indexes_merges_with_manual_and_deduplicates(self) -> None:
+        """Проверяет merge ручных и auto-индексов с удалением дублей."""
+        resolver = RuleResolver(banks={})
+        rules = RulesConfig(
+            index_rules=[
+                IndexRuleConfig(
+                    by_type="UInt64",
+                    auto_generate_indexes=True,
+                    indexes=[
+                        IndexConfig(type="set(200)", granularity=4),
+                        IndexConfig(type="set(200)", granularity=4),
+                    ],
+                )
+            ]
+        )
+
+        resolved = resolver.resolve(rules, dbms="clickhouse")
+        variants = resolved.index_rules[0].alternatives.variants
+        variant_pairs = [(item.index_type, item.granularity) for item in variants]
+
+        self.assertEqual(variant_pairs[0], ("set(200)", 4))
+        self.assertEqual(
+            sorted(set(variant_pairs)),
+            sorted(
+                {
+                    ("minmax", 4),
+                    ("set(200)", 4),
+                }
+            ),
+        )
 
 
 if __name__ == "__main__":

@@ -201,6 +201,9 @@
    - per-query speedup (`source/tested`).
 6. Пишет результат через `ClickHouseBenchmarkResultStore.store_worker_result(...)`.
 7. Всегда удаляет variant-таблицу в `finally`.
+8. На уровне Celery task-wrapper невалидный payload или ошибка variant-бенчмарка
+   помечаются как `skipped_*`, логируются и не валят общий benchmark-run
+   (важно для корректного завершения progress/wait).
 
 Низкоуровневые гарантии runtime:
 1. Streaming insert: приоритет `raw_stream/raw_insert` (clickhouse-connect),
@@ -235,6 +238,10 @@
 
 1. `SequentialVariantGenerationStrategy` это только combiner-level последовательная выдача вариантов.
 2. Реальный двухфазный top-N sequential делается не здесь, а в `SequentialTopNTableExecutionStrategy`.
+3. Для `indexes`/`combined` можно задать `index_granularity_values`:
+   это добавляет перебор `SETTINGS index_granularity` и умножает число индексных вариантов.
+4. При применении нового `index_granularity` старое значение из исходного DDL
+   заменяется без дублей; итоговый variant-DDL содержит ровно один ключ.
 
 ### 5.3 Реестр
 
@@ -297,10 +304,22 @@ Baseline исходного DDL для них уже выполнен runner-о�
 13. `max_benchmarks_limits`
 14. `max_type_benchmarks` (legacy)
 15. `max_index_benchmarks` (legacy)
-16. `column_rules_mode`, `index_rules_mode`
-17. `queries`
-18. `scoring`
-19. `table_rules[]` (локальные override, включая `strategy` и `test_database`)
+16. `index_granularity_values` (перебор `SETTINGS index_granularity`)
+17. `column_rules_mode`, `index_rules_mode`
+18. `queries`
+19. `scoring`
+20. `table_rules[]` (локальные override, включая `strategy` и `test_database`)
+
+Дополнительно для `column_rules[]`:
+1. `auto_generate_alternatives` (`false` по умолчанию) — включает legacy-автогенерацию type+codec.
+2. `auto_compressions_datatype` (опционально) — hint datatype для preprocessings.
+
+Дополнительно для `index_rules[]`:
+1. `auto_generate_indexes` (`false` по умолчанию) — включает автогенерацию skip-индексов по типу.
+2. `auto_indexes_datatype` (опционально) — hint datatype для авто-генерации индексов.
+3. Ручные `indexes` и авто-сгенерированные индексы объединяются; дубли `(type, granularity)` удаляются.
+4. Для range-типов (`Int8/16/32/64`, `Float32/64`, `Decimal*`, `Date/DateTime*`) авто-генерация добавляет `minmax`.
+5. `set(...)` и `bloom_filter(...)` auto-генератор не добавляет; их задают вручную в `indexes`.
 
 ### 7.2 Контракты верхнего уровня
 
@@ -402,6 +421,13 @@ Baseline исходного DDL для них уже выполнен runner-о�
 2. `resolve(...)`:
    - собирает итоговые runtime-правила.
 
+Автогенерация column alternatives:
+1. Лежит в `src/datatype_alternatives.py`.
+2. Используются legacy-совместимые функции:
+   - `generate_possible_compressions_w_preprocessings`
+   - `generate_possible_new_datatypes`
+3. Включается per-rule через `column_rules[].auto_generate_alternatives=true`.
+
 `RuleSourceMode`:
 
 1. `global_bank_only`
@@ -483,9 +509,10 @@ Baseline исходного DDL для них уже выполнен runner-о�
 9. `insert_rows_per_operation_limits`
 10. `max_benchmarks_limits`
 11. `max_type_benchmarks` / `max_index_benchmarks` (legacy)
-12. `strategy`
-13. `test_database`
-14. `scoring`
+12. `index_granularity_values`
+13. `strategy`
+14. `test_database`
+15. `scoring`
 
 ## 11) Entry points
 

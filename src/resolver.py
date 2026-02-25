@@ -12,9 +12,15 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
 
 from src.column_rules import ColumnAlternatives, ColumnRule
+from src.datatype_alternatives import (
+    generate_possible_compressions_w_preprocessings,
+    generate_possible_new_datatypes,
+)
+from src.index_alternatives import generate_possible_indexes_by_type
 from src.index_rules import IndexAlternatives, IndexRule, IndexVariant
 from src.models import (
     ColumnRuleConfig,
+    IndexConfig,
     IndexRuleConfig,
     RuleBankConfig,
     RuleSourceMode,
@@ -22,27 +28,141 @@ from src.models import (
 )
 
 
+def _deduplicate_preserve_order(values: List[str]) -> List[str]:
+    """Удаляет дубликаты, сохраняя исходный порядок значений."""
+    seen: set[str] = set()
+    deduplicated: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduplicated.append(value)
+    return deduplicated
+
+
+def _normalize_codec_clause(codec_expression: str) -> str:
+    """Приводит codec-expression к формату `CODEC(...)`."""
+    normalized = codec_expression.strip()
+    if not normalized:
+        return normalized
+    if normalized.upper().startswith("CODEC("):
+        return normalized
+    return f"CODEC({normalized})"
+
+
+def _deduplicate_index_configs_preserve_order(
+    values: List[IndexConfig],
+) -> List[IndexConfig]:
+    """Удаляет дубли index-конфигов, сохраняя исходный порядок."""
+    seen: set[tuple[str, int]] = set()
+    deduplicated: list[IndexConfig] = []
+    for value in values:
+        key = (value.type.strip(), int(value.granularity))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append(value)
+    return deduplicated
+
+
+def _expand_auto_column_alternatives(
+    cfg: ColumnRuleConfig,
+    *,
+    types: List[str],
+    codecs: List[str],
+) -> Tuple[List[str], List[str]]:
+    """
+    Добавляет legacy-автогенерацию type+codec альтернатив при включённом флаге.
+
+    Генерация следует legacy-логике:
+      - compressions/preprocessings от `generate_possible_compressions_w_preprocessings`;
+      - комбинации типов через `generate_possible_new_datatypes`.
+    """
+    if not cfg.auto_generate_alternatives:
+        return types, codecs
+
+    auto_types_seed = list(types)
+    if not auto_types_seed and cfg.by_type is not None:
+        auto_types_seed = [cfg.by_type]
+    if not auto_types_seed:
+        return types, codecs
+
+    compression_datatype = (
+        cfg.auto_compressions_datatype
+        or cfg.by_type
+        or auto_types_seed[0]
+    )
+    auto_compressions = generate_possible_compressions_w_preprocessings(
+        compression_datatype
+    )
+    generated = generate_possible_new_datatypes(
+        auto_types_seed,
+        auto_compressions,
+    )
+
+    auto_types = [item.datatype for item in generated]
+    auto_codecs = [_normalize_codec_clause(item.codec) for item in generated]
+    merged_types = _deduplicate_preserve_order(types + auto_types)
+    merged_codecs = _deduplicate_preserve_order(codecs + auto_codecs)
+    return merged_types, merged_codecs
+
+
+def _expand_auto_index_alternatives(
+    cfg: IndexRuleConfig,
+    *,
+    indexes: List[IndexConfig],
+) -> List[IndexConfig]:
+    """
+    Добавляет автогенерацию индексов по типу при включённом флаге.
+
+    Ручные индексы сохраняются и имеют приоритет в порядке.
+    """
+    if not cfg.auto_generate_indexes:
+        return indexes
+
+    datatype_hint = cfg.auto_indexes_datatype or cfg.by_type
+    if datatype_hint is None:
+        return indexes
+
+    generated = [
+        IndexConfig(type=item.index_type, granularity=item.granularity)
+        for item in generate_possible_indexes_by_type(datatype_hint)
+    ]
+    return _deduplicate_index_configs_preserve_order(indexes + generated)
+
+
 def _column_rule_from_config(cfg: ColumnRuleConfig) -> ColumnRule:
     """Конвертирует `ColumnRuleConfig` в runtime `ColumnRule`."""
+    types = list(cfg.types)
+    codecs = list(cfg.codecs)
+    types, codecs = _expand_auto_column_alternatives(
+        cfg,
+        types=types,
+        codecs=codecs,
+    )
     return ColumnRule(
         by_type=cfg.by_type,
         by_name=cfg.by_name,
         alternatives=ColumnAlternatives(
-            types=list(cfg.types),
-            codecs=list(cfg.codecs),
+            types=types,
+            codecs=codecs,
         ),
     )
 
 
 def _index_rule_from_config(cfg: IndexRuleConfig) -> IndexRule:
     """Конвертирует `IndexRuleConfig` в runtime `IndexRule`."""
+    indexes = _expand_auto_index_alternatives(
+        cfg,
+        indexes=list(cfg.indexes),
+    )
     return IndexRule(
         by_type=cfg.by_type,
         by_name=cfg.by_name,
         alternatives=IndexAlternatives(
             variants=[
                 IndexVariant(index_type=idx.type, granularity=idx.granularity)
-                for idx in cfg.indexes
+                for idx in indexes
             ]
         ),
     )

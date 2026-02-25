@@ -22,8 +22,10 @@ class TypesVariantGenerationStrategy(VariantGenerationStrategy):
         column_rules: List[ColumnRule],
         index_rules: List[IndexRule],
         column_order: Optional[Dict[str, int]] = None,
+        table_index_granularity_values: Optional[List[int]] = None,
     ) -> Iterable[Tuple[TableDDL, VariantMeta]]:
         # Для types-стратегии index_rules не используются.
+        del table_index_granularity_values
         for variant, col_meta in iter_column_variants(table, column_rules, column_order):
             yield variant, VariantMeta(
                 global_index=0,
@@ -37,6 +39,8 @@ class TypesVariantGenerationStrategy(VariantGenerationStrategy):
         column_rules: List[ColumnRule],
         index_rules: List[IndexRule],
         column_order: Optional[Dict[str, int]] = None,
+        table_index_granularity_values: Optional[List[int]] = None,
     ) -> int:
         # Для types-стратегии index_rules не используются.
+        del table_index_granularity_values
         return total_column_variants(table, column_rules, column_order)

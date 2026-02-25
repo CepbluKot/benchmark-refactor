@@ -27,6 +27,7 @@ class SequentialVariantGenerationStrategy(VariantGenerationStrategy):
         column_rules: List[ColumnRule],
         index_rules: List[IndexRule],
         column_order: Optional[Dict[str, int]] = None,
+        table_index_granularity_values: Optional[List[int]] = None,
     ) -> Iterable[Tuple[TableDDL, VariantMeta]]:
         for variant, col_meta in iter_column_variants(table, column_rules, column_order):
             yield variant, VariantMeta(
@@ -38,11 +39,13 @@ class SequentialVariantGenerationStrategy(VariantGenerationStrategy):
             table,
             index_rules,
             column_order=column_order,
+            table_index_granularity_values=table_index_granularity_values,
         ):
             yield variant, VariantMeta(
                 global_index=0,
                 mode="sequential",
                 index_meta=idx_meta,
+                table_index_granularity=idx_meta.table_index_granularity,
             )
 
     def total_variants(
@@ -51,7 +54,13 @@ class SequentialVariantGenerationStrategy(VariantGenerationStrategy):
         column_rules: List[ColumnRule],
         index_rules: List[IndexRule],
         column_order: Optional[Dict[str, int]] = None,
+        table_index_granularity_values: Optional[List[int]] = None,
     ) -> int:
         col_total = total_column_variants(table, column_rules, column_order)
-        idx_total = total_index_variants(table, index_rules, column_order)
+        idx_total = total_index_variants(
+            table,
+            index_rules,
+            column_order,
+            table_index_granularity_values=table_index_granularity_values,
+        )
         return col_total + idx_total

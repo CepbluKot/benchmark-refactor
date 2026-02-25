@@ -223,6 +223,9 @@ JSON-секции или `benchmark.project.json`.
 Runner не пишет результаты в store. Сохранение выполняет execution backend (обычно Celery-воркер).
 `sequential_topn_strategy` внутри себя ставит wait-барьер: ждёт, пока в store появятся все результаты type-stage,
 и только потом выбирает top-N и запускает index-stage.
+В ClickHouse Celery runtime невалидный variant payload или упавший variant-benchmark
+не останавливает весь run: worker логирует skip и завершает задачу как обработанную,
+поэтому progress-bar и batch-wait не зависают.
 
 9. Фактическое выполнение SQL (`BenchmarkExecutionAdapter`).
 Что это:
@@ -688,6 +691,31 @@ print(run_id)
 - `index_rules`
 - `column_order`
 
+`column_rules` (каждое правило) дополнительно поддерживает:
+- `auto_generate_alternatives` (`bool`, default `false`) — включает legacy-автогенерацию type+codec альтернатив;
+- `auto_compressions_datatype` (`string`, optional) — datatype-hint для выбора preprocessings при авто-генерации кодеков
+  (если не задан, используется `by_type`).
+
+Важно про `auto_generate_alternatives`:
+- авто-генерация использует legacy-логику `generate_possible_new_datatypes(...)`
+  и `generate_possible_compressions_w_preprocessings(...)`;
+- сгенерированные codec-выражения автоматически нормализуются к формату `CODEC(...)`;
+- ручные `types`/`codecs` не теряются: они объединяются с авто-сгенерированными значениями.
+
+`index_rules` (каждое правило) дополнительно поддерживает:
+- `auto_generate_indexes` (`bool`, default `false`) — включает автогенерацию skip-индексов по типу колонки;
+- `auto_indexes_datatype` (`string`, optional) — datatype-hint для авто-генерации индексов
+  (если не задан, используется `by_type`).
+
+Важно про `auto_generate_indexes`:
+- авто-генерация строится по типовым профилям (numeric/date/string/uuid/ipv/low-cardinality);
+- ручные `indexes` не теряются: они объединяются с авто-сгенерированными значениями;
+- дубли по паре `(type, granularity)` автоматически удаляются.
+- `minmax` автоматически добавляется для range-типов:
+  `Int8/16/32/64`, `Float32/64`, `Decimal*`, `Date/DateTime*`.
+- `set(...)` и `bloom_filter(...)` в auto-режиме не добавляются:
+  если они нужны, указывай их явно в `index_rules[].indexes`.
+
 ### `benchmarks.json`
 
 Корень:
@@ -703,6 +731,7 @@ print(run_id)
 - `insert_rows_per_operation_limit`, `insert_rows_per_operation_limits`
 - `source_insert_rows_per_operation_limit`, `source_insert_rows_per_operation_limits`
 - `max_benchmarks_limits` (опциональные лимиты числа variant jobs по стадиям)
+- `index_granularity_values` (опциональный перебор `SETTINGS index_granularity`)
 - `queries`
 - `column_rules_mode`, `index_rules_mode`
 
@@ -714,6 +743,11 @@ print(run_id)
 - `source_insert_rows_per_operation_limit`: legacy fallback baseline-лимита.
 - `sequential_types_top_n_for_indexes`: сколько лучших вариантов из stage `types` отдать в stage `indexes`.
 - `max_benchmarks_limits`: лимиты количества variant jobs по mode (`types/indexes/...`).
+- `index_granularity_values`: список значений для `SETTINGS index_granularity`.
+  Для `indexes`/`combined`/sequential-index-stage участвует в декартовом произведении
+  с вариантами skip-индексов.
+  Если в исходном DDL уже был `SETTINGS index_granularity`, он корректно заменяется:
+  в итоговом variant-DDL ключ остаётся один (без конфликтующих дублей).
 
 Примечание: старые ключи (`max_iterations`, `sequential_top_n`, `insert_rows_limit`,
 `source_insert_rows_limit`, `insert_rows_limits`, `max_type_benchmarks`,
@@ -816,6 +850,7 @@ print(run_id)
 - `insert_rows_per_operation_limit`, `insert_rows_per_operation_limits`
 - `source_insert_rows_per_operation_limit`, `source_insert_rows_per_operation_limits`
 - `max_benchmarks_limits`
+- `index_granularity_values`
 
 `strategy`:
 - `types_strategy`

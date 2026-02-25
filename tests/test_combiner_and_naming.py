@@ -1,3 +1,4 @@
+import re
 import unittest
 
 from src.clickhouse_ddl import TableDDL
@@ -22,6 +23,17 @@ CREATE TABLE analytics.events
 )
 ENGINE = MergeTree
 ORDER BY (user_id, event_time)
+"""
+
+DDL_WITH_INDEX_GRANULARITY = """
+CREATE TABLE analytics.events_with_settings
+(
+    `user_id` UInt64 CODEC(Delta(8), LZ4),
+    `event_time` DateTime CODEC(DoubleDelta, ZSTD(1))
+)
+ENGINE = MergeTree
+ORDER BY (user_id, event_time)
+SETTINGS index_granularity = 8192, allow_nullable_key = 1
 """
 
 
@@ -166,6 +178,84 @@ class CombinerAndNamingTests(unittest.TestCase):
         _, meta_second_reversed = prioritized_user_id[1]
         self.assertIsNotNone(meta_second_reversed.index_choices["event_time"])
         self.assertIsNone(meta_second_reversed.index_choices["user_id"])
+
+    def test_indexes_mode_crosses_with_table_index_granularity_values(self) -> None:
+        """Проверяет декартово произведение index-вариантов и SETTINGS index_granularity."""
+        total = total_variants(
+            self.table,
+            mode="indexes",
+            column_rules=self.column_rules,
+            index_rules=self.index_rules,
+            table_index_granularity_values=[8192, 16384],
+        )
+        self.assertEqual(total, 6)  # (2 variants + None) * 2 granularity values
+
+        variants = list(
+            iter_variants(
+                self.table,
+                mode="indexes",
+                column_rules=self.column_rules,
+                index_rules=self.index_rules,
+                table_index_granularity_values=[8192, 16384],
+            )
+        )
+        self.assertEqual(len(variants), 6)
+
+        granularities = {
+            meta.table_index_granularity
+            for _, meta in variants
+        }
+        self.assertEqual(granularities, {8192, 16384})
+        self.assertTrue(
+            all("SETTINGS index_granularity =" in variant.to_ddl() for variant, _ in variants)
+        )
+
+    def test_combined_mode_crosses_with_table_index_granularity_values(self) -> None:
+        """Проверяет, что combined учитывает table index_granularity в общем числе вариантов."""
+        total = total_variants(
+            self.table,
+            mode="combined",
+            column_rules=self.column_rules,
+            index_rules=self.index_rules,
+            table_index_granularity_values=[8192, 16384],
+        )
+        self.assertEqual(total, 24)  # 4 column variants * ((2 + None) * 2)
+
+    def test_generated_variants_keep_single_valid_index_granularity_assignment(self) -> None:
+        """Проверяет, что при исходном SETTINGS index_granularity нет конфликтов в variants."""
+        table = TableDDL.from_ddl(DDL_WITH_INDEX_GRANULARITY)
+        variants = list(
+            iter_variants(
+                table,
+                mode="indexes",
+                column_rules=self.column_rules,
+                index_rules=self.index_rules,
+                table_index_granularity_values=[4096, 16384],
+            )
+        )
+
+        for variant, meta in variants:
+            rendered = variant.to_ddl()
+            self.assertEqual(
+                len(
+                    re.findall(
+                        r"index_granularity\s*=",
+                        rendered,
+                        flags=re.IGNORECASE,
+                    )
+                ),
+                1,
+            )
+            if meta.table_index_granularity is not None:
+                self.assertIn(
+                    f"index_granularity = {meta.table_index_granularity}",
+                    rendered,
+                )
+            reparsed = TableDDL.from_ddl(rendered)
+            self.assertEqual(
+                reparsed.get_index_granularity(),
+                meta.table_index_granularity,
+            )
 
     def test_variant_name_roundtrip(self) -> None:
         """Проверяет, что variant name roundtrip."""

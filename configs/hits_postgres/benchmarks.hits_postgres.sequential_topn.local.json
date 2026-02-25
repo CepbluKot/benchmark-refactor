@@ -28,6 +28,9 @@
         "indexes": 30,
         "sequential": 30
       },
+      "index_granularity_values": [
+        8192
+      ],
       "source_insert_rows_per_operation_limits": {
         "sequential": 300000
       },
@@ -40,13 +43,11 @@
         "column_rules": [
           {
             "by_type": "String",
+            "auto_generate_alternatives": true,
+            "auto_compressions_datatype": "String",
             "types": [
               "String",
               "LowCardinality(String)"
-            ],
-            "codecs": [
-              "CODEC(LZ4)",
-              "CODEC(ZSTD(1))"
             ]
           }
         ],

@@ -3176,7 +3176,33 @@ if app is not None:
     @app.task(name=VARIANT_BENCHMARK_TASK_NAME, ignore_result=True)
     def variant_benchmark_task(payload: Dict[str, Any]) -> Dict[str, Any]:
         """Celery task: benchmark варианта таблицы + сохранение результата."""
-        typed_payload = VariantBenchmarkTaskPayload.model_validate(payload)
+        raw_context = {
+            "benchmark_run_id": payload.get("benchmark_run_id"),
+            "benchmark_id": payload.get("benchmark_id"),
+            "variant_mode": payload.get("variant_mode"),
+            "variant_database": payload.get("variant_database"),
+            "variant_table": payload.get("variant_table"),
+        }
+
+        try:
+            typed_payload = VariantBenchmarkTaskPayload.model_validate(payload)
+        except Exception as exc:
+            # Важный guard: невалидный payload не должен валить pipeline.
+            logger.exception(
+                "Celery worker: пропуск variant task из-за невалидного payload "
+                "(benchmark_run_id=%s, benchmark_id=%s, mode=%s, table=%s.%s)",
+                raw_context["benchmark_run_id"],
+                raw_context["benchmark_id"],
+                raw_context["variant_mode"],
+                raw_context["variant_database"],
+                raw_context["variant_table"],
+            )
+            return {
+                "status": "skipped_invalid_variant_payload",
+                "error": str(exc),
+                **raw_context,
+            }
+
         logger.info(
             "Celery worker: старт variant task "
             "(benchmark_run_id=%d, benchmark_id=%s, mode=%s, table=%s.%s)",
@@ -3186,5 +3212,29 @@ if app is not None:
             typed_payload.variant_database,
             typed_payload.variant_table,
         )
-        result = run_variant_benchmark(typed_payload)
+
+        try:
+            result = run_variant_benchmark(typed_payload)
+        except Exception as exc:
+            # Важный guard: невалидный/ошибочный вариант считается пропущенным,
+            # чтобы общий benchmark не зависал и progress учитывал задачу.
+            logger.exception(
+                "Celery worker: пропуск variant task из-за ошибки выполнения "
+                "(benchmark_run_id=%d, benchmark_id=%s, mode=%s, table=%s.%s)",
+                typed_payload.benchmark_run_id,
+                typed_payload.benchmark_id,
+                typed_payload.variant_mode,
+                typed_payload.variant_database,
+                typed_payload.variant_table,
+            )
+            return {
+                "status": "skipped_invalid_variant",
+                "error": str(exc),
+                "benchmark_run_id": typed_payload.benchmark_run_id,
+                "benchmark_id": typed_payload.benchmark_id,
+                "variant_mode": typed_payload.variant_mode,
+                "variant_database": typed_payload.variant_database,
+                "variant_table": typed_payload.variant_table,
+            }
+
         return result.model_dump(mode="json")

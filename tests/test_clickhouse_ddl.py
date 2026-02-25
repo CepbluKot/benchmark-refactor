@@ -1,3 +1,4 @@
+import re
 import unittest
 
 from src.clickhouse_ddl import IndexDef, TableDDL
@@ -80,6 +81,27 @@ CREATE TABLE analytics.comments_test
 ENGINE = MergeTree
 ORDER BY (user_id, ts)
 ;
+"""
+
+MULTI_GRANULARITY_SETTINGS_DDL = """
+CREATE TABLE analytics.multi_granularity_settings
+(
+    `x` UInt64
+)
+ENGINE = MergeTree
+ORDER BY x
+SETTINGS index_granularity = 8192, allow_nullable_key = 1, index_granularity = 4096
+"""
+
+MULTI_SETTINGS_BLOCKS_DDL = """
+CREATE TABLE analytics.multi_settings_blocks
+(
+    `x` UInt64
+)
+ENGINE = MergeTree
+ORDER BY x
+SETTINGS index_granularity = 8192
+SETTINGS allow_nullable_key = 1, index_granularity = 4096
 """
 
 
@@ -242,6 +264,46 @@ class ClickHouseDDLTests(unittest.TestCase):
         """
         with self.assertRaises(ValueError):
             TableDDL.from_ddl(bad_ddl)
+
+    def test_set_index_granularity_updates_existing_settings(self) -> None:
+        """Проверяет обновление существующего SETTINGS index_granularity."""
+        table = TableDDL.from_ddl(COMPLEX_DDL)
+        self.assertEqual(table.get_index_granularity(), 8192)
+
+        table.set_index_granularity(16384)
+
+        self.assertEqual(table.get_index_granularity(), 16384)
+        self.assertIn("SETTINGS index_granularity = 16384", table.to_ddl())
+
+    def test_set_index_granularity_adds_settings_when_missing(self) -> None:
+        """Проверяет добавление SETTINGS index_granularity при его отсутствии."""
+        table = TableDDL.from_ddl(DDL)
+        self.assertIsNone(table.get_index_granularity())
+
+        table.set_index_granularity(4096)
+
+        self.assertEqual(table.get_index_granularity(), 4096)
+        self.assertIn("SETTINGS index_granularity = 4096", table.to_ddl())
+
+    def test_set_index_granularity_deduplicates_assignments_in_one_settings_block(self) -> None:
+        """Проверяет дедупликацию index_granularity в одном SETTINGS-блоке."""
+        table = TableDDL.from_ddl(MULTI_GRANULARITY_SETTINGS_DDL)
+        table.set_index_granularity(16384)
+
+        rendered = table.to_ddl()
+        self.assertEqual(len(re.findall(r"index_granularity\s*=", rendered, flags=re.IGNORECASE)), 1)
+        self.assertIn("allow_nullable_key = 1", rendered)
+        self.assertEqual(table.get_index_granularity(), 16384)
+
+    def test_set_index_granularity_removes_conflicts_from_all_settings_blocks(self) -> None:
+        """Проверяет, что index_granularity не конфликтует даже при нескольких SETTINGS-блоках."""
+        table = TableDDL.from_ddl(MULTI_SETTINGS_BLOCKS_DDL)
+        table.set_index_granularity(12288)
+
+        rendered = table.to_ddl()
+        self.assertEqual(len(re.findall(r"index_granularity\s*=", rendered, flags=re.IGNORECASE)), 1)
+        reparsed = TableDDL.from_ddl(rendered)
+        self.assertEqual(reparsed.get_index_granularity(), 12288)
 
 
 if __name__ == "__main__":

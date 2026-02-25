@@ -236,6 +236,7 @@ def _iter_index_jobs_from_top_variants(
             column_rules=table_plan.rules.column_rules,
             index_rules=table_plan.rules.index_rules,
             column_order=effective_column_order,
+            table_index_granularity_values=table_plan.index_granularity_values,
             max_iterations=index_generation_limit,
         )
 
@@ -245,6 +246,7 @@ def _iter_index_jobs_from_top_variants(
             column_rules=table_plan.rules.column_rules,
             index_rules=table_plan.rules.index_rules,
             column_order=effective_column_order,
+            table_index_granularity_values=table_plan.index_granularity_values,
             max_iterations=index_generation_limit,
         ):
             index_meta.global_index = next_global_index

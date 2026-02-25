@@ -19,6 +19,10 @@
       "insert_operations_count": 5,
       "insert_rows_per_operation_limit": 5000000,
       "source_insert_rows_per_operation_limit": 1200000,
+      "index_granularity_values": [
+        8192,
+        16384
+      ],
       "scoring": {
         "mode": "expression",
         "expression": "0.6 * safe_div(source_select_time_ms_by_percentile[100], tested_select_time_ms_by_percentile[100]) + 0.3 * safe_div(source_insert_time_ms_percentiles[1], tested_insert_time_ms_percentiles[1]) + 0.1 * coalesce(compression_overall_coef, 0)",
@@ -75,6 +79,7 @@
             "index_rules": [
               {
                 "by_type": "Nullable(Decimal(18,4))",
+                "auto_generate_indexes": true,
                 "indexes": [
                   {
                     "type": "bloom_filter(0.01)",

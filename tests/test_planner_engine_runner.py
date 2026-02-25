@@ -408,6 +408,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             ),
             insert_rows_limit=1_000_000,
             source_insert_rows_limit=600_000,
+            index_granularity_values=[8192, 16384],
             source_insert_rows_limits=InsertRowsLimitsConfig(sequential=500_000),
             insert_rows_limits=InsertRowsLimitsConfig(
                 types=400_000,
@@ -436,6 +437,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                     ),
                     insert_rows_limit=25_000,
                     source_insert_rows_limit=120_000,
+                    index_granularity_values=[4096, 8192, 4096],
                     source_insert_rows_limits=InsertRowsLimitsConfig(sequential=90_000),
                     insert_rows_limits=InsertRowsLimitsConfig(
                         indexes=50_000,
@@ -493,6 +495,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(plan.insert_rows_limits.indexes, 50_000)
         self.assertEqual(plan.insert_rows_limits.combined, 800_000)
         self.assertEqual(plan.insert_rows_limits.sequential, 70_000)
+        self.assertEqual(plan.index_granularity_values, [4096, 8192])
         self.assertEqual(plan.scoring.mode, "expression")
         self.assertEqual(plan.scoring.expression, "2.5")
         self.assertEqual(plan.queries.mode, "manual")
@@ -1272,6 +1275,58 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertTrue(
             result_store.records[0].tested_table_ddl.startswith("CREATE TABLE")
         )
+
+    def test_runner_propagates_table_index_granularity_to_variant_params(self) -> None:
+        """Проверяет, что table index_granularity проходит в variant_params и DDL."""
+        benchmark = BenchmarkConfig(
+            id="bench_index_granularity_variant_params",
+            connection_id="prod_ch",
+            strategy="indexes_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            index_granularity_values=[8192, 16384],
+            global_rules=RulesConfig(
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt64",
+                        indexes=[IndexConfig(type="minmax", granularity=4)],
+                    )
+                ]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = RecordingExecutionAdapter()
+        result_store = InMemoryBenchmarkResultStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+        )
+
+        run_id = runner.run()
+
+        self.assertEqual(run_id, 1)
+        # Для одного column-rule в indexes режиме: (1 index + None) * 2 granularity = 4.
+        self.assertEqual(len(adapter.executed_jobs), 4)
+        self.assertEqual(len(result_store.records), 4)
+
+        granularities = {
+            record.variant_params.get("table_index_granularity")
+            for record in result_store.records
+        }
+        self.assertEqual(granularities, {8192, 16384})
+        for record in result_store.records:
+            table_index_granularity = record.variant_params.get("table_index_granularity")
+            self.assertIsInstance(table_index_granularity, int)
+            self.assertIn(
+                f"SETTINGS index_granularity = {table_index_granularity}",
+                record.tested_table_ddl,
+            )
 
     def test_runner_executes_source_benchmark_before_variants_and_propagates_it(self) -> None:
         """Проверяет baseline на source DDL и его прокидывание в variant jobs."""

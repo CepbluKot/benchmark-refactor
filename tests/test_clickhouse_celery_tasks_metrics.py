@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
+from src.benchmark_runtime.implementations.clickhouse_celery import tasks as celery_tasks_module
 from src.benchmark_runtime.implementations.clickhouse_celery.common import (
     make_readable_bytes,
 )
@@ -213,6 +214,42 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             login="default",
             password="secret",
         )
+
+    def _variant_task_payload_dict(self) -> Dict[str, Any]:
+        """Возвращает минимальный валидный payload для variant Celery task."""
+        started_at = datetime(2026, 2, 24, 12, 0, tzinfo=timezone.utc).isoformat()
+        return {
+            "connection": {
+                "host": "localhost",
+                "port": 9000,
+                "login": "default",
+                "password": "secret",
+            },
+            "result_connection": {
+                "host": "localhost",
+                "port": 9000,
+                "login": "default",
+                "password": "secret",
+            },
+            "result_database": "benchmark_results",
+            "result_table": "combined_benchmark_results",
+            "benchmark_run_id": 101,
+            "benchmark_started_at": started_at,
+            "benchmark_id": "bench_variant_task",
+            "source_database": "analytics",
+            "source_table": "events",
+            "variant_database": "bench_tmp",
+            "variant_table": "events__bench__bench_var__0001",
+            "variant_mode": "types",
+            "variant_params": {},
+            "variant_ddl": VALID_VARIANT_DDL,
+            "max_iterations": 1,
+            "insert_rows_limit": 1000,
+            "query_plan": {
+                "warmup_queries": [],
+                "test_queries": ["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
+            },
+        }
 
     def test_run_source_benchmark_calculates_metrics_and_baseline_score(self) -> None:
         fake_client = _FakeRuntimeClient(
@@ -1929,6 +1966,34 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
                 "DELETE FROM analytics.events",
                 query_tag="select-test",
             )
+
+    def test_variant_task_skips_invalid_payload_without_crash(self) -> None:
+        variant_task = getattr(celery_tasks_module, "variant_benchmark_task", None)
+        if variant_task is None:
+            self.skipTest("Celery app/task недоступны в текущем окружении")
+
+        result = variant_task({"benchmark_id": "bench_invalid_payload"})
+
+        self.assertEqual(result["status"], "skipped_invalid_variant_payload")
+        self.assertEqual(result.get("benchmark_id"), "bench_invalid_payload")
+
+    def test_variant_task_skips_failed_variant_without_crash(self) -> None:
+        variant_task = getattr(celery_tasks_module, "variant_benchmark_task", None)
+        if variant_task is None:
+            self.skipTest("Celery app/task недоступны в текущем окружении")
+
+        payload = self._variant_task_payload_dict()
+        with patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks.run_variant_benchmark",
+            side_effect=RuntimeError("synthetic variant failure"),
+        ):
+            result = variant_task(payload)
+
+        self.assertEqual(result["status"], "skipped_invalid_variant")
+        self.assertEqual(result["benchmark_run_id"], 101)
+        self.assertEqual(result["benchmark_id"], "bench_variant_task")
+        self.assertEqual(result["variant_table"], "events__bench__bench_var__0001")
+        self.assertIn("synthetic variant failure", result["error"])
 
 
 if __name__ == "__main__":

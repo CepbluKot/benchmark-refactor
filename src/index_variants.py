@@ -28,6 +28,34 @@ class IndexVariantMeta(BaseModel):
     index: int
     # {col_name: IndexDef | None}  None = индекс не добавлен для этой колонки
     index_choices: Dict[str, Optional[IndexDef]]
+    table_index_granularity: Optional[int] = None
+
+
+def _normalize_table_index_granularity_values(
+    values: Optional[List[int]],
+) -> List[Optional[int]]:
+    """
+    Нормализует список перебора `SETTINGS index_granularity`.
+
+    Возвращает:
+      - `[None]`, если список не задан (без изменений DDL);
+      - дедуплицированный список `int > 0`, если задан.
+    """
+    if values is None:
+        return [None]
+    deduplicated: list[Optional[int]] = []
+    seen: set[int] = set()
+    for value in values:
+        numeric = int(value)
+        if numeric <= 0:
+            raise ValueError("table index_granularity должен быть > 0")
+        if numeric in seen:
+            continue
+        seen.add(numeric)
+        deduplicated.append(numeric)
+    if not deduplicated:
+        return [None]
+    return deduplicated
 
 
 # ─── внутренний резолвинг ────────────────────────────────────────────────────
@@ -64,6 +92,7 @@ def iter_index_variants(
     table: TableDDL,
     rules: List[IndexRule],
     column_order: Optional[Dict[str, int]] = None,
+    table_index_granularity_values: Optional[List[int]] = None,
 ) -> Generator[Tuple[TableDDL, IndexVariantMeta], None, None]:
     """
     Генерирует все варианты TableDDL с разными наборами skip-индексов.
@@ -76,9 +105,22 @@ def iter_index_variants(
     Yields: (variant_table, meta)
     """
     resolved = _resolve_index_columns(table, rules, column_order=column_order)
+    granularity_values = _normalize_table_index_granularity_values(
+        table_index_granularity_values
+    )
 
     if not resolved:
-        yield table.copy(), IndexVariantMeta(index=0, index_choices={})
+        current_idx = 0
+        for table_index_granularity in granularity_values:
+            variant = table.copy()
+            if table_index_granularity is not None:
+                variant.set_index_granularity(table_index_granularity)
+            yield variant, IndexVariantMeta(
+                index=current_idx,
+                index_choices={},
+                table_index_granularity=table_index_granularity,
+            )
+            current_idx += 1
         return
 
     col_names = [name for name, _ in resolved]
@@ -92,13 +134,14 @@ def iter_index_variants(
             col_variants.append(idx_def)
         variant_lists.append(col_variants)
 
-    for global_idx, combo in enumerate(itertools.product(*variant_lists)):
-        variant = table.copy()
+    global_idx = 0
+    for combo in itertools.product(*variant_lists):
+        base_variant = table.copy()
 
         # Убираем все старые индексы для matched-колонок, оставляем остальные
         matched_exprs = set(col_names)
         kept_indexes = [
-            idx for idx in variant.indexes
+            idx for idx in base_variant.indexes
             if idx.expr not in matched_exprs
         ]
 
@@ -110,19 +153,32 @@ def iter_index_variants(
             if idx_def is not None:
                 new_indexes.append(deepcopy(idx_def))
 
-        variant.indexes = new_indexes
+        base_variant.indexes = new_indexes
 
-        yield variant, IndexVariantMeta(index=global_idx, index_choices=choices)
+        for table_index_granularity in granularity_values:
+            variant = base_variant.copy()
+            if table_index_granularity is not None:
+                variant.set_index_granularity(table_index_granularity)
+            yield variant, IndexVariantMeta(
+                index=global_idx,
+                index_choices=deepcopy(choices),
+                table_index_granularity=table_index_granularity,
+            )
+            global_idx += 1
 
 
 def total_index_variants(
     table: TableDDL,
     rules: List[IndexRule],
     column_order: Optional[Dict[str, int]] = None,
+    table_index_granularity_values: Optional[List[int]] = None,
 ) -> int:
     """Количество вариантов (включая «без индекса» для каждой колонки)."""
     resolved = _resolve_index_columns(table, rules, column_order=column_order)
+    granularity_values = _normalize_table_index_granularity_values(
+        table_index_granularity_values
+    )
     n = 1
     for _, alt in resolved:
         n *= (alt.total() + 1)  # +1 за вариант None
-    return n
+    return n * len(granularity_values)

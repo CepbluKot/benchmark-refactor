@@ -72,6 +72,7 @@ class TableBenchmarkPlan(_FrozenModel):
     max_benchmarks_limits: Optional[InsertRowsLimitsConfig] = None
     max_type_benchmarks: Optional[int] = None
     max_index_benchmarks: Optional[int] = None
+    index_granularity_values: Optional[List[int]] = None
     column_order_mode: Optional[ColumnOrderMode]
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     rules: ResolvedRules
@@ -579,6 +580,7 @@ def build_variant_params(variant_meta: VariantMeta) -> Dict[str, Any]:
     return {
         "mode": variant_meta.mode,
         "global_index": variant_meta.global_index,
+        "table_index_granularity": variant_meta.table_index_granularity,
         "column_choices": column_choices,
         "index_choices": index_choices,
     }

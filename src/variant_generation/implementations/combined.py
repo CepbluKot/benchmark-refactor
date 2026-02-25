@@ -24,23 +24,33 @@ class CombinedVariantGenerationStrategy(VariantGenerationStrategy):
         column_rules: List[ColumnRule],
         index_rules: List[IndexRule],
         column_order: Optional[Dict[str, int]] = None,
+        table_index_granularity_values: Optional[List[int]] = None,
     ) -> Iterable[Tuple[TableDDL, VariantMeta]]:
         index_variants_list = list(
-            iter_index_variants(table, index_rules, column_order=column_order)
+            iter_index_variants(
+                table,
+                index_rules,
+                column_order=column_order,
+                table_index_granularity_values=table_index_granularity_values,
+            )
         )
         for col_variant, col_meta in iter_column_variants(table, column_rules, column_order):
             for idx_variant_base, idx_meta_base in index_variants_list:
                 combined = col_variant.copy()
                 combined.indexes = [idx for idx in idx_variant_base.indexes]
+                if idx_meta_base.table_index_granularity is not None:
+                    combined.set_index_granularity(idx_meta_base.table_index_granularity)
                 final_idx_meta = IndexVariantMeta(
                     index=idx_meta_base.index,
                     index_choices=deepcopy(idx_meta_base.index_choices),
+                    table_index_granularity=idx_meta_base.table_index_granularity,
                 )
                 yield combined, VariantMeta(
                     global_index=0,
                     mode="combined",
                     column_meta=col_meta,
                     index_meta=final_idx_meta,
+                    table_index_granularity=idx_meta_base.table_index_granularity,
                 )
 
     def total_variants(
@@ -49,7 +59,13 @@ class CombinedVariantGenerationStrategy(VariantGenerationStrategy):
         column_rules: List[ColumnRule],
         index_rules: List[IndexRule],
         column_order: Optional[Dict[str, int]] = None,
+        table_index_granularity_values: Optional[List[int]] = None,
     ) -> int:
         col_total = total_column_variants(table, column_rules, column_order)
-        idx_total = total_index_variants(table, index_rules, column_order)
+        idx_total = total_index_variants(
+            table,
+            index_rules,
+            column_order,
+            table_index_granularity_values=table_index_granularity_values,
+        )
         return col_total * idx_total

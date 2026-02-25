@@ -15,6 +15,7 @@ class VariantMeta(BaseModel):
 
     global_index: int
     mode: str
+    table_index_granularity: Optional[int] = None
     column_meta: Optional[ColumnVariantMeta] = None
     index_meta: Optional[IndexVariantMeta] = None
 

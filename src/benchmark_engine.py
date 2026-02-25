@@ -350,6 +350,11 @@ class BenchmarkPlanner:
                     if table_rule and table_rule.max_index_benchmarks is not None
                     else benchmark.max_index_benchmarks
                 )
+                index_granularity_values = (
+                    table_rule.index_granularity_values
+                    if table_rule and table_rule.index_granularity_values is not None
+                    else benchmark.index_granularity_values
+                )
                 max_benchmarks_limits = self._merge_insert_rows_limits(
                     benchmark_insert_rows_limits=benchmark.max_benchmarks_limits,
                     table_insert_rows_limits=(
@@ -400,6 +405,7 @@ class BenchmarkPlanner:
                     max_benchmarks_limits=max_benchmarks_limits,
                     max_type_benchmarks=max_type_benchmarks,
                     max_index_benchmarks=max_index_benchmarks,
+                    index_granularity_values=index_granularity_values,
                     column_order_mode=column_order_mode,
                     scoring=scoring,
                     rules=resolved_rules,
@@ -801,6 +807,7 @@ class BenchmarkEngine:
             column_rules=table_plan.rules.column_rules,
             index_rules=table_plan.rules.index_rules,
             column_order=effective_column_order,
+            table_index_granularity_values=table_plan.index_granularity_values,
             max_iterations=variant_generation_limit,
         )
         logger.info(
@@ -827,6 +834,7 @@ class BenchmarkEngine:
             column_rules=table_plan.rules.column_rules,
             index_rules=table_plan.rules.index_rules,
             column_order=effective_column_order,
+            table_index_granularity_values=table_plan.index_granularity_values,
             max_iterations=variant_generation_limit,
         ):
             yield self.build_variant_job(

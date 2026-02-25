@@ -42,6 +42,24 @@ STRATEGY_TO_MODE: Dict[BenchmarkStrategy, BenchmarkMode] = {
 }
 
 
+def _normalize_positive_int_sequence(values: Optional[List[int]]) -> Optional[List[int]]:
+    """Нормализует список положительных int: trim/дедупликация с сохранением порядка."""
+    if values is None:
+        return None
+    if not values:
+        raise ValueError("список не должен быть пустым")
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("каждое значение должно быть целым числом > 0")
+        if value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
 class _Base(BaseModel):
     """Базовая модель конфига: запрещает неизвестные поля."""
 
@@ -59,6 +77,22 @@ class ColumnRuleConfig(_Base):
     by_name: Optional[str] = None
     types: List[str] = Field(default_factory=list)
     codecs: List[str] = Field(default_factory=list)
+    auto_generate_alternatives: bool = False
+    auto_compressions_datatype: Optional[str] = None
+
+    @field_validator("auto_compressions_datatype")
+    @classmethod
+    def normalize_auto_compressions_datatype(
+        cls,
+        value: Optional[str],
+    ) -> Optional[str]:
+        """Нормализует hint datatype для legacy-автогенерации кодеков."""
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("auto_compressions_datatype не должен быть пустым")
+        return cleaned
 
     @model_validator(mode="after")
     def check_matchers(self) -> "ColumnRuleConfig":
@@ -94,6 +128,22 @@ class IndexRuleConfig(_Base):
     by_type: Optional[str] = None
     by_name: Optional[str] = None
     indexes: List[IndexConfig] = Field(default_factory=list)
+    auto_generate_indexes: bool = False
+    auto_indexes_datatype: Optional[str] = None
+
+    @field_validator("auto_indexes_datatype")
+    @classmethod
+    def normalize_auto_indexes_datatype(
+        cls,
+        value: Optional[str],
+    ) -> Optional[str]:
+        """Нормализует hint datatype для авто-генерации индексов."""
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("auto_indexes_datatype не должен быть пустым")
+        return cleaned
 
     @model_validator(mode="after")
     def check_matchers(self) -> "IndexRuleConfig":
@@ -322,6 +372,7 @@ class TableRuleConfig(_Base):
       - insert_rows_per_operation_limits (legacy: insert_rows_limits);
       - max_benchmarks_limits;
       - max_type_benchmarks/max_index_benchmarks (legacy compatibility);
+      - index_granularity_values (перебор `SETTINGS index_granularity`);
       - test_database;
       - strategy;
       - queries.
@@ -387,6 +438,14 @@ class TableRuleConfig(_Base):
     max_benchmarks_limits: Optional[InsertRowsLimitsConfig] = None
     max_type_benchmarks: Optional[int] = Field(default=None, gt=0)
     max_index_benchmarks: Optional[int] = Field(default=None, gt=0)
+    index_granularity_values: Optional[List[int]] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "index_granularity_values",
+            "table_index_granularity_values",
+        ),
+        serialization_alias="index_granularity_values",
+    )
     strategy: Optional[BenchmarkStrategy] = None
 
     @field_validator("database", "table")
@@ -408,6 +467,15 @@ class TableRuleConfig(_Base):
         if not cleaned:
             raise ValueError("test_database не должен быть пустым")
         return cleaned
+
+    @field_validator("index_granularity_values")
+    @classmethod
+    def normalize_index_granularity_values(
+        cls,
+        values: Optional[List[int]],
+    ) -> Optional[List[int]]:
+        """Проверяет список перебора `SETTINGS index_granularity`."""
+        return _normalize_positive_int_sequence(values)
 
 
 class ConnectionConfig(_Base):
@@ -455,6 +523,8 @@ class BenchmarkConfig(_Base):
         лимиты копирования за один insert-замер по конкретным mode.
       - `max_benchmarks_limits` — лимиты числа variant jobs по mode.
       - `max_type_benchmarks`/`max_index_benchmarks` — legacy-совместимость.
+      - `index_granularity_values` — перебор `SETTINGS index_granularity`
+        (декартово произведение с индексными вариантами).
       - `test_database` — БД для создания variant-таблиц (по умолчанию source БД).
     """
 
@@ -521,6 +591,14 @@ class BenchmarkConfig(_Base):
     max_benchmarks_limits: Optional[InsertRowsLimitsConfig] = None
     max_type_benchmarks: Optional[int] = Field(default=None, gt=0)
     max_index_benchmarks: Optional[int] = Field(default=None, gt=0)
+    index_granularity_values: Optional[List[int]] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "index_granularity_values",
+            "table_index_granularity_values",
+        ),
+        serialization_alias="index_granularity_values",
+    )
     column_rules_mode: Optional[RuleSourceMode] = None
     index_rules_mode: Optional[RuleSourceMode] = None
     queries: QueriesConfig = Field(default_factory=QueriesConfig)
@@ -536,6 +614,15 @@ class BenchmarkConfig(_Base):
         if not cleaned:
             raise ValueError("test_database не должен быть пустым")
         return cleaned
+
+    @field_validator("index_granularity_values")
+    @classmethod
+    def normalize_index_granularity_values(
+        cls,
+        values: Optional[List[int]],
+    ) -> Optional[List[int]]:
+        """Проверяет список перебора `SETTINGS index_granularity`."""
+        return _normalize_positive_int_sequence(values)
 
     @model_validator(mode="after")
     def validate_selectors(self) -> "BenchmarkConfig":
