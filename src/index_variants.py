@@ -33,17 +33,16 @@ class IndexVariantMeta(BaseModel):
 
 def _normalize_table_index_granularity_values(
     values: Optional[List[int]],
-) -> List[Optional[int]]:
+) -> List[int]:
     """
     Нормализует список перебора `SETTINGS index_granularity`.
 
-    Возвращает:
-      - `[None]`, если список не задан (без изменений DDL);
-      - дедуплицированный список `int > 0`, если задан.
+    Возвращает дедуплицированный список `int > 0`.
+    Если список не задан — возвращает пустой список (ограничений нет).
     """
     if values is None:
-        return [None]
-    deduplicated: list[Optional[int]] = []
+        return []
+    deduplicated: list[int] = []
     seen: set[int] = set()
     for value in values:
         numeric = int(value)
@@ -53,12 +52,44 @@ def _normalize_table_index_granularity_values(
             continue
         seen.add(numeric)
         deduplicated.append(numeric)
-    if not deduplicated:
-        return [None]
     return deduplicated
 
 
 # ─── внутренний резолвинг ────────────────────────────────────────────────────
+
+def _resolve_effective_table_index_granularity_values(
+    global_values: List[int],
+    selected_constraints: List[Optional[List[int]]],
+) -> List[Optional[int]]:
+    """
+    Возвращает эффективный список `SETTINGS index_granularity` для выбранного combo.
+
+    Правила:
+      - если ограничений нет вообще -> `[None]` (DDL без изменения SETTINGS);
+      - если задан global список -> база берётся из него;
+      - если global не задан, но есть per-index списки -> база берётся из первого per-index;
+      - итоговый список — пересечение всех ограничений с сохранением порядка базы.
+    """
+    explicit_constraints = [values for values in selected_constraints if values is not None]
+
+    if not global_values and not explicit_constraints:
+        return [None]
+
+    ordered_base: List[int]
+    if global_values:
+        ordered_base = list(global_values)
+    else:
+        # explicit_constraints не пустой, иначе мы бы вернули [None] выше.
+        ordered_base = list(explicit_constraints[0])
+
+    allowed = set(ordered_base)
+    for values in explicit_constraints:
+        allowed &= set(values)
+
+    resolved = [value for value in ordered_base if value in allowed]
+    if not resolved:
+        return []
+    return resolved
 
 def _resolve_index_columns(
     table: TableDDL,
@@ -105,13 +136,14 @@ def iter_index_variants(
     Yields: (variant_table, meta)
     """
     resolved = _resolve_index_columns(table, rules, column_order=column_order)
-    granularity_values = _normalize_table_index_granularity_values(
+    global_granularity_values = _normalize_table_index_granularity_values(
         table_index_granularity_values
     )
 
     if not resolved:
         current_idx = 0
-        for table_index_granularity in granularity_values:
+        effective_granularity_values = global_granularity_values or [None]
+        for table_index_granularity in effective_granularity_values:
             variant = table.copy()
             if table_index_granularity is not None:
                 variant.set_index_granularity(table_index_granularity)
@@ -124,14 +156,25 @@ def iter_index_variants(
         return
 
     col_names = [name for name, _ in resolved]
-    # Для каждой колонки список Optional[IndexDef]
-    # None добавляем в начало — вариант «без индекса для этой колонки»
-    variant_lists: List[List[Optional[IndexDef]]] = []
+    # Для каждой колонки: (IndexDef|None, per-index table index_granularity values|None)
+    # None добавляем в начало — вариант «без индекса для этой колонки».
+    variant_lists: List[List[Tuple[Optional[IndexDef], Optional[List[int]]]]] = []
     for col_name, alt in resolved:
         col = table.column(col_name)
-        col_variants: List[Optional[IndexDef]] = [None]  # без индекса
-        for idx_def in alt.iter_variants(col):
-            col_variants.append(idx_def)
+        col_variants: List[Tuple[Optional[IndexDef], Optional[List[int]]]] = [
+            (None, None)
+        ]
+        for idx_num, index_variant in enumerate(alt.variants):
+            col_variants.append(
+                (
+                    index_variant.to_index_def(col, idx_num),
+                    (
+                        list(index_variant.table_index_granularity_values)
+                        if index_variant.table_index_granularity_values is not None
+                        else None
+                    ),
+                )
+            )
         variant_lists.append(col_variants)
 
     global_idx = 0
@@ -147,15 +190,26 @@ def iter_index_variants(
 
         choices: Dict[str, Optional[IndexDef]] = {}
         new_indexes = list(kept_indexes)
+        selected_granularity_constraints: List[Optional[List[int]]] = []
 
-        for col_name, idx_def in zip(col_names, combo):
+        for col_name, (idx_def, per_index_granularity_values) in zip(col_names, combo):
             choices[col_name] = deepcopy(idx_def) if idx_def else None
             if idx_def is not None:
                 new_indexes.append(deepcopy(idx_def))
+                selected_granularity_constraints.append(
+                    deepcopy(per_index_granularity_values)
+                )
 
         base_variant.indexes = new_indexes
 
-        for table_index_granularity in granularity_values:
+        effective_granularity_values = _resolve_effective_table_index_granularity_values(
+            global_values=global_granularity_values,
+            selected_constraints=selected_granularity_constraints,
+        )
+        if not effective_granularity_values:
+            continue
+
+        for table_index_granularity in effective_granularity_values:
             variant = base_variant.copy()
             if table_index_granularity is not None:
                 variant.set_index_granularity(table_index_granularity)
@@ -175,10 +229,40 @@ def total_index_variants(
 ) -> int:
     """Количество вариантов (включая «без индекса» для каждой колонки)."""
     resolved = _resolve_index_columns(table, rules, column_order=column_order)
-    granularity_values = _normalize_table_index_granularity_values(
+    global_granularity_values = _normalize_table_index_granularity_values(
         table_index_granularity_values
     )
-    n = 1
+    if not resolved:
+        return len(global_granularity_values) if global_granularity_values else 1
+
+    has_per_index_constraints = any(
+        variant.table_index_granularity_values is not None
+        for _, alt in resolved
+        for variant in alt.variants
+    )
+    if not has_per_index_constraints:
+        n = 1
+        for _, alt in resolved:
+            n *= (alt.total() + 1)  # +1 за вариант None
+        granularity_multiplier = len(global_granularity_values) if global_granularity_values else 1
+        return n * granularity_multiplier
+
+    variant_constraints_lists: List[List[Optional[List[int]]]] = []
     for _, alt in resolved:
-        n *= (alt.total() + 1)  # +1 за вариант None
-    return n * len(granularity_values)
+        constraints: List[Optional[List[int]]] = [None]
+        for variant in alt.variants:
+            constraints.append(
+                list(variant.table_index_granularity_values)
+                if variant.table_index_granularity_values is not None
+                else None
+            )
+        variant_constraints_lists.append(constraints)
+
+    total = 0
+    for combo_constraints in itertools.product(*variant_constraints_lists):
+        effective_granularity_values = _resolve_effective_table_index_granularity_values(
+            global_values=global_granularity_values,
+            selected_constraints=list(combo_constraints),
+        )
+        total += len(effective_granularity_values)
+    return total

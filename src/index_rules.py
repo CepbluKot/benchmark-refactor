@@ -20,6 +20,7 @@ class IndexVariant(BaseModel):
     """
     index_type: str
     granularity: int = 1
+    table_index_granularity_values: Optional[List[int]] = None
 
     def to_index_def(self, col: ColumnDef, idx_num: int) -> IndexDef:
         """Создаёт IndexDef с автоматическим именем на основе колонки и типа."""

@@ -221,6 +221,166 @@ class CombinerAndNamingTests(unittest.TestCase):
         )
         self.assertEqual(total, 24)  # 4 column variants * ((2 + None) * 2)
 
+    def test_indexes_mode_supports_per_index_table_granularity_values(self) -> None:
+        """Проверяет per-index index_granularity_values в indexes-режиме."""
+        index_rules = [
+            IndexRule(
+                by_type="UInt64",
+                by_name="user_id",
+                alternatives=IndexAlternatives(
+                    variants=[
+                        IndexVariant(
+                            index_type="minmax",
+                            granularity=4,
+                            table_index_granularity_values=[8192],
+                        ),
+                        IndexVariant(
+                            index_type="bloom_filter(0.01)",
+                            granularity=2,
+                            table_index_granularity_values=[16384],
+                        ),
+                    ]
+                ),
+            )
+        ]
+
+        total = total_variants(
+            self.table,
+            mode="indexes",
+            column_rules=[],
+            index_rules=index_rules,
+        )
+        self.assertEqual(total, 3)
+
+        variants = list(
+            iter_variants(
+                self.table,
+                mode="indexes",
+                column_rules=[],
+                index_rules=index_rules,
+            )
+        )
+        self.assertEqual(len(variants), 3)
+        choices = {
+            (
+                meta.index_choices["user_id"].index_type
+                if meta.index_choices["user_id"] is not None
+                else None,
+                meta.table_index_granularity,
+            )
+            for _, meta in variants
+        }
+        self.assertEqual(
+            choices,
+            {
+                (None, None),
+                ("minmax", 8192),
+                ("bloom_filter(0.01)", 16384),
+            },
+        )
+
+    def test_indexes_mode_intersects_global_and_per_index_granularity_values(self) -> None:
+        """Проверяет пересечение global и per-index index_granularity_values."""
+        index_rules = [
+            IndexRule(
+                by_type="UInt64",
+                by_name="user_id",
+                alternatives=IndexAlternatives(
+                    variants=[
+                        IndexVariant(
+                            index_type="minmax",
+                            granularity=4,
+                            table_index_granularity_values=[16384, 32768],
+                        ),
+                    ]
+                ),
+            )
+        ]
+
+        total = total_variants(
+            self.table,
+            mode="indexes",
+            column_rules=[],
+            index_rules=index_rules,
+            table_index_granularity_values=[8192, 16384],
+        )
+        self.assertEqual(total, 3)
+
+        variants = list(
+            iter_variants(
+                self.table,
+                mode="indexes",
+                column_rules=[],
+                index_rules=index_rules,
+                table_index_granularity_values=[8192, 16384],
+            )
+        )
+        self.assertEqual(len(variants), 3)
+        selected_with_index = [
+            meta.table_index_granularity
+            for _, meta in variants
+            if meta.index_choices["user_id"] is not None
+        ]
+        self.assertEqual(selected_with_index, [16384])
+
+    def test_indexes_mode_skips_conflicting_per_index_granularity_combos(self) -> None:
+        """Проверяет, что конфликтующие per-index ограничения корректно отбрасываются."""
+        index_rules = [
+            IndexRule(
+                by_type="UInt64",
+                by_name="user_id",
+                alternatives=IndexAlternatives(
+                    variants=[
+                        IndexVariant(
+                            index_type="minmax",
+                            granularity=4,
+                            table_index_granularity_values=[8192],
+                        )
+                    ]
+                ),
+            ),
+            IndexRule(
+                by_type="DateTime",
+                by_name="event_time",
+                alternatives=IndexAlternatives(
+                    variants=[
+                        IndexVariant(
+                            index_type="minmax",
+                            granularity=4,
+                            table_index_granularity_values=[16384],
+                        )
+                    ]
+                ),
+            ),
+        ]
+
+        total = total_variants(
+            self.table,
+            mode="indexes",
+            column_rules=[],
+            index_rules=index_rules,
+        )
+        self.assertEqual(total, 3)
+
+        variants = list(
+            iter_variants(
+                self.table,
+                mode="indexes",
+                column_rules=[],
+                index_rules=index_rules,
+            )
+        )
+        self.assertEqual(len(variants), 3)
+        self.assertTrue(
+            all(
+                not (
+                    meta.index_choices["user_id"] is not None
+                    and meta.index_choices["event_time"] is not None
+                )
+                for _, meta in variants
+            )
+        )
+
     def test_generated_variants_keep_single_valid_index_granularity_assignment(self) -> None:
         """Проверяет, что при исходном SETTINGS index_granularity нет конфликтов в variants."""
         table = TableDDL.from_ddl(DDL_WITH_INDEX_GRANULARITY)

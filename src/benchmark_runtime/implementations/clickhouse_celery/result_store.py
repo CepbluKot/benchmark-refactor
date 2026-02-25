@@ -21,12 +21,16 @@ from ...types import (
     StoredBenchmarkResult,
     TopTypeVariant,
     VariantJob,
-    build_legacy_index_params,
     build_variant_params,
 )
 from .common import json_dumps
 
 logger = logging.getLogger(__name__)
+
+try:
+    import sqlparse  # type: ignore
+except ImportError:  # pragma: no cover - опциональная зависимость для красивого SQL-format.
+    sqlparse = None
 
 
 class ClickHouseConnectionParams(BaseModel):
@@ -125,6 +129,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "source_table_consumed_compressed_size_bytes_by_each_column",
         "tested_table_consumed_compressed_size_bytes_overall",
         "tested_table_consumed_compressed_size_bytes_overall_readable",
+        "tested_table_total_size_bytes_with_indexes",
+        "tested_table_total_size_bytes_with_indexes_readable",
         "source_table_consumed_compressed_size_bytes_overall",
         "source_table_consumed_compressed_size_bytes_overall_readable",
         "tested_table_compression_overall_coef",
@@ -142,6 +148,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "score",
     ]
     _PRETTY_JSON_STRING_COLUMNS: tuple[str, ...] = (
+        "index_params",
         "tested_table_select_metrics_by_query_json",
         "source_table_select_metrics_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
@@ -150,6 +157,17 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_compression_by_each_column_coef",
         "tested_table_cols_sizes",
         "score_calculation_json",
+    )
+    _SQL_TEXT_COLUMNS: tuple[str, ...] = (
+        "tested_table_ddl",
+        "source_table_ddl",
+        "tested_table_select_test_query",
+        "source_table_select_test_query",
+    )
+    _SQL_JSON_COLUMNS: tuple[str, ...] = (
+        "tested_table_select_metrics_by_query_json",
+        "source_table_select_metrics_by_query_json",
+        "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
     )
 
     def __init__(
@@ -271,6 +289,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `source_table_consumed_compressed_size_bytes_by_each_column` Nullable(String),
                 `tested_table_consumed_compressed_size_bytes_overall` Nullable(Float64),
                 `tested_table_consumed_compressed_size_bytes_overall_readable` Nullable(String),
+                `tested_table_total_size_bytes_with_indexes` Nullable(Float64),
+                `tested_table_total_size_bytes_with_indexes_readable` Nullable(String),
                 `source_table_consumed_compressed_size_bytes_overall` Nullable(Float64),
                 `source_table_consumed_compressed_size_bytes_overall_readable` Nullable(String),
                 `tested_table_compression_overall_coef` Nullable(Float64),
@@ -315,6 +335,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `tested_table_select_memory_usage_measurements_percentiles_readable` Array(String),
                 ADD COLUMN IF NOT EXISTS `source_table_select_memory_usage_measurements_percentiles` Array(Float64),
                 ADD COLUMN IF NOT EXISTS `source_table_select_memory_usage_measurements_percentiles_readable` Array(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_total_size_bytes_with_indexes` Nullable(Float64),
+                ADD COLUMN IF NOT EXISTS `tested_table_total_size_bytes_with_indexes_readable` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `score_calculation_json` Nullable(String)
             """
         )
@@ -467,12 +489,6 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
     ) -> StoredBenchmarkResult:
         tested_table_ddl = result.tested_table_ddl or tested_table_ddl_fallback
 
-        index_params = result.index_params
-        if index_params is None:
-            index_choices = variant_params.get("index_choices")
-            if index_choices is not None:
-                index_params = build_legacy_index_params(index_choices)
-
         return StoredBenchmarkResult(
             benchmark_run_id=benchmark_run_id,
             benchmark_started_at=benchmark_started_at,
@@ -483,7 +499,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             tested_table_ddl=tested_table_ddl,
             source_table_ddl=result.source_table_ddl or source_table_ddl_fallback,
             is_source_table_copy=result.is_source_table_copy,
-            index_params=index_params,
+            index_params=result.index_params,
             total_n_rows_in_tested_table=result.total_n_rows_in_tested_table,
             total_n_rows_in_source_table=result.total_n_rows_in_source_table,
             measured_percentiles=list(result.measured_percentiles),
@@ -640,14 +656,18 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             source_table_select_memory_usage_measurements_percentiles_readable=list(
                 result.source_table_select_memory_usage_measurements_percentiles_readable
             ),
-            tested_table_select_metrics_by_query_json=(
+            # Храним per-query summary в основной таблице как JSON-map:
+            #   query_id -> per-query metrics.
+            tested_table_select_metrics_by_query_json=self._to_query_keyed_json_map(
                 result.tested_table_select_metrics_by_query_json
             ),
-            source_table_select_metrics_by_query_json=(
+            source_table_select_metrics_by_query_json=self._to_query_keyed_json_map(
                 result.source_table_select_metrics_by_query_json
             ),
             tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json=(
-                result.tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json
+                self._to_query_keyed_json_map(
+                    result.tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json
+                )
             ),
             tested_table_consumed_compressed_size_bytes_by_each_column=(
                 result.tested_table_consumed_compressed_size_bytes_by_each_column
@@ -660,6 +680,12 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             ),
             tested_table_consumed_compressed_size_bytes_overall_readable=(
                 result.tested_table_consumed_compressed_size_bytes_overall_readable
+            ),
+            tested_table_total_size_bytes_with_indexes=(
+                result.tested_table_total_size_bytes_with_indexes
+            ),
+            tested_table_total_size_bytes_with_indexes_readable=(
+                result.tested_table_total_size_bytes_with_indexes_readable
             ),
             source_table_consumed_compressed_size_bytes_overall=(
                 result.source_table_consumed_compressed_size_bytes_overall
@@ -686,6 +712,80 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             score=result.score,
         )
 
+    @classmethod
+    def _to_query_keyed_json_map(cls, value: Optional[str]) -> Optional[str]:
+        """
+        Преобразует per-query JSON в map-формат `query_id -> metrics`.
+
+        Поддерживает вход как list[dict] (runtime-формат) и dict.
+        """
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        if not value.strip():
+            return value
+
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return value
+
+        if isinstance(parsed, dict):
+            return json.dumps(
+                parsed,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                default=str,
+            )
+
+        if not isinstance(parsed, list):
+            return value
+
+        query_map: dict[str, Dict[str, Any]] = {}
+        for fallback_index, entry in enumerate(parsed):
+            if not isinstance(entry, dict):
+                continue
+            query_index = cls._safe_int(entry.get("query_index"), default=fallback_index)
+            query_id = cls._safe_str(
+                entry.get("query_id"),
+                default=f"query_{query_index}",
+            )
+            key = query_id
+            if key in query_map:
+                suffix = 1
+                while f"{query_id}_{suffix}" in query_map:
+                    suffix += 1
+                key = f"{query_id}_{suffix}"
+            query_map[key] = entry
+
+        return json.dumps(
+            query_map,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+
+    @staticmethod
+    def _safe_int(value: Any, *, default: int) -> int:
+        """Безопасно приводит значение к int с fallback."""
+        try:
+            return int(value)
+        except Exception:
+            return int(default)
+
+    @staticmethod
+    def _safe_str(value: Any, *, default: str) -> str:
+        """Безопасно приводит значение к непустой строке с fallback."""
+        if value is None:
+            return default
+        normalized = str(value).strip()
+        if not normalized:
+            return default
+        return normalized
+
     def _insert_record(self, record: StoredBenchmarkResult) -> None:
         row_map = self._record_to_clickhouse_map(record)
         row = tuple(row_map[column] for column in self._INSERT_COLUMNS)
@@ -711,11 +811,235 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 default=str,
             ),
         }
+        for column_name in self._SQL_TEXT_COLUMNS:
+            row_map[column_name] = self._format_sql_text_column(
+                column_name=column_name,
+                value=row_map.get(column_name),
+            )
+        for column_name in self._SQL_JSON_COLUMNS:
+            row_map[column_name] = self._format_sql_json_string_or_as_is(
+                row_map.get(column_name)
+            )
         for column_name in self._PRETTY_JSON_STRING_COLUMNS:
             row_map[column_name] = self._pretty_json_string_or_as_is(
                 row_map.get(column_name)
             )
         return row_map
+
+    @classmethod
+    def _format_sql_text_column(cls, *, column_name: str, value: Any) -> Any:
+        """Форматирует SQL-строки в scalar-колонках перед сохранением."""
+        if not isinstance(value, str):
+            return value
+        if column_name.endswith("_ddl"):
+            return cls._format_ddl_or_as_is(value)
+        return cls._format_query_or_as_is(value)
+
+    @classmethod
+    def _format_sql_json_string_or_as_is(cls, value: Any) -> Any:
+        """Форматирует SQL-поля внутри JSON-строки, оставляя не-JSON как есть."""
+        if not isinstance(value, str):
+            return value
+        try:
+            payload = json.loads(value)
+        except Exception:
+            return value
+        normalized = cls._format_sql_in_json_payload(payload)
+        return json.dumps(
+            normalized,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+
+    @classmethod
+    def _format_sql_in_json_payload(
+        cls,
+        value: Any,
+        *,
+        parent_key: Optional[str] = None,
+    ) -> Any:
+        """Рекурсивно форматирует SQL-строки в JSON-структуре."""
+        if isinstance(value, dict):
+            return {
+                key: cls._format_sql_in_json_payload(item, parent_key=str(key))
+                for key, item in value.items()
+            }
+
+        if isinstance(value, list):
+            if parent_key and cls._is_sql_queries_list_key(parent_key):
+                return [
+                    cls._format_query_or_as_is(item) if isinstance(item, str)
+                    else cls._format_sql_in_json_payload(item)
+                    for item in value
+                ]
+            return [cls._format_sql_in_json_payload(item) for item in value]
+
+        if isinstance(value, str) and parent_key and cls._is_sql_scalar_key(parent_key):
+            key_lower = parent_key.strip().lower()
+            if key_lower.endswith("_ddl") or key_lower == "ddl":
+                return cls._format_ddl_or_as_is(value)
+            return cls._format_query_or_as_is(value)
+        return value
+
+    @staticmethod
+    def _is_sql_scalar_key(key: str) -> bool:
+        """Определяет, что ключ JSON содержит scalar SQL-строку."""
+        key_lower = key.strip().lower()
+        if key_lower in {"query", "source_query", "tested_query", "ddl"}:
+            return True
+        if key_lower.endswith("_query") or key_lower.endswith("_ddl"):
+            return True
+        return False
+
+    @staticmethod
+    def _is_sql_queries_list_key(key: str) -> bool:
+        """Определяет, что ключ JSON содержит список SQL-запросов."""
+        key_lower = key.strip().lower()
+        return key_lower in {"warmup_queries", "test_queries"} or key_lower.endswith(
+            "_queries"
+        )
+
+    @classmethod
+    def _format_ddl_or_as_is(cls, value: str) -> str:
+        """Форматирует DDL. При неудаче возвращает query-стиль форматирования."""
+        cleaned = value.strip()
+        if not cleaned:
+            return cleaned
+        try:
+            return TableDDL.from_ddl(cleaned).to_ddl()
+        except Exception:
+            return cls._format_query_or_as_is(cleaned)
+
+    @classmethod
+    def _format_query_or_as_is(cls, value: str) -> str:
+        """Форматирует SQL-query в читабельный вид."""
+        cleaned = value.strip()
+        if not cleaned:
+            return cleaned
+        if sqlparse is not None:
+            try:
+                return sqlparse.format(
+                    cleaned,
+                    reindent=True,
+                    keyword_case="upper",
+                ).strip()
+            except Exception:
+                pass
+        return cls._basic_query_format(cleaned)
+
+    @classmethod
+    def _basic_query_format(cls, value: str) -> str:
+        """
+        Упрощённый SQL форматтер без внешних зависимостей.
+
+        Ставит переносы на главные клаузы, сохраняя строковые литералы.
+        """
+        tokens = cls._split_sql_tokens_preserving_literals(value)
+        if not tokens:
+            return value.strip()
+
+        clause_words = {
+            "WITH",
+            "SELECT",
+            "FROM",
+            "WHERE",
+            "PREWHERE",
+            "HAVING",
+            "LIMIT",
+            "SETTINGS",
+            "UNION",
+            "JOIN",
+            "ENGINE",
+            "TTL",
+        }
+        clause_pairs = {
+            ("CREATE", "TABLE"),
+            ("GROUP", "BY"),
+            ("ORDER", "BY"),
+            ("PARTITION", "BY"),
+            ("PRIMARY", "KEY"),
+            ("SAMPLE", "BY"),
+            ("LEFT", "JOIN"),
+            ("RIGHT", "JOIN"),
+            ("FULL", "JOIN"),
+            ("INNER", "JOIN"),
+            ("CROSS", "JOIN"),
+        }
+
+        lines: list[str] = []
+        current_line: list[str] = []
+        idx = 0
+        while idx < len(tokens):
+            token = tokens[idx]
+            token_upper = token.upper()
+
+            matched_pair: Optional[tuple[str, str]] = None
+            if idx + 1 < len(tokens):
+                pair = (token_upper, tokens[idx + 1].upper())
+                if pair in clause_pairs:
+                    matched_pair = pair
+
+            if matched_pair is not None:
+                if current_line:
+                    lines.append(" ".join(current_line).strip())
+                current_line = [f"{matched_pair[0]} {matched_pair[1]}"]
+                idx += 2
+                continue
+
+            if token_upper in clause_words:
+                if current_line:
+                    lines.append(" ".join(current_line).strip())
+                current_line = [token_upper]
+                idx += 1
+                continue
+
+            current_line.append(token)
+            idx += 1
+
+        if current_line:
+            lines.append(" ".join(current_line).strip())
+
+        return "\n".join(line for line in lines if line)
+
+    @staticmethod
+    def _split_sql_tokens_preserving_literals(sql: str) -> List[str]:
+        """Делит SQL на токены по whitespace вне литералов/бэктиков."""
+        tokens: list[str] = []
+        buffer: list[str] = []
+        quote_char: Optional[str] = None
+        escaped = False
+
+        for ch in sql:
+            if quote_char is not None:
+                buffer.append(ch)
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == "\\" and quote_char in {"'", '"'}:
+                    escaped = True
+                    continue
+                if ch == quote_char:
+                    quote_char = None
+                continue
+
+            if ch in {"'", '"', "`"}:
+                quote_char = ch
+                buffer.append(ch)
+                continue
+
+            if ch.isspace():
+                if buffer:
+                    tokens.append("".join(buffer))
+                    buffer = []
+                continue
+
+            buffer.append(ch)
+
+        if buffer:
+            tokens.append("".join(buffer))
+        return tokens
 
     @staticmethod
     def _pretty_json_string_or_as_is(value: Any) -> Any:

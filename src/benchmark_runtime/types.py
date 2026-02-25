@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -42,13 +43,16 @@ class TableTarget(_FrozenModel):
 class Query(_FrozenModel):
     """Benchmark SQL query descriptor."""
 
+    query_id: str
     query: str
+    cache_mode: str = "warm"
+    select_operations_count: Optional[int] = None
+    warmup_queries: List[str] = Field(default_factory=list)
 
 
 class QueryPlan(_FrozenModel):
-    """Warmup/test query set prepared for a variant table."""
+    """Test query set prepared for a variant table."""
 
-    warmup_queries: List[str]
     test_queries: List[Query]
 
 
@@ -309,6 +313,8 @@ class BenchmarkVariantResult(_FrozenModel):
     source_table_consumed_compressed_size_bytes_by_each_column: Optional[str] = None
     tested_table_consumed_compressed_size_bytes_overall: Optional[float] = None
     tested_table_consumed_compressed_size_bytes_overall_readable: Optional[str] = None
+    tested_table_total_size_bytes_with_indexes: Optional[float] = None
+    tested_table_total_size_bytes_with_indexes_readable: Optional[str] = None
     source_table_consumed_compressed_size_bytes_overall: Optional[float] = None
     source_table_consumed_compressed_size_bytes_overall_readable: Optional[str] = None
     tested_table_compression_overall_coef: Optional[float] = None
@@ -505,6 +511,8 @@ class StoredBenchmarkResult(_FrozenModel):
     source_table_consumed_compressed_size_bytes_by_each_column: Optional[str] = None
     tested_table_consumed_compressed_size_bytes_overall: Optional[float] = None
     tested_table_consumed_compressed_size_bytes_overall_readable: Optional[str] = None
+    tested_table_total_size_bytes_with_indexes: Optional[float] = None
+    tested_table_total_size_bytes_with_indexes_readable: Optional[str] = None
     source_table_consumed_compressed_size_bytes_overall: Optional[float] = None
     source_table_consumed_compressed_size_bytes_overall_readable: Optional[str] = None
     tested_table_compression_overall_coef: Optional[float] = None
@@ -586,16 +594,10 @@ def build_variant_params(variant_meta: VariantMeta) -> Dict[str, Any]:
     }
 
 
-def build_legacy_index_params(index_choices: Any) -> Optional[str]:
-    """
-    Формирует legacy-строку `index_params` из `index_choices`.
-
-    Формат совместим с первой версией:
-    `"<index_type> GRANULARITY <n>"`.
-    Если в варианте несколько разных индексов, строки объединяются через `; `.
-    """
+def _extract_ordered_index_params(index_choices: Any) -> List[str]:
+    """Извлекает уникальные index params в стабильном порядке из `index_choices`."""
     if not isinstance(index_choices, dict):
-        return None
+        return []
 
     seen: set[str] = set()
     ordered_params: list[str] = []
@@ -620,7 +622,46 @@ def build_legacy_index_params(index_choices: Any) -> Optional[str]:
             continue
         seen.add(candidate)
         ordered_params.append(candidate)
+    return ordered_params
 
+
+def build_legacy_index_params(index_choices: Any) -> Optional[str]:
+    """
+    Формирует legacy-строку `index_params` из `index_choices`.
+
+    Формат совместим с первой версией:
+    `"<index_type> GRANULARITY <n>"`.
+    Если в варианте несколько разных индексов, строки объединяются через `; `.
+    """
+    ordered_params = _extract_ordered_index_params(index_choices)
     if not ordered_params:
         return None
     return "; ".join(ordered_params)
+
+
+def build_index_params_json(
+    variant_table: str,
+    index_choices: Any,
+) -> Optional[str]:
+    """
+    Формирует `index_params` в JSON-формате для хранения в БД.
+
+    Формат:
+      - `{ "<variant_table>": "<index>" }` для одного индекса;
+      - `{ "<variant_table>": ["<index1>", "<index2>", ...] }` для нескольких.
+    """
+    ordered_params = _extract_ordered_index_params(index_choices)
+    if not ordered_params:
+        return None
+    value: str | List[str]
+    if len(ordered_params) == 1:
+        value = ordered_params[0]
+    else:
+        value = ordered_params
+    return json.dumps(
+        {variant_table: value},
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        default=str,
+    )

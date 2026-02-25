@@ -458,9 +458,11 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                     ),
                     queries=QueriesConfig(
                         mode="manual",
-                        warmup_queries=["SELECT 1 FROM {table}"],
                         test_queries=[
-                            QueryConfigItem(query="SELECT sum(revenue) FROM {table}")
+                            QueryConfigItem(
+                                query="SELECT sum(revenue) FROM {table}",
+                                warmup_queries=["SELECT 1 FROM {table}"],
+                            )
                         ],
                     ),
                     scoring={
@@ -672,9 +674,12 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             ),
             queries=QueriesConfig(
                 mode="manual",
-                warmup_queries=["SELECT 1 FROM {table}"],
                 test_queries=[
-                    QueryConfigItem(query="SELECT count() FROM {table}", weight=2.0)
+                    QueryConfigItem(
+                        query="SELECT count() FROM {table} /* bench={benchmark_id} */",
+                        select_operations_count=2,
+                        warmup_queries=["SELECT 1 FROM {table} /* warm={benchmark_id} */"],
+                    )
                 ],
             ),
         )
@@ -699,10 +704,14 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(job.variant_database, "analytics")
         self.assertTrue(job.variant_table.startswith("events__bench__bench_types__"))
         self.assertEqual(job.variant_ddl.name, f"analytics.{job.variant_table}")
-        self.assertIn(job.variant_table, job.query_plan.warmup_queries[0])
+        self.assertIn(job.variant_table, job.query_plan.test_queries[0].warmup_queries[0])
         self.assertIn(job.variant_table, job.query_plan.test_queries[0].query)
-        self.assertNotIn("{table}", job.query_plan.warmup_queries[0])
+        self.assertIn("bench_types", job.query_plan.test_queries[0].query)
+        self.assertIn("bench_types", job.query_plan.test_queries[0].warmup_queries[0])
+        self.assertNotIn("{table}", job.query_plan.test_queries[0].warmup_queries[0])
         self.assertNotIn("{table}", job.query_plan.test_queries[0].query)
+        self.assertNotIn("{benchmark_id}", job.query_plan.test_queries[0].warmup_queries[0])
+        self.assertNotIn("{benchmark_id}", job.query_plan.test_queries[0].query)
 
     def test_engine_source_benchmark_job_prefers_source_insert_rows_limit(self) -> None:
         """Проверяет, что source baseline использует отдельный source_insert_rows_limit."""
@@ -734,7 +743,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             ),
             queries=QueriesConfig(
                 mode="manual",
-                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}", weight=1.0)],
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}", select_operations_count=1)],
             ),
         )
         planner = BenchmarkPlanner(
@@ -780,7 +789,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             ),
             queries=QueriesConfig(
                 mode="manual",
-                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}", weight=1.0)],
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}", select_operations_count=1)],
             ),
         )
         planner = BenchmarkPlanner(
@@ -825,7 +834,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             ),
             queries=QueriesConfig(
                 mode="manual",
-                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}", weight=1.0)],
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}", select_operations_count=1)],
             ),
         )
         planner = BenchmarkPlanner(
@@ -862,9 +871,12 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             ),
             queries=QueriesConfig(
                 mode="manual",
-                warmup_queries=["SELECT 1 FROM {table}"],
                 test_queries=[
-                    QueryConfigItem(query="SELECT count() FROM {table}", weight=1.0)
+                    QueryConfigItem(
+                        query="SELECT count() FROM {table}",
+                        select_operations_count=1,
+                        warmup_queries=["SELECT 1 FROM {table}"],
+                    )
                 ],
             ),
         )
@@ -881,7 +893,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(job.source_database, "analytics")
         self.assertEqual(job.variant_database, "bench_tmp")
         self.assertEqual(job.variant_ddl.name, f"bench_tmp.{job.variant_table}")
-        self.assertIn("`bench_tmp`.", job.query_plan.warmup_queries[0])
+        self.assertIn("`bench_tmp`.", job.query_plan.test_queries[0].warmup_queries[0])
         self.assertIn("`bench_tmp`.", job.query_plan.test_queries[0].query)
 
     def test_engine_auto_column_order_uses_compressed_size_desc(self) -> None:

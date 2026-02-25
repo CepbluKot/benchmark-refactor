@@ -22,6 +22,11 @@ _ALLOWED_SCORE_EXPRESSION_ROOT_NAMES = frozenset(
         "speedup",
         "compression",
         "compression_overall_coef",
+        "ratios",
+        "medians",
+        "source_size_bytes",
+        "tested_size_bytes",
+        "per_query",
         "source_insert_time_ms_percentiles",
         "source_insert_time_ms_by_percentile",
         "tested_insert_time_ms_percentiles",
@@ -35,6 +40,9 @@ _ALLOWED_SCORE_EXPRESSION_ROOT_NAMES = frozenset(
         "select_time_speedup_percentiles",
         "select_time_speedup_by_percentile",
         "select_time_speedup_by_query",
+        "tested_table_select_metrics_by_query_json",
+        "source_table_select_metrics_by_query_json",
+        "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
     }
 )
 
@@ -298,12 +306,37 @@ def _safe_clamp(value: Any, low: Any, high: Any) -> float:
     return max(low_f, min(high_f, numeric))
 
 
+def _safe_median(values: Any, default: float = 0.0) -> float:
+    """Возвращает медиану массива чисел с безопасным fallback."""
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+        return float(default)
+
+    numeric_values: list[float] = []
+    for value in values:
+        try:
+            numeric = float(value)
+        except Exception:
+            continue
+        if math.isfinite(numeric):
+            numeric_values.append(numeric)
+
+    if not numeric_values:
+        return float(default)
+
+    numeric_values.sort()
+    mid = len(numeric_values) // 2
+    if len(numeric_values) % 2 == 1:
+        return float(numeric_values[mid])
+    return float((numeric_values[mid - 1] + numeric_values[mid]) / 2.0)
+
+
 _ALLOWED_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "safe_div": _safe_div,
     "at": _safe_at,
     "pct": _safe_pct,
     "coalesce": _safe_coalesce,
     "clamp": _safe_clamp,
+    "median": _safe_median,
     "abs": abs,
     "min": min,
     "max": max,

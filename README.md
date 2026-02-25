@@ -250,12 +250,20 @@ Runner не пишет результаты в store. Сохранение вы�
 - run-метаданные: `benchmark_run_id`, `benchmark_started_at`, `benchmark_id`;
 - идентификация таблицы: `source_db_name`, `source_table_name`, `variant_table`;
 - параметры варианта: `variant_mode`, `variant_params`;
+- `variant_params` теперь содержит всю параметризацию варианта
+  (типы/кодеки/индексы/прочие параметры); `index_params` оставлен только как legacy nullable-колонка;
 - DDL-снимки: `tested_table_ddl` (как минимум), при наличии `source_table_ddl`;
+- размер таблицы: `tested_table_consumed_compressed_size_bytes_overall`
+  (данные без индексов) и `tested_table_total_size_bytes_with_indexes`
+  (данные + размеры skip-индексов);
 - метрики combined-схемы (insert/select/compression/indexes) + `extra_json` для расширений;
-- per-query select-метрики в JSON-строках:
+- per-query select-метрики хранятся в основной таблице в JSON-полях
   `tested_table_select_metrics_by_query_json`,
   `source_table_select_metrics_by_query_json`,
-  `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json`;
+  `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json`
+  как map `query_id -> metrics`;
+- SQL-строки (`*_ddl`, `*_query`, query-поля внутри JSON-метрик) перед записью
+  автоматически нормализуются в читабельный формат;
 - итог: `score` и рядом `score_calculation_json` (как рассчитан score, с входными параметрами и финальным значением);
   для top-N DDL берется из `tested_table_ddl`.
 
@@ -400,7 +408,8 @@ Runner не пишет результаты в store. Сохранение вы�
         "test_queries": [
           {
             "query": "SELECT count() FROM {table}",
-            "weight": 1.0
+            "cache_mode": "warm",
+            "select_operations_count": 3
           }
         ]
       }
@@ -706,6 +715,8 @@ print(run_id)
 - `auto_generate_indexes` (`bool`, default `false`) — включает автогенерацию skip-индексов по типу колонки;
 - `auto_indexes_datatype` (`string`, optional) — datatype-hint для авто-генерации индексов
   (если не задан, используется `by_type`).
+- `indexes[].index_granularity_values` (`int[]`, optional) — ограничения на
+  `SETTINGS index_granularity` именно для этого индекс-варианта.
 
 Важно про `auto_generate_indexes`:
 - авто-генерация строится по типовым профилям (numeric/date/string/uuid/ipv/low-cardinality);
@@ -737,6 +748,13 @@ print(run_id)
 
 Коротко по новым полям:
 - `insert_operations_count`: сколько раз повторить insert/select замер.
+- `insert_operations_count`: сколько раз повторить insert-замер.
+- `queries.test_queries[].select_operations_count`: сколько раз мерить конкретный select.
+- `queries.test_queries[].cache_mode`: `warm` или `cold`.
+- `queries.test_queries[].warmup_queries`: query-level прогревы (только для `warm`).
+- `queries.test_queries[].query_id`: стабильный ID запроса (если не задан, будет авто-ID).
+- SQL-шаблоны поддерживают плейсхолдеры `{table}` и `{benchmark_id}`.
+- Глобальный `queries.warmup_queries` не поддерживается.
 - `insert_rows_per_operation_limit`: лимит строк на одну insert-операцию.
 - `insert_rows_per_operation_limits`: такие же лимиты, но отдельно по mode (`types/indexes/...`).
 - `source_insert_rows_per_operation_limits`: baseline-лимит строк по mode (например, `sequential`).
@@ -746,8 +764,14 @@ print(run_id)
 - `index_granularity_values`: список значений для `SETTINGS index_granularity`.
   Для `indexes`/`combined`/sequential-index-stage участвует в декартовом произведении
   с вариантами skip-индексов.
+  Если у конкретного `indexes[]` задан `index_granularity_values`, используется
+  пересечение global-списка и per-index списка (без global — только per-index).
   Если в исходном DDL уже был `SETTINGS index_granularity`, он корректно заменяется:
   в итоговом variant-DDL ключ остаётся один (без конфликтующих дублей).
+- `queries.test_queries[].cache_mode = cold`: перед каждым замером выполняется
+  `SYSTEM DROP MARK CACHE` и `SYSTEM DROP UNCOMPRESSED CACHE`.
+- `queries.test_queries[].cache_mode = warm`: перед серией замеров запроса выполняются
+  query-level `warmup_queries`, затем делаются `select_operations_count` замеров.
 
 Примечание: старые ключи (`max_iterations`, `sequential_top_n`, `insert_rows_limit`,
 `source_insert_rows_limit`, `insert_rows_limits`, `max_type_benchmarks`,
@@ -758,6 +782,15 @@ print(run_id)
 `scoring.mode`:
 - `builtin` — стандартная формула runtime.
 - `expression` — кастомное безопасное выражение на `simpleeval`.
+
+Формула `builtin`:
+- `insert_ratio = median(source_insert_ms) / median(tested_insert_ms)`
+- `select_ratio = median(source_select_ms) / median(tested_select_ms)`
+- `compression_ratio = source_size_bytes / tested_size_bytes`
+- `score = (insert_ratio * select_ratio * compression_ratio) ** (1/3)`
+
+Для `compression_ratio` используются полные размеры таблиц
+`данные + skip-индексы` (`*_total_size_bytes_with_indexes`).
 
 `scoring` поля:
 - `mode`
@@ -781,11 +814,17 @@ print(run_id)
 {
   "scoring": {
     "mode": "expression",
-    "expression": "0.7 * safe_div(source_select_time_ms_by_percentile[100], tested_select_time_ms_by_percentile[100]) + 0.3 * coalesce(compression_overall_coef, 0)",
+    "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)",
     "on_error_score": -1
   }
 }
 ```
+
+Готовая формула из ratio + геометрического среднего:
+- `insert_ratio = median(source_insert_ms) / median(tested_insert_ms)`
+- `select_ratio = median(source_select_ms) / median(tested_select_ms)`
+- `compression_ratio = source_size_bytes / tested_size_bytes`
+- `score = (insert_ratio * select_ratio * compression_ratio)^(1/3)`
 
 Что доступно внутри `expression`:
 - `source` и `tested`:
@@ -794,13 +833,30 @@ print(run_id)
   - также `rows_per_second_*`, `bytes_per_second_*`, `memory_usage_*`
 - `speedup.insert.time_ms_percentiles`, `speedup.select.time_ms_percentiles`
 - `compression_overall_coef`
+- `medians`:
+  - `medians.source_insert_time_ms`, `medians.tested_insert_time_ms`
+  - `medians.source_select_time_ms`, `medians.tested_select_time_ms`
+- `ratios`:
+  - `ratios.insert`, `ratios.select`, `ratios.compression`
+- `source_size_bytes`, `tested_size_bytes` (полный размер `данные + skip-индексы`)
+- `per_query`:
+  - `per_query.tested_by_query_id['q_id']`
+  - `per_query.source_by_query_id['q_id']`
+  - `per_query.speedup_by_query_id['q_id']`
+- JSON-aliases (значения уже распарсены в map, ключ = `query_id`):
+  - `tested_table_select_metrics_by_query_json['q_id']`
+  - `source_table_select_metrics_by_query_json['q_id']`
+  - `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json['q_id']`
 - flat aliases:
   - `source_select_time_ms_percentiles`, `tested_select_time_ms_percentiles`
   - `source_select_time_ms_by_percentile`, `tested_select_time_ms_by_percentile`
   - `source_insert_time_ms_percentiles`, `tested_insert_time_ms_percentiles`
   - `source_insert_time_ms_by_percentile`, `tested_insert_time_ms_by_percentile`
-  - `insert_time_speedup_percentiles`, `select_time_speedup_percentiles`
-  - `insert_time_speedup_by_percentile`, `select_time_speedup_by_percentile`
+- `insert_time_speedup_percentiles`, `select_time_speedup_percentiles`
+- `insert_time_speedup_by_percentile`, `select_time_speedup_by_percentile`
+
+Для baseline run (бенчмарк исходного DDL) `source` и `tested` в expression-контексте
+заполняются одинаковыми baseline-метриками, поэтому ratio-поля обычно равны `1.0`.
 
 Как обращаться к перцентилям:
 - По индексу массива: `source.select.time_ms_percentiles[1]`
@@ -814,6 +870,7 @@ print(run_id)
 - `at(container, key, default=None)`
 - `coalesce(...)`
 - `clamp(value, low, high)`
+- `median(values, default=0.0)`
 - `abs`, `min`, `max`, `round`, `sqrt`, `log`, `ln`, `pow`
 
 Разрешённые операторы expression:

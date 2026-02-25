@@ -69,7 +69,12 @@ class _FakeSettings:
                     },
                     "queries": {
                         "mode": "manual",
-                        "test_queries": [{"query": "SELECT count() FROM {table}", "weight": 1.0}],
+                        "test_queries": [
+                            {
+                                "query": "SELECT count() FROM {table}",
+                                "select_operations_count": 1,
+                            }
+                        ],
                     },
                 }
             ]

@@ -47,10 +47,107 @@ class ModelsValidationTests(unittest.TestCase):
                 auto_indexes_datatype="   ",
             )
 
+    def test_index_config_normalizes_per_index_table_granularity_values(self) -> None:
+        """Проверяет per-index index_granularity_values в IndexConfig."""
+        index_cfg = IndexConfig.model_validate(
+            {
+                "type": "minmax",
+                "granularity": 4,
+                "index_granularity_values": [8192, 16384, 8192],
+            }
+        )
+        self.assertEqual(index_cfg.table_index_granularity_values, [8192, 16384])
+
+        with self.assertRaises(ValidationError):
+            IndexConfig.model_validate(
+                {
+                    "type": "minmax",
+                    "granularity": 4,
+                    "index_granularity_values": [0, 8192],
+                }
+            )
+
     def test_queries_manual_requires_test_queries(self) -> None:
         """Проверяет, что queries manual requires test queries."""
         with self.assertRaises(ValidationError):
             QueriesConfig(mode="manual")
+
+    def test_test_query_rejects_removed_weight_field(self) -> None:
+        """Проверяет, что `weight` больше не поддерживается в test_queries[]."""
+        with self.assertRaises(ValidationError):
+            QueriesConfig.model_validate(
+                {
+                    "mode": "manual",
+                    "test_queries": [
+                        {
+                            "query": "SELECT 1",
+                            "weight": 1.0,
+                        }
+                    ],
+                }
+            )
+
+    def test_queries_rejects_removed_global_warmup_queries(self) -> None:
+        """Проверяет, что глобальный queries.warmup_queries больше не поддерживается."""
+        with self.assertRaises(ValidationError):
+            QueriesConfig.model_validate(
+                {
+                    "mode": "manual",
+                    "warmup_queries": ["SELECT 1"],
+                    "test_queries": [
+                        {
+                            "query": "SELECT 1",
+                        }
+                    ],
+                }
+            )
+
+    def test_test_query_validates_cold_mode_warmup_and_select_count(self) -> None:
+        """Проверяет валидацию cache_mode/select_operations_count для test_queries[]."""
+        with self.assertRaises(ValidationError):
+            QueriesConfig.model_validate(
+                {
+                    "mode": "manual",
+                    "test_queries": [
+                        {
+                            "query": "SELECT 1",
+                            "cache_mode": "cold",
+                            "select_operations_count": 0,
+                        }
+                    ],
+                }
+            )
+
+        with self.assertRaises(ValidationError):
+            QueriesConfig.model_validate(
+                {
+                    "mode": "manual",
+                    "test_queries": [
+                        {
+                            "query": "SELECT 1",
+                            "cache_mode": "cold",
+                            "select_operations_count": 1,
+                            "warmup_queries": ["SELECT 1"],
+                        }
+                    ],
+                }
+            )
+
+        parsed = QueriesConfig.model_validate(
+            {
+                "mode": "manual",
+                "test_queries": [
+                    {
+                        "query": "SELECT count() FROM {table}",
+                        "cache_mode": "warm",
+                        "select_operations_count": 3,
+                        "warmup_queries": ["SELECT count() FROM {table}"],
+                    }
+                ],
+            }
+        )
+        self.assertEqual(parsed.test_queries[0].cache_mode, "warm")
+        self.assertEqual(parsed.test_queries[0].select_operations_count, 3)
 
     def test_benchmark_config_rejects_duplicate_table_rules(self) -> None:
         """Проверяет, что benchmark config rejects duplicate table rules."""
@@ -782,6 +879,35 @@ class RuleResolverTests(unittest.TestCase):
                 }
             ),
         )
+
+    def test_deduplicate_indexes_keeps_different_per_index_granularity_values(self) -> None:
+        """Проверяет, что дубликаты учитывают per-index table index_granularity."""
+        resolver = RuleResolver(banks={})
+        rules = RulesConfig(
+            index_rules=[
+                IndexRuleConfig(
+                    by_type="UInt64",
+                    indexes=[
+                        IndexConfig(
+                            type="minmax",
+                            granularity=4,
+                            table_index_granularity_values=[8192],
+                        ),
+                        IndexConfig(
+                            type="minmax",
+                            granularity=4,
+                            table_index_granularity_values=[16384],
+                        ),
+                    ],
+                )
+            ]
+        )
+
+        resolved = resolver.resolve(rules, dbms="clickhouse")
+        variants = resolved.index_rules[0].alternatives.variants
+        self.assertEqual(len(variants), 2)
+        self.assertEqual(variants[0].table_index_granularity_values, [8192])
+        self.assertEqual(variants[1].table_index_granularity_values, [16384])
 
 
 if __name__ == "__main__":

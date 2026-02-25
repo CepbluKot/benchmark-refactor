@@ -69,9 +69,37 @@ class ClickHouseCeleryScoringExpressionTests(unittest.TestCase):
         score = evaluate_score_expression("pow(3, 2)", {})
         self.assertEqual(score, 9.0)
 
+    def test_expression_supports_median_function_for_array(self) -> None:
+        score = evaluate_score_expression("median(values)", {"values": [10.0, 3.0, 7.0]})
+        self.assertEqual(score, 7.0)
+
+    def test_expression_supports_median_function_for_even_array(self) -> None:
+        score = evaluate_score_expression("median(values)", {"values": [1.0, 2.0, 10.0, 14.0]})
+        self.assertEqual(score, 6.0)
+
+    def test_expression_median_supports_default_fallback(self) -> None:
+        score = evaluate_score_expression("median(values, -1)", {"values": [float("nan"), None]})
+        self.assertEqual(score, -1.0)
+
     def test_static_validation_accepts_supported_expression(self) -> None:
         issues = validate_score_expression(
             "safe_div(pct(tested_select_time_ms_by_percentile, 95), 2)",
+        )
+        self.assertEqual(issues, [])
+
+    def test_static_validation_accepts_median_expression(self) -> None:
+        issues = validate_score_expression("median(tested.select.time_ms_percentiles)")
+        self.assertEqual(issues, [])
+
+    def test_static_validation_accepts_per_query_expression(self) -> None:
+        issues = validate_score_expression(
+            "safe_div(per_query.speedup_by_query_id['q1'].elapsed_ms_percentiles_speed_up_coefs[1], 1)"
+        )
+        self.assertEqual(issues, [])
+
+    def test_static_validation_accepts_per_query_json_alias_expression(self) -> None:
+        issues = validate_score_expression(
+            "safe_div(tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json['q1'].elapsed_ms_percentiles_speed_up_coefs[1], 1)"
         )
         self.assertEqual(issues, [])
 

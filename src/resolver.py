@@ -54,10 +54,19 @@ def _deduplicate_index_configs_preserve_order(
     values: List[IndexConfig],
 ) -> List[IndexConfig]:
     """Удаляет дубли index-конфигов, сохраняя исходный порядок."""
-    seen: set[tuple[str, int]] = set()
+    seen: set[tuple[str, int, Optional[tuple[int, ...]]]] = set()
     deduplicated: list[IndexConfig] = []
     for value in values:
-        key = (value.type.strip(), int(value.granularity))
+        table_granularity_values = (
+            tuple(value.table_index_granularity_values)
+            if value.table_index_granularity_values is not None
+            else None
+        )
+        key = (
+            value.type.strip(),
+            int(value.granularity),
+            table_granularity_values,
+        )
         if key in seen:
             continue
         seen.add(key)
@@ -161,7 +170,11 @@ def _index_rule_from_config(cfg: IndexRuleConfig) -> IndexRule:
         by_name=cfg.by_name,
         alternatives=IndexAlternatives(
             variants=[
-                IndexVariant(index_type=idx.type, granularity=idx.granularity)
+                IndexVariant(
+                    index_type=idx.type,
+                    granularity=idx.granularity,
+                    table_index_granularity_values=idx.table_index_granularity_values,
+                )
                 for idx in indexes
             ]
         ),

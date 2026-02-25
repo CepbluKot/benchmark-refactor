@@ -59,6 +59,30 @@ class ValidateScoringFormulaCliTests(unittest.TestCase):
             self.assertIn("OK: scoring.expression валиден", out.getvalue())
             self.assertEqual(err.getvalue(), "")
 
+    def test_returns_zero_for_valid_formula_with_median(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            benchmarks_path = Path(tmp) / "benchmarks.json"
+            _write_json(
+                benchmarks_path,
+                _benchmarks_payload("safe_div(median(tested.select.time_ms_percentiles), 2)"),
+            )
+
+            out = StringIO()
+            err = StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = main(
+                    [
+                        "--path",
+                        str(benchmarks_path),
+                        "--type",
+                        "benchmarks",
+                    ]
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertIn("OK: scoring.expression валиден", out.getvalue())
+            self.assertEqual(err.getvalue(), "")
+
     def test_returns_non_zero_for_invalid_formula(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             benchmarks_path = Path(tmp) / "benchmarks.json"

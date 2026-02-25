@@ -63,7 +63,7 @@
       ],
       "scoring": {
         "mode": "expression",
-        "expression": "0.5 * safe_div(source_select_time_ms_by_percentile[100], tested_select_time_ms_by_percentile[100]) + 0.3 * safe_div(source_insert_time_ms_by_percentile['p100'], tested_insert_time_ms_by_percentile['p100']) + 0.2 * coalesce(compression_overall_coef, 0)",
+        "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)",
         "on_error_score": -1.0
       },
       "insert_rows_per_operation_limits": {
@@ -77,18 +77,20 @@
       "index_rules_mode": "global_bank_with_inline_priority",
       "queries": {
         "mode": "auto_with_manual",
-        "warmup_queries": [
-          "SELECT count() FROM {table}",
-          "SELECT min(event_time), max(event_time) FROM {table}"
-        ],
         "test_queries": [
           {
             "query": "SELECT count() FROM {table} WHERE event_time >= now() - INTERVAL 7 DAY",
-            "weight": 2.0
+            "cache_mode": "warm",
+            "select_operations_count": 4,
+            "warmup_queries": [
+              "SELECT count() FROM {table}",
+              "SELECT min(event_time), max(event_time) FROM {table}"
+            ]
           },
           {
             "query": "SELECT user_id, sum(revenue) FROM {table} GROUP BY user_id ORDER BY sum(revenue) DESC LIMIT 100",
-            "weight": 1.5
+            "cache_mode": "cold",
+            "select_operations_count": 2
           }
         ]
       },
@@ -134,13 +136,14 @@
           "column_order_mode": "compressed_size_desc",
           "queries": {
             "mode": "manual",
-            "warmup_queries": [
-              "SELECT count() FROM {table}"
-            ],
             "test_queries": [
               {
                 "query": "SELECT sum(revenue) FROM {table}",
-                "weight": 1.0
+                "cache_mode": "warm",
+                "select_operations_count": 3,
+                "warmup_queries": [
+                  "SELECT count() FROM {table}"
+                ]
               }
             ]
           },

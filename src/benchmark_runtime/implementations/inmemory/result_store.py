@@ -14,7 +14,6 @@ from ...types import (
     StoredBenchmarkResult,
     TopTypeVariant,
     VariantJob,
-    build_legacy_index_params,
     build_variant_params,
 )
 
@@ -57,11 +56,6 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
         )
         tested_table_ddl = result.tested_table_ddl or job.variant_ddl.to_ddl()
         variant_mode = result.variant_mode or job.variant_meta.mode
-        index_params = result.index_params
-        if index_params is None:
-            index_choices = variant_params.get("index_choices")
-            if index_choices is not None:
-                index_params = build_legacy_index_params(index_choices)
 
         self._records.append(
             StoredBenchmarkResult(
@@ -74,7 +68,7 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
                 tested_table_ddl=tested_table_ddl,
                 source_table_ddl=result.source_table_ddl,
                 is_source_table_copy=result.is_source_table_copy,
-                index_params=index_params,
+                index_params=result.index_params,
                 total_n_rows_in_tested_table=result.total_n_rows_in_tested_table,
                 total_n_rows_in_source_table=result.total_n_rows_in_source_table,
                 measured_percentiles=list(result.measured_percentiles),
@@ -203,6 +197,12 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
                 ),
                 tested_table_consumed_compressed_size_bytes_overall_readable=(
                     result.tested_table_consumed_compressed_size_bytes_overall_readable
+                ),
+                tested_table_total_size_bytes_with_indexes=(
+                    result.tested_table_total_size_bytes_with_indexes
+                ),
+                tested_table_total_size_bytes_with_indexes_readable=(
+                    result.tested_table_total_size_bytes_with_indexes_readable
                 ),
                 source_table_consumed_compressed_size_bytes_overall=(
                     result.source_table_consumed_compressed_size_bytes_overall

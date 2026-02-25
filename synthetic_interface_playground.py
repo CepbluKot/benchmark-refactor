@@ -477,11 +477,12 @@ def build_synthetic_root_config() -> object:
                     "global_rules": {"rule_bank": "clickhouse_debug_bank"},
                     "queries": {
                         "mode": "manual",
-                        "warmup_queries": ["SELECT count() FROM {table}"],
                         "test_queries": [
                             {
                                 "query": "SELECT sum(user_id) FROM {table}",
-                                "weight": 1.0,
+                                "cache_mode": "warm",
+                                "select_operations_count": 3,
+                                "warmup_queries": ["SELECT count() FROM {table}"],
                             }
                         ],
                     },

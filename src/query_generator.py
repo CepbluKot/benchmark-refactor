@@ -114,7 +114,7 @@ class QueryGenerator:
         queries += self._aggregate_queries()
         queries += self._group_by_queries()
 
-        # weights removed — return list as-is
+        # Возвращаем запросы как есть: scoring больше не использует query-level weights.
 
         return queries
 

@@ -17,12 +17,14 @@ from src.benchmark_runtime.implementations.clickhouse_celery.tasks import (
     _measure_insert,
     _measure_select_queries,
     _rows_per_second,
+    QueryPayload,
     QueryPlanPayload,
     SourceBenchmarkTaskPayload,
     VariantBenchmarkTaskPayload,
     run_source_benchmark,
     run_variant_benchmark,
 )
+from src.benchmark_runtime.types import build_index_params_json
 
 VALID_SOURCE_DDL = """
 CREATE TABLE analytics.events
@@ -246,7 +248,6 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             "max_iterations": 1,
             "insert_rows_limit": 1000,
             "query_plan": {
-                "warmup_queries": [],
                 "test_queries": ["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
             },
         }
@@ -311,8 +312,14 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             source_table="events",
             source_table_ddl=VALID_SOURCE_DDL,
             query_plan=QueryPlanPayload(
-                warmup_queries=["SELECT 1"],
-                test_queries=["SELECT count() FROM `analytics`.`events`"],
+                test_queries=[
+                    {
+                        "query": "SELECT count() FROM `analytics`.`events`",
+                        "cache_mode": "warm",
+                        "select_operations_count": 2,
+                        "warmup_queries": ["SELECT 1"],
+                    }
+                ],
             ),
             max_iterations=2,
             measured_percentiles=[50, 100],
@@ -372,6 +379,11 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             [make_readable_bytes(6144.0), make_readable_bytes(8192.0)],
         )
         self.assertEqual(result.metrics["total_n_rows_in_source_table"], 321)
+        self.assertEqual(result.metrics["tested_table_total_size_bytes_with_indexes"], 1024.0)
+        self.assertEqual(
+            result.metrics["tested_table_total_size_bytes_with_indexes_readable"],
+            make_readable_bytes(1024.0),
+        )
         self.assertIn("`bench_tmp`.`events__source_baseline__", result.metrics["source_table_select_test_query"])
         self.assertIn("SELECT 1", fake_client.execute_calls)
         self.assertEqual(len(fake_client.insert_with_metrics_calls), 2)
@@ -423,7 +435,6 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             source_table="events",
             source_table_ddl=VALID_SOURCE_DDL,
             query_plan=QueryPlanPayload(
-                warmup_queries=[],
                 test_queries=["SELECT count() FROM `analytics`.`events`"],
             ),
             max_iterations=1,
@@ -479,11 +490,15 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             source_table="events",
             source_table_ddl=VALID_SOURCE_DDL,
             query_plan=QueryPlanPayload(
-                warmup_queries=[
-                    "SELECT count() FROM `analytics`.events",
-                ],
                 test_queries=[
-                    "SELECT count() FROM analytics.`events`",
+                    {
+                        "query": "SELECT count() FROM analytics.`events`",
+                        "cache_mode": "warm",
+                        "select_operations_count": 1,
+                        "warmup_queries": [
+                            "SELECT count() FROM `analytics`.events",
+                        ],
+                    },
                 ],
             ),
             max_iterations=1,
@@ -534,7 +549,6 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             source_table="events",
             source_table_ddl=VALID_SOURCE_DDL,
             query_plan=QueryPlanPayload(
-                warmup_queries=[],
                 test_queries=["SELECT count() FROM `analytics`.`events`"],
             ),
             max_iterations=1,
@@ -560,6 +574,64 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             parsed_score.get("expression"),
             "safe_div(source_select_time_ms_by_percentile[100], tested_select_time_ms_by_percentile[100])",
         )
+
+    def test_run_source_benchmark_supports_geomean_expression_with_medians_and_sizes(self) -> None:
+        fake_client = _FakeRuntimeClient(
+            query_metrics_sequence=[
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 10_000.0,
+                },
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+            ],
+            count_rows_map={("analytics", "events"): 321},
+            column_sizes_map={("analytics", "events"): {}},
+            total_size_map={("analytics", "events"): 1_024.0},
+        )
+
+        payload = SourceBenchmarkTaskPayload(
+            connection=self._connection_payload(),
+            benchmark_run_id=1,
+            benchmark_started_at=datetime(2026, 2, 24, 12, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_source_custom_score_geomean",
+            source_database="analytics",
+            test_database="bench_tmp",
+            source_table="events",
+            source_table_ddl=VALID_SOURCE_DDL,
+            query_plan=QueryPlanPayload(
+                test_queries=["SELECT count() FROM `analytics`.`events`"],
+            ),
+            max_iterations=1,
+            scoring={
+                "mode": "expression",
+                "expression": (
+                    "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) "
+                    "* safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) "
+                    "* safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)"
+                ),
+            },
+            measured_percentiles=[100],
+        )
+
+        with patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks._ClickHouseRuntimeClient",
+            return_value=fake_client,
+        ):
+            result = run_source_benchmark(payload)
+
+        self.assertEqual(result.score, 1.0)
+        parsed_score = json.loads(result.score_calculation_json or "{}")
+        self.assertEqual(parsed_score.get("mode"), "expression")
+        self.assertEqual(parsed_score.get("final_score"), 1.0)
 
     def test_run_source_benchmark_stores_baseline_row_when_result_store_configured(self) -> None:
         fake_client = _FakeRuntimeClient(
@@ -607,7 +679,6 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             result_database="benchmark_results",
             result_table="combined_benchmark_results",
             query_plan=QueryPlanPayload(
-                warmup_queries=["SELECT 1"],
                 test_queries=["SELECT count() FROM `analytics`.`events`"],
             ),
             max_iterations=1,
@@ -702,7 +773,6 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             result_database="benchmark_results",
             result_table="combined_benchmark_results",
             query_plan=QueryPlanPayload(
-                warmup_queries=[],
                 test_queries=["SELECT count() FROM `analytics`.`events`"],
             ),
             max_iterations=1,
@@ -863,7 +933,6 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             max_iterations=2,
             insert_rows_limit=1000,
             query_plan=QueryPlanPayload(
-                warmup_queries=["SELECT 1"],
                 test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
             ),
             source_benchmark={
@@ -882,7 +951,8 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
         ):
             result = run_variant_benchmark(payload)
 
-        self.assertAlmostEqual(result.score or 0.0, 2.0)
+        expected_score = ((350.0 / 150.0) * (175.0 / 75.0) * (4000.0 / 2050.0)) ** (1.0 / 3.0)
+        self.assertAlmostEqual(result.score or 0.0, expected_score)
         self.assertEqual(result.total_n_rows_in_tested_table, 222)
         self.assertEqual(result.total_n_rows_in_source_table, 300)
         self.assertEqual(result.tested_table_insert_time_ms_measurements, [100.0, 200.0])
@@ -948,9 +1018,16 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
         self.assertEqual(store_call["benchmark_run_id"], 2)
         self.assertEqual(store_call["variant_table"], "events__bench__bench_var__0001")
         stored_result = store_call["result"]
-        self.assertAlmostEqual(stored_result.score or 0.0, 2.0)
-        self.assertEqual(result.index_params, "set(512) GRANULARITY 2")
-        self.assertEqual(stored_result.index_params, "set(512) GRANULARITY 2")
+        self.assertAlmostEqual(stored_result.score or 0.0, expected_score)
+        self.assertIsNone(result.index_params)
+        self.assertIsNone(stored_result.index_params)
+        self.assertIn("index_choices", result.variant_params)
+        self.assertIn("user_id", result.variant_params.get("index_choices", {}))
+        self.assertEqual(result.tested_table_total_size_bytes_with_indexes, 2050.0)
+        self.assertEqual(
+            result.tested_table_total_size_bytes_with_indexes_readable,
+            make_readable_bytes(2050.0),
+        )
 
         parsed_index_pct = json.loads(result.tested_table_indexes_sizes_percent_from_col_size or "{}")
         self.assertEqual(parsed_index_pct.get("user_id"), 25.0)
@@ -1080,7 +1157,6 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             max_iterations=2,
             insert_rows_limit=1000,
             query_plan=QueryPlanPayload(
-                warmup_queries=["SELECT 1"],
                 test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
             ),
             source_benchmark={
@@ -1180,8 +1256,107 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             max_iterations=2,
             insert_rows_limit=1000,
             query_plan=QueryPlanPayload(
-                warmup_queries=["SELECT 1"],
                 test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
+            ),
+            source_benchmark={
+                "source_table_ddl": VALID_SOURCE_DDL,
+                "metrics": source_metrics,
+            },
+            measured_percentiles=[50, 100],
+        )
+
+        with patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks._ClickHouseRuntimeClient",
+            return_value=fake_client,
+        ), patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks.ClickHouseBenchmarkResultStore",
+            return_value=fake_store,
+        ):
+            result = run_variant_benchmark(payload)
+
+        self.assertEqual(result.score, 2.0)
+
+    def test_run_variant_benchmark_uses_custom_scoring_expression_per_query_by_id(self) -> None:
+        fake_client = _FakeRuntimeClient(
+            query_metrics_sequence=[
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 10_000.0,
+                },
+                {
+                    "elapsed_ns": 200_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 10_000.0,
+                },
+                {
+                    "elapsed_ns": 50_000_000.0,
+                    "read_rows": 500.0,
+                    "read_bytes": 5_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 500.0,
+                    "read_bytes": 5_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+            ],
+            count_rows_map={("bench_tmp", "events__bench__bench_var__0001"): 222},
+            column_sizes_map={("bench_tmp", "events__bench__bench_var__0001"): {}},
+            total_size_map={("bench_tmp", "events__bench__bench_var__0001"): 2000.0},
+        )
+        fake_store = _FakeResultStore()
+        source_metrics = {
+            "total_n_rows_in_source_table": 300,
+            "source_table_insert_time_ms_measurements_percentiles": [300.0, 400.0],
+            "source_table_select_time_ms_measurements_percentiles": [150.0, 200.0],
+            "source_table_consumed_compressed_size_bytes_overall": 4000.0,
+            "source_table_insert_rows_per_second_measurements_percentiles": [1.0, 1.0],
+            "source_table_insert_bytes_per_second_measurements_percentiles": [1.0, 1.0],
+            "source_table_insert_memory_usage_measurements_percentiles": [1.0, 1.0],
+            "source_table_select_rows_per_second_measurements_percentiles": [1.0, 1.0],
+            "source_table_select_bytes_per_second_measurements_percentiles": [1.0, 1.0],
+            "source_table_select_memory_usage_measurements_percentiles": [1.0, 1.0],
+        }
+
+        payload = VariantBenchmarkTaskPayload(
+            connection=self._connection_payload(),
+            result_connection=self._connection_payload(),
+            result_database="benchmark_results",
+            result_table="combined_benchmark_results",
+            benchmark_run_id=2,
+            benchmark_started_at=datetime(2026, 2, 24, 13, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_var",
+            source_database="analytics",
+            source_table="events",
+            variant_database="bench_tmp",
+            variant_table="events__bench__bench_var__0001",
+            variant_mode="types",
+            scoring={
+                "mode": "expression",
+                "expression": (
+                    "safe_div(tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json['q_main']."
+                    "elapsed_ms_percentiles_speed_up_coefs[1], 1)"
+                ),
+            },
+            variant_params={},
+            variant_ddl=VALID_VARIANT_DDL,
+            max_iterations=2,
+            insert_rows_limit=1000,
+            query_plan=QueryPlanPayload(
+                test_queries=[
+                    QueryPayload(
+                        query_id="q_main",
+                        query="SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`",
+                    )
+                ],
             ),
             source_benchmark={
                 "source_table_ddl": VALID_SOURCE_DDL,
@@ -1274,7 +1449,6 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             max_iterations=2,
             insert_rows_limit=1000,
             query_plan=QueryPlanPayload(
-                warmup_queries=["SELECT 1"],
                 test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
             ),
             source_benchmark={
@@ -1369,7 +1543,6 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             max_iterations=2,
             insert_rows_limit=1000,
             query_plan=QueryPlanPayload(
-                warmup_queries=["SELECT 1"],
                 test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
             ),
             source_benchmark={
@@ -1425,7 +1598,6 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             source_table="events",
             source_table_ddl=VALID_SOURCE_DDL,
             query_plan=QueryPlanPayload(
-                warmup_queries=[],
                 test_queries=["SELECT count() FROM `analytics`.`events`"],
             ),
             max_iterations=1,
@@ -1459,7 +1631,6 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             source_table="events",
             source_table_ddl=VALID_SOURCE_DDL,
             query_plan=QueryPlanPayload(
-                warmup_queries=["SELECT 1"],
                 test_queries=["SELECT count() FROM `analytics`.`events`"],
             ),
             max_iterations=2,
@@ -1509,7 +1680,7 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             variant_params={},
             variant_ddl=variant_ddl,
             max_iterations=1,
-            query_plan=QueryPlanPayload(warmup_queries=[], test_queries=[]),
+            query_plan=QueryPlanPayload(test_queries=[]),
             measured_percentiles=[50, 100],
         )
 
@@ -1940,18 +2111,131 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             [10_000.0],
         )
 
-    def test_query_plan_rejects_dangerous_sql(self) -> None:
+    def test_measure_select_queries_cold_mode_drops_caches_before_each_measurement(self) -> None:
+        fake_client = _FakeRuntimeClient(
+            query_metrics_sequence=[
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+                {
+                    "elapsed_ns": 120_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+            ],
+            retry_policy=(0, 0.0, 0.0),
+        )
+
+        stats = _measure_select_queries(
+            fake_client,
+            test_queries=[
+                QueryPayload(
+                    query="SELECT count() FROM t1",
+                    cache_mode="cold",
+                    select_operations_count=2,
+                )
+            ],
+            n_measurements=5,
+        )
+
+        self.assertEqual(len(fake_client.select_with_metrics_calls), 2)
+        self.assertEqual(
+            fake_client.execute_calls.count("SYSTEM DROP MARK CACHE"),
+            2,
+        )
+        self.assertEqual(
+            fake_client.execute_calls.count("SYSTEM DROP UNCOMPRESSED CACHE"),
+            2,
+        )
+        self.assertEqual(stats["per_query"][0]["select_operations_count"], 2)
+        self.assertEqual(stats["per_query"][0]["cache_mode"], "cold")
+
+    def test_measure_select_queries_warm_mode_runs_query_warmups_once(self) -> None:
+        fake_client = _FakeRuntimeClient(
+            query_metrics_sequence=[
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+                {
+                    "elapsed_ns": 110_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+                {
+                    "elapsed_ns": 120_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+            ],
+            retry_policy=(0, 0.0, 0.0),
+        )
+
+        stats = _measure_select_queries(
+            fake_client,
+            test_queries=[
+                QueryPayload(
+                    query="SELECT count() FROM t1",
+                    cache_mode="warm",
+                    select_operations_count=3,
+                    warmup_queries=["SELECT 1"],
+                )
+            ],
+            n_measurements=1,
+        )
+
+        self.assertEqual(fake_client.execute_calls.count("SELECT 1"), 1)
+        self.assertEqual(len(fake_client.select_with_metrics_calls), 3)
+        self.assertEqual(stats["per_query"][0]["select_operations_count"], 3)
+        self.assertEqual(stats["per_query"][0]["cache_mode"], "warm")
+        self.assertEqual(stats["per_query"][0]["warmup_queries"], ["SELECT 1"])
+
+    def test_query_plan_rejects_dangerous_query_level_warmup_sql(self) -> None:
         with self.assertRaisesRegex(ValueError, "потенциально опасный SQL"):
             QueryPlanPayload(
-                warmup_queries=["DROP TABLE analytics.events"],
-                test_queries=["SELECT 1"],
+                test_queries=[
+                    {
+                        "query": "SELECT 1",
+                        "warmup_queries": ["DROP TABLE analytics.events"],
+                    }
+                ],
             )
 
-    def test_query_plan_rejects_non_read_only_sql(self) -> None:
+    def test_query_plan_rejects_non_read_only_query_level_warmup_sql(self) -> None:
         with self.assertRaisesRegex(ValueError, "разрешены только read-only SQL-запросы"):
             QueryPlanPayload(
-                warmup_queries=["SYSTEM FLUSH LOGS"],
-                test_queries=["SELECT 1"],
+                test_queries=[
+                    {
+                        "query": "SELECT 1",
+                        "warmup_queries": ["SYSTEM FLUSH LOGS"],
+                    }
+                ],
+            )
+
+    def test_query_plan_rejects_query_level_warmup_for_cold_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cache_mode=cold"):
+            QueryPlanPayload(
+                test_queries=[
+                    {
+                        "query": "SELECT 1",
+                        "cache_mode": "cold",
+                        "select_operations_count": 1,
+                        "warmup_queries": ["SELECT 1"],
+                    }
+                ],
             )
 
     def test_runtime_client_rejects_dangerous_user_query(self) -> None:
@@ -1966,6 +2250,23 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
                 "DELETE FROM analytics.events",
                 query_tag="select-test",
             )
+
+    def test_build_index_params_json_uses_variant_table_key_and_pretty_json(self) -> None:
+        payload = {
+            "user_id": {"index_type": "set(512)", "granularity": 2},
+            "country": {"index_type": "minmax", "granularity": 4},
+        }
+        index_params = build_index_params_json(
+            "events__bench__bench_var__0001",
+            payload,
+        )
+        self.assertIsNotNone(index_params)
+        parsed = json.loads(index_params or "{}")
+        self.assertEqual(
+            parsed.get("events__bench__bench_var__0001"),
+            ["set(512) GRANULARITY 2", "minmax GRANULARITY 4"],
+        )
+        self.assertIn("\n", index_params or "")
 
     def test_variant_task_skips_invalid_payload_without_crash(self) -> None:
         variant_task = getattr(celery_tasks_module, "variant_benchmark_task", None)

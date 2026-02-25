@@ -55,7 +55,8 @@
         "test_queries": [
           {
             "query": "SELECT count() FROM {table} WHERE event_time >= now() - INTERVAL 1 DAY",
-            "weight": 2.0
+            "cache_mode": "warm",
+            "select_operations_count": 5
           }
         ]
       },
@@ -89,13 +90,14 @@
           },
           "queries": {
             "mode": "manual",
-            "warmup_queries": [
-              "SELECT count() FROM {table}"
-            ],
             "test_queries": [
               {
                 "query": "SELECT sum(revenue) FROM {table}",
-                "weight": 1.0
+                "cache_mode": "warm",
+                "select_operations_count": 2,
+                "warmup_queries": [
+                  "SELECT count() FROM {table}"
+                ]
               }
             ]
           }

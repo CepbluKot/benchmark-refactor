@@ -22,6 +22,7 @@ BenchmarkStrategy = Literal[
     "combined_strategy",
     "sequential_topn_strategy",
 ]
+SelectQueryCacheMode = Literal["warm", "cold"]
 ScoringMode = Literal["builtin", "expression"]
 ColumnOrderMode = Literal["compressed_size_desc"]
 RuleSourceMode = Literal[
@@ -116,6 +117,28 @@ class IndexConfig(_Base):
 
     type: str
     granularity: int = Field(default=1, ge=1)
+    table_index_granularity_values: Optional[List[int]] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "index_granularity_values",
+            "table_index_granularity_values",
+        ),
+        serialization_alias="index_granularity_values",
+    )
+
+    @field_validator("table_index_granularity_values")
+    @classmethod
+    def normalize_table_index_granularity_values(
+        cls,
+        values: Optional[List[int]],
+    ) -> Optional[List[int]]:
+        """
+        Проверяет список перебора `SETTINGS index_granularity` для одного индекса.
+
+        Поддерживает конфиг вида:
+          {"type": "...", "granularity": 2, "index_granularity_values": [8192, 16384]}.
+        """
+        return _normalize_positive_int_sequence(values)
 
 
 class IndexRuleConfig(_Base):
@@ -217,10 +240,50 @@ class RulesConfig(_Base):
 
 
 class TestQueryConfig(_Base):
-    """Конфигурация одного тестового SQL-запроса и его веса в scoring."""
+    """Конфигурация одного тестового SQL-запроса."""
 
+    query_id: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("query_id", "id"),
+        serialization_alias="query_id",
+    )
     query: str
-    weight: float = Field(default=1.0, gt=0)
+    cache_mode: SelectQueryCacheMode = "warm"
+    select_operations_count: int = Field(default=1, gt=0)
+    warmup_queries: List[str] = Field(default_factory=list)
+
+    @field_validator("query_id")
+    @classmethod
+    def normalize_query_id(cls, value: Optional[str]) -> Optional[str]:
+        """Нормализует query_id и запрещает пустой id."""
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("query_id не должен быть пустым")
+        return cleaned
+
+    @field_validator("query")
+    @classmethod
+    def normalize_query(cls, value: str) -> str:
+        """Нормализует SQL-запрос и запрещает пустую строку."""
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("query не должен быть пустым")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_cache_mode_config(self) -> "TestQueryConfig":
+        """
+        Проверяет согласованность cache_mode и warmup-настроек.
+
+        Для `cold` query-level warmup не применяется, поэтому такой конфиг запрещён.
+        """
+        if self.cache_mode == "cold" and self.warmup_queries:
+            raise ValueError(
+                "warmup_queries нельзя задавать для query с cache_mode=cold"
+            )
+        return self
 
 
 class QueriesConfig(_Base):
@@ -234,7 +297,6 @@ class QueriesConfig(_Base):
     """
 
     mode: Literal["auto", "manual", "auto_with_manual"] = "auto"
-    warmup_queries: List[str] = Field(default_factory=list)
     test_queries: List[TestQueryConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -242,6 +304,15 @@ class QueriesConfig(_Base):
         """Гарантирует, что `manual` режим не запущен с пустым списком запросов."""
         if self.mode == "manual" and not self.test_queries:
             raise ValueError("mode=manual требует хотя бы одного test_query")
+        seen_query_ids: set[str] = set()
+        for query in self.test_queries:
+            if query.query_id is None:
+                continue
+            if query.query_id in seen_query_ids:
+                raise ValueError(
+                    f"query_id={query.query_id!r} повторяется в test_queries"
+                )
+            seen_query_ids.add(query.query_id)
         return self
 
 

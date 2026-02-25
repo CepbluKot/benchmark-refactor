@@ -24,6 +24,7 @@ from .tasks import (
     SOURCE_BENCHMARK_TASK_NAME,
     VARIANT_BENCHMARK_TASK_NAME,
     ConnectionPayload,
+    QueryPayload,
     QueryPlanPayload,
     SourceBenchmarkTaskPayload,
     VariantBenchmarkTaskPayload,
@@ -209,8 +210,16 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
             result_database=self._result_database,
             result_table=self._result_table,
             query_plan=QueryPlanPayload(
-                warmup_queries=list(job.query_plan.warmup_queries),
-                test_queries=[query.query for query in job.query_plan.test_queries],
+                test_queries=[
+                    QueryPayload(
+                        query_id=query.query_id,
+                        query=query.query,
+                        cache_mode=query.cache_mode,
+                        select_operations_count=query.select_operations_count,
+                        warmup_queries=list(query.warmup_queries),
+                    )
+                    for query in job.query_plan.test_queries
+                ],
             ),
             max_iterations=job.max_iterations,
             insert_rows_limit=job.insert_rows_limit,
@@ -240,8 +249,16 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
             insert_rows_limit=job.insert_rows_limit,
             scoring=job.scoring,
             query_plan=QueryPlanPayload(
-                warmup_queries=list(job.query_plan.warmup_queries),
-                test_queries=[query.query for query in job.query_plan.test_queries],
+                test_queries=[
+                    QueryPayload(
+                        query_id=query.query_id,
+                        query=query.query,
+                        cache_mode=query.cache_mode,
+                        select_operations_count=query.select_operations_count,
+                        warmup_queries=list(query.warmup_queries),
+                    )
+                    for query in job.query_plan.test_queries
+                ],
             ),
             source_benchmark=(
                 job.source_benchmark.model_dump(mode="json")

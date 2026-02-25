@@ -216,8 +216,13 @@ class ClickHouseCeleryRuntimeTests(unittest.TestCase):
             source_table="events",
             source_table_ddl=TableDDL.from_ddl(EVENTS_DDL),
             query_plan=QueryPlan(
-                warmup_queries=["SELECT 1"],
-                test_queries=[Query(query="SELECT count() FROM `analytics`.`events`")],
+                test_queries=[
+                    Query(
+                        query_id="q_count_events",
+                        query="SELECT count() FROM `analytics`.`events`",
+                        warmup_queries=["SELECT 1"],
+                    )
+                ],
             ),
             max_iterations=3,
             insert_rows_limit=100,

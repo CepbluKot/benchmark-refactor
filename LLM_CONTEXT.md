@@ -161,13 +161,21 @@
 1. run-метаданные: `benchmark_run_id`, `benchmark_started_at`, `benchmark_id`.
 2. таблица/вариант: `source_db_name`, `source_table_name`, `variant_table`, `variant_mode`.
 3. параметры варианта: `variant_params` (нормализованный JSON-словарь из `VariantMeta`).
-4. DDL-снимки: `tested_table_ddl` (обязательный), `source_table_ddl` (опциональный).
-5. extended combined-метрики: insert/select/compression/indexes поля + `extra_json`.
-6. per-query select JSON-поля:
-   - `tested_table_select_metrics_by_query_json`
-   - `source_table_select_metrics_by_query_json`
-   - `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json`
-7. итог: `score` и `score_calculation_json` (детали формулы/контекста/статуса расчёта);
+4. `index_params` оставлен как legacy nullable-колонка; новые данные параметров индексов/типов хранятся в `variant_params`.
+5. DDL-снимки: `tested_table_ddl` (обязательный), `source_table_ddl` (опциональный).
+6. метрики размера:
+   - `tested_table_consumed_compressed_size_bytes_overall` (данные без индексов),
+   - `tested_table_total_size_bytes_with_indexes` (данные + размеры skip-индексов).
+7. extended combined-метрики: insert/select/compression/indexes поля + `extra_json`.
+8. per-query select-метрики хранятся в основной таблице в JSON-полях
+   `tested_table_select_metrics_by_query_json`,
+   `source_table_select_metrics_by_query_json`,
+   `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json`
+   в формате map `query_id -> metrics`.
+9. SQL-значения перед сохранением форматируются:
+   - scalar-поля `*_ddl`, `*_query`;
+   - query-поля внутри JSON-метрик (`query`, `source_query`, `warmup_queries`).
+10. итог: `score` и `score_calculation_json` (детали формулы/контекста/статуса расчёта);
    для top-N DDL восстанавливается из `tested_table_ddl`.
 
 В `src/benchmark_runtime/types.py` есть helper `build_variant_params(...)`,
@@ -182,9 +190,13 @@
 2. Создаёт временную baseline-таблицу с именем `source_table__source_baseline__<uuid>`.
 3. Строит DDL baseline-копии через `TableDDL.from_ddl(...)->to_ddl()`.
    Некорректный DDL должен приводить к ошибке (без fallback-переписи).
-4. Переписывает `warmup/test queries` на baseline-копию (`_rewrite_queries_to_baseline_copy`).
+4. Переписывает query-level `test_queries` (включая их `warmup_queries`)
+   на baseline-копию (`_rewrite_query_payloads_to_baseline_copy`).
 5. Снимает baseline insert-метрики через `_measure_insert(...)`.
-6. Снимает baseline select-метрики через `_measure_select_queries(...)`.
+6. Снимает baseline select-метрики через `_measure_select_queries(...)` с режимами:
+   - `cache_mode=warm`: query-level warmup и серия замеров;
+   - `cache_mode=cold`: перед каждым замером сбрасывает
+     `SYSTEM DROP MARK CACHE` и `SYSTEM DROP UNCOMPRESSED CACHE`.
 7. Дополнительно сохраняет per-query source select-метрики (`source_table_select_metrics_by_query`).
 8. Возвращает baseline-метрики в `SourceBenchmarkResult.metrics`.
 9. Всегда удаляет временную baseline-таблицу в `finally`.
@@ -240,7 +252,10 @@
 2. Реальный двухфазный top-N sequential делается не здесь, а в `SequentialTopNTableExecutionStrategy`.
 3. Для `indexes`/`combined` можно задать `index_granularity_values`:
    это добавляет перебор `SETTINGS index_granularity` и умножает число индексных вариантов.
-4. При применении нового `index_granularity` старое значение из исходного DDL
+4. Для каждого `indexes[]` можно задать свой `index_granularity_values`:
+   эффективные значения считаются как пересечение global и per-index списков
+   (если global не задан — берётся per-index список).
+5. При применении нового `index_granularity` старое значение из исходного DDL
    заменяется без дублей; итоговый variant-DDL содержит ровно один ключ.
 
 ### 5.3 Реестр
@@ -304,11 +319,20 @@ Baseline исходного DDL для них уже выполнен runner-о�
 13. `max_benchmarks_limits`
 14. `max_type_benchmarks` (legacy)
 15. `max_index_benchmarks` (legacy)
-16. `index_granularity_values` (перебор `SETTINGS index_granularity`)
+16. `index_granularity_values` (global-перебор `SETTINGS index_granularity`)
 17. `column_rules_mode`, `index_rules_mode`
 18. `queries`
 19. `scoring`
 20. `table_rules[]` (локальные override, включая `strategy` и `test_database`)
+
+Дополнительно для `queries.test_queries[]`:
+1. `query` — SQL-шаблон (поддерживаются `{table}` и `{benchmark_id}`).
+2. `query_id` — стабильный идентификатор запроса (если не задан, генерируется автоматически).
+3. `cache_mode` — `warm` или `cold`.
+4. `select_operations_count` — число select-замеров конкретного запроса.
+5. `warmup_queries` — query-level прогревы для `warm` режима
+   (для `cold` запрещены).
+6. Глобальный `queries.warmup_queries` не поддерживается.
 
 Дополнительно для `column_rules[]`:
 1. `auto_generate_alternatives` (`false` по умолчанию) — включает legacy-автогенерацию type+codec.
@@ -320,6 +344,7 @@ Baseline исходного DDL для них уже выполнен runner-о�
 3. Ручные `indexes` и авто-сгенерированные индексы объединяются; дубли `(type, granularity)` удаляются.
 4. Для range-типов (`Int8/16/32/64`, `Float32/64`, `Decimal*`, `Date/DateTime*`) авто-генерация добавляет `minmax`.
 5. `set(...)` и `bloom_filter(...)` auto-генератор не добавляет; их задают вручную в `indexes`.
+6. В `indexes[]` можно задать `index_granularity_values` для конкретного индекс-варианта.
 
 ### 7.2 Контракты верхнего уровня
 
@@ -365,6 +390,13 @@ Baseline исходного DDL для них уже выполнен runner-о�
 3. `on_error_score` — fallback при ошибке expression (иначе `score=None`).
 4. Для совместимости `expression` можно передать alias-ключами `score_expression`/`sql_expression`.
 
+`builtin` считает:
+1. `insert_ratio = median(source_insert_ms) / median(tested_insert_ms)`.
+2. `select_ratio = median(source_select_ms) / median(tested_select_ms)`.
+3. `compression_ratio = source_size_bytes / tested_size_bytes`
+   (используются `*_total_size_bytes_with_indexes`).
+4. `score = (insert_ratio * select_ratio * compression_ratio) ** (1/3)`.
+
 Приоритет override:
 
 1. `table_rules[].scoring`;
@@ -374,8 +406,31 @@ Baseline исходного DDL для них уже выполнен runner-о�
 
 1. Есть nested-объекты `source`/`tested`/`speedup`.
 2. Есть flat алиасы (`source_select_time_ms_percentiles`, `tested_select_time_ms_by_percentile` и т.д.).
-3. Есть `compression_overall_coef`.
-4. Для per-query speedup есть `select_time_speedup_by_query`.
+3. Есть `compression_overall_coef`, `source_size_bytes`, `tested_size_bytes`.
+4. Есть precomputed блоки:
+   - `medians.source_insert_time_ms`, `medians.tested_insert_time_ms`,
+     `medians.source_select_time_ms`, `medians.tested_select_time_ms`;
+   - `ratios.insert`, `ratios.select`, `ratios.compression`.
+5. Для per-query есть и list (`select_time_speedup_by_query`), и map-доступы через `per_query`:
+   - `per_query.tested_by_query_id['q_id']`
+   - `per_query.source_by_query_id['q_id']`
+   - `per_query.speedup_by_query_id['q_id']`
+6. Есть JSON-alias root-поля (уже распарсенные в map по `query_id`):
+   - `tested_table_select_metrics_by_query_json['q_id']`
+   - `source_table_select_metrics_by_query_json['q_id']`
+   - `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json['q_id']`
+
+Рекомендуемая expression-формула (ratio + геометрическое среднее):
+
+1. `insert_ratio = median(source_insert_ms) / median(tested_insert_ms)`.
+2. `select_ratio = median(source_select_ms) / median(tested_select_ms)`.
+3. `compression_ratio = source_size_bytes / tested_size_bytes`.
+4. `score = (insert_ratio * select_ratio * compression_ratio)^(1/3)`.
+5. В runtime это обычно задаётся как:
+   `pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)`.
+
+Для baseline run (`run_source_benchmark`) `source` и `tested` в контексте совпадают
+и рассчитываются из baseline-метрик.
 
 Доступ к перцентилям:
 
@@ -385,7 +440,7 @@ Baseline исходного DDL для них уже выполнен runner-о�
 
 Разрешённые функции:
 
-1. `safe_div`, `pct`, `at`, `coalesce`, `clamp`.
+1. `safe_div`, `pct`, `at`, `coalesce`, `clamp`, `median`.
 2. `abs`, `min`, `max`, `round`, `sqrt`, `log`, `ln`, `pow`.
 
 Разрешённые операторы:
@@ -540,7 +595,7 @@ Baseline исходного DDL для них уже выполнен runner-о�
 ./venv/bin/python -m pytest -q
 ```
 
-На текущем состоянии проекта: `175 passed, 2 subtests passed`.
+На текущем состоянии проекта: `199 passed, 11 subtests passed`.
 
 ## 13) Как расширять проект корректно
 

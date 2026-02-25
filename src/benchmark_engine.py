@@ -186,10 +186,25 @@ class QueryPlanBuilder:
         в `auto_with_manual` — объединяет оба набора.
         """
         mode = queries_config.mode
-        warmups = list(queries_config.warmup_queries)
 
-        auto_queries = [Query(query=q.query) for q in generate_queries(table_ddl)]
-        manual_queries = [Query(query=q.query) for q in queries_config.test_queries]
+        auto_queries = [
+            Query(
+                query_id=f"auto_query_{index}",
+                query=q.query,
+                cache_mode="warm",
+            )
+            for index, q in enumerate(generate_queries(table_ddl))
+        ]
+        manual_queries = [
+            Query(
+                query_id=q.query_id or f"manual_query_{index}",
+                query=q.query,
+                cache_mode=q.cache_mode,
+                select_operations_count=q.select_operations_count,
+                warmup_queries=list(q.warmup_queries),
+            )
+            for index, q in enumerate(queries_config.test_queries)
+        ]
 
         if mode == "auto":
             tests = auto_queries
@@ -198,21 +213,41 @@ class QueryPlanBuilder:
         else:
             tests = auto_queries + manual_queries
 
-        plan = QueryPlan(warmup_queries=warmups, test_queries=tests)
+        plan = QueryPlan(test_queries=self._ensure_unique_query_ids(tests))
         logger.debug(
-            "QueryPlanBuilder: table=%s, mode=%s, warmups=%d, tests=%d",
+            "QueryPlanBuilder: table=%s, mode=%s, tests=%d",
             table_ddl.name,
             queries_config.mode,
-            len(plan.warmup_queries),
             len(plan.test_queries),
         )
         return plan
+
+    @staticmethod
+    def _ensure_unique_query_ids(queries: List[Query]) -> List[Query]:
+        """Гарантирует уникальность query_id в финальном query-plan."""
+        seen: set[str] = set()
+        normalized: list[Query] = []
+        for index, query in enumerate(queries):
+            candidate = query.query_id.strip() if query.query_id.strip() else f"query_{index}"
+            if candidate not in seen:
+                seen.add(candidate)
+                normalized.append(query.model_copy(update={"query_id": candidate}))
+                continue
+
+            suffix = 1
+            while f"{candidate}_{suffix}" in seen:
+                suffix += 1
+            deduplicated_id = f"{candidate}_{suffix}"
+            seen.add(deduplicated_id)
+            normalized.append(query.model_copy(update={"query_id": deduplicated_id}))
+        return normalized
 
     @staticmethod
     def render_for_table(
         plan: QueryPlan,
         database: str,
         table: str,
+        benchmark_id: str = "",
     ) -> QueryPlan:
         """
         Подставляет реальное имя таблицы в каждый запрос плана.
@@ -220,12 +255,25 @@ class QueryPlanBuilder:
         Используется перед отправкой `VariantJob` в execution-адаптер.
         """
         full_table_name = f"`{database}`.`{table}`"
-        warmups = [query.replace("{table}", full_table_name) for query in plan.warmup_queries]
+        benchmark_id_value = benchmark_id
+
+        def _render_sql(sql: str) -> str:
+            return (
+                sql.replace("{table}", full_table_name)
+                .replace("{benchmark_id}", benchmark_id_value)
+            )
+
         tests = [
-            Query(query=planned.query.replace("{table}", full_table_name))
+            Query(
+                query_id=planned.query_id,
+                query=_render_sql(planned.query),
+                cache_mode=planned.cache_mode,
+                select_operations_count=planned.select_operations_count,
+                warmup_queries=[_render_sql(warmup_query) for warmup_query in planned.warmup_queries],
+            )
             for planned in plan.test_queries
         ]
-        return QueryPlan(warmup_queries=warmups, test_queries=tests)
+        return QueryPlan(test_queries=tests)
 
 
 class BenchmarkPlanner:
@@ -576,6 +624,7 @@ class BenchmarkEngine:
             plan=raw_query_plan,
             database=table_plan.database,
             table=table_plan.table,
+            benchmark_id=table_plan.benchmark_id,
         )
         source_insert_rows_limit = None
         if table_plan.source_insert_rows_limits is not None:
@@ -687,6 +736,7 @@ class BenchmarkEngine:
             plan=raw_query_plan,
             database=variant_database,
             table=variant_table,
+            benchmark_id=table_plan.benchmark_id,
         )
 
         effective_insert_rows_limit = self.resolve_insert_rows_limit(
