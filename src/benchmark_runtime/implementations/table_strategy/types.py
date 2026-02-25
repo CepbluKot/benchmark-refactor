@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from src.benchmark_engine import BenchmarkRunner
 
 logger = logging.getLogger(__name__)
+_STAGE_BANNER_LINE = "=" * 92
 
 
 class TypesTableExecutionStrategy(TableExecutionStrategy):
@@ -25,7 +26,16 @@ class TypesTableExecutionStrategy(TableExecutionStrategy):
         benchmark_run_id: int,
         benchmark_started_at: datetime,
     ) -> None:
-        logger.debug(
+        logger.info(_STAGE_BANNER_LINE)
+        logger.info(
+            "СТАРТ СТАДИИ: ТИПЫ+КОДЕКИ | run_id=%d | benchmark=%s | table=%s.%s",
+            benchmark_run_id,
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+        )
+        logger.info(_STAGE_BANNER_LINE)
+        logger.info(
             "TypesTableExecutionStrategy: выполнение table plan "
             "(run_id=%d, benchmark=%s, table=%s.%s)",
             benchmark_run_id,

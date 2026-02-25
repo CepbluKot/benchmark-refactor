@@ -14,9 +14,10 @@
       "index_rules_mode": "global_bank_only",
       "databases": "*",
       "tables": "*",
-      "max_iterations": 3,
-      "insert_rows_limit": 1000000,
-      "insert_rows_limits": {
+      "insert_operations_count": 3,
+      "insert_rows_per_operation_limit": 1000000,
+      "source_insert_rows_per_operation_limit": 700000,
+      "insert_rows_per_operation_limits": {
         "types": 1500000
       },
       "queries": {
@@ -39,9 +40,10 @@
         ],
         "marketing": "*"
       },
-      "max_iterations": 5,
-      "insert_rows_limit": 5000000,
-      "insert_rows_limits": {
+      "insert_operations_count": 5,
+      "insert_rows_per_operation_limit": 5000000,
+      "source_insert_rows_per_operation_limit": 1200000,
+      "insert_rows_per_operation_limits": {
         "combined": 5500000,
         "sequential": 1200000
       },
@@ -61,9 +63,10 @@
         {
           "database": "analytics",
           "table": "user_events",
-          "max_iterations": 2,
-          "insert_rows_limit": 250000,
-          "insert_rows_limits": {
+          "insert_operations_count": 2,
+          "insert_rows_per_operation_limit": 250000,
+          "source_insert_rows_per_operation_limit": 180000,
+          "insert_rows_per_operation_limits": {
             "types": 300000,
             "indexes": 120000
           },

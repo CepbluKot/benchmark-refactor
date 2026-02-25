@@ -56,6 +56,8 @@
    - собирает `VariantJob`.
 
 3. `BenchmarkRunner` (`src/benchmark_engine.py`)
+   - до старта run выполняет предвалидацию всех `scoring.expression`
+     (warning в лог + остановка запуска при ошибках формулы);
    - перед любой table strategy запускает baseline исходного DDL
      через `execution_adapter.execute_source_benchmark(...)`;
    - сохраняет baseline-контекст таблицы и прокидывает его в
@@ -109,6 +111,8 @@
    - `ClickHouseBenchmarkResultStore`
    - worker tasks (`tasks.py`) для baseline/variant benchmark
    - `TaskMonitorCelery` для progress-bar и ожидания Celery batch
+     (требует запуск worker с `-E` / `--events`)
+     и использует `tqdm_loggable` (как в legacy) для корректного вывода в логах
    - `settings.py` (RABBITMQ_* + CELERY_WORKER_CONCURRENCY + retry/stream-limit env, как в legacy)
 
 ### 4.3 Backward-compatible re-export
@@ -147,6 +151,10 @@
 `SourceBenchmarkJob` также содержит:
 1. `test_database` — БД для временной baseline-копии исходной таблицы
    (если не задана, baseline-копия создаётся в `${source_database}__benchmark_tmp`).
+2. `scoring` — стратегия вычисления baseline score (`builtin`/`expression`).
+
+`VariantJob` содержит:
+1. `scoring` — стратегия вычисления variant score (`builtin`/`expression`), уже с учётом table-level override.
 
 Ключевой формат хранения (`StoredBenchmarkResult`):
 
@@ -159,7 +167,8 @@
    - `tested_table_select_metrics_by_query_json`
    - `source_table_select_metrics_by_query_json`
    - `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json`
-7. итог: `score`; для top-N DDL восстанавливается из `tested_table_ddl`.
+7. итог: `score` и `score_calculation_json` (детали формулы/контекста/статуса расчёта);
+   для top-N DDL восстанавливается из `tested_table_ddl`.
 
 В `src/benchmark_runtime/types.py` есть helper `build_variant_params(...)`,
 который собирает стабильные параметры текущего варианта из `VariantMeta`.
@@ -171,9 +180,8 @@
 `run_source_benchmark(payload)`:
 1. Вычисляет `baseline_database = payload.test_database or f"{payload.source_database}__benchmark_tmp"`.
 2. Создаёт временную baseline-таблицу с именем `source_table__source_baseline__<uuid>`.
-3. Строит DDL baseline-копии:
-   - основной путь: `TableDDL.from_ddl(...)->to_ddl()`;
-   - fallback: перепись target-имени в `CREATE TABLE` (для synthetic/legacy DDL).
+3. Строит DDL baseline-копии через `TableDDL.from_ddl(...)->to_ddl()`.
+   Некорректный DDL должен приводить к ошибке (без fallback-переписи).
 4. Переписывает `warmup/test queries` на baseline-копию (`_rewrite_queries_to_baseline_copy`).
 5. Снимает baseline insert-метрики через `_measure_insert(...)`.
 6. Снимает baseline select-метрики через `_measure_select_queries(...)`.
@@ -196,7 +204,7 @@
 
 Низкоуровневые гарантии runtime:
 1. Streaming insert: приоритет `raw_stream/raw_insert` (clickhouse-connect),
-   fallback — `INSERT ... SELECT` + `system.query_log`.
+   fallback — `INSERT ... SELECT` + метрики из `clickhouse_connect` `.summary`.
 2. Strict-fill для insert с `numbers(...)`, чтобы можно было набрать нужное число строк,
    даже если исходная таблица меньше.
 3. Пер-process stream semaphore (`acquire_stream_slot/release_stream_slot`) обязателен,
@@ -204,6 +212,8 @@
 4. Retry/backoff для insert/select берётся из env:
    `MAX_COPY_N_RETRIES`, `MAX_COPY_RETRY_SLEEP_SEC`, `MAX_COPY_RETRY_SLEEP_SEC_INCREMENT`.
 5. Ошибочные замеры маркируются метриками `-1` (удобно фильтровать downstream).
+6. Для `TaskMonitorCelery` и wait-барьеров в sequential top-N Celery worker должен
+   быть запущен с `-E` (`--events`), иначе launcher не получает task events.
 
 ## 5) Генерация вариантов (variant_generation + combiner фасад)
 
@@ -263,7 +273,7 @@ Baseline исходного DDL для них уже выполнен runner-о�
 Условия для index стадии:
 
 1. Должны быть результаты type-стадии.
-2. `sequential_top_n > 0`.
+2. `sequential_types_top_n_for_indexes > 0`.
 3. store должен корректно вернуть top type-варианты.
 
 ## 7) JSON-конфиг и валидация
@@ -278,13 +288,19 @@ Baseline исходного DDL для них уже выполнен runner-о�
 4. `global_rules`
 5. `databases`, `tables`
 6. `test_database` (опционально, отдельная БД для variant-таблиц)
-7. `max_iterations`
-8. `sequential_top_n`
-9. `insert_rows_limit`
-10. `insert_rows_limits`
-11. `column_rules_mode`, `index_rules_mode`
-12. `queries`
-13. `table_rules[]` (локальные override, включая `strategy` и `test_database`)
+7. `insert_operations_count`
+8. `sequential_types_top_n_for_indexes`
+9. `insert_rows_per_operation_limit`
+10. `source_insert_rows_per_operation_limit` (legacy fallback baseline-лимита)
+11. `source_insert_rows_per_operation_limits`
+12. `insert_rows_per_operation_limits`
+13. `max_benchmarks_limits`
+14. `max_type_benchmarks` (legacy)
+15. `max_index_benchmarks` (legacy)
+16. `column_rules_mode`, `index_rules_mode`
+17. `queries`
+18. `scoring`
+19. `table_rules[]` (локальные override, включая `strategy` и `test_database`)
 
 ### 7.2 Контракты верхнего уровня
 
@@ -315,6 +331,68 @@ Baseline исходного DDL для них уже выполнен runner-о�
 2. `parts` — проверка 4 секций + сборка root.
 3. `project` — проверка project-файла и связанных файлов.
 
+Отдельно для формул:
+
+1. `validate_scoring_formula.py` — проверка `scoring.expression` в файле типа
+   `benchmarks|root|project`.
+2. При ошибках печатает `WARNING` и завершает работу с exit code `1`.
+
+### 7.5 Настройка scoring (builtin/expression)
+
+`BenchmarkConfig.scoring` и `TableRuleConfig.scoring` поддерживают:
+
+1. `mode="builtin"` — стандартный runtime score.
+2. `mode="expression"` — безопасное выражение на `simpleeval`.
+3. `on_error_score` — fallback при ошибке expression (иначе `score=None`).
+4. Для совместимости `expression` можно передать alias-ключами `score_expression`/`sql_expression`.
+
+Приоритет override:
+
+1. `table_rules[].scoring`;
+2. `benchmark.scoring`.
+
+Важные детали expression-контекста:
+
+1. Есть nested-объекты `source`/`tested`/`speedup`.
+2. Есть flat алиасы (`source_select_time_ms_percentiles`, `tested_select_time_ms_by_percentile` и т.д.).
+3. Есть `compression_overall_coef`.
+4. Для per-query speedup есть `select_time_speedup_by_query`.
+
+Доступ к перцентилям:
+
+1. По индексу массива: `source.select.time_ms_percentiles[1]`.
+2. По ключу перцентиля: `source_select_time_ms_by_percentile[100]`, `["100"]`, `["p100"]`.
+3. Через helper: `pct(source_select_time_ms_by_percentile, 100)`.
+
+Разрешённые функции:
+
+1. `safe_div`, `pct`, `at`, `coalesce`, `clamp`.
+2. `abs`, `min`, `max`, `round`, `sqrt`, `log`, `ln`, `pow`.
+
+Разрешённые операторы:
+
+1. Арифметика: `+`, `-`, `*`, `/`, `%`, `**`.
+2. Сравнения: `==`, `!=`, `>`, `>=`, `<`, `<=`.
+3. Унарные: `+x`, `-x`, `not x`.
+4. Группировка через скобки `( ... )`.
+
+Ограничения безопасности:
+
+1. Только whitelisted функции.
+2. Нельзя вызывать произвольные объекты (`__import__`, методы, атрибуты с `_` и т.д.).
+3. Любая ошибка expression -> warning + `on_error_score`/`None`.
+4. До старта run `BenchmarkRunner` валидирует expression статически и не запускает
+   benchmark при ошибках формулы.
+
+Отдельно по трассировке расчёта:
+
+1. `_resolve_score(...)` всегда формирует `score_calculation_json`.
+2. Для `builtin` внутри хранятся формула и использованные компоненты.
+3. Для `expression` внутри хранятся исходная строка expression, контекст, статус, ошибка (если есть) и итог.
+4. Для baseline skip (`source_table_empty`) тоже формируется `score_calculation_json` со статусом `skipped`.
+5. Возможные статусы: `ok`, `empty`, `error`, `fallback_on_error`,
+   `non_finite`, `fallback_non_finite`, `skipped`.
+
 ## 8) Правила и их резолв
 
 `src/resolver.py`:
@@ -332,18 +410,46 @@ Baseline исходного DDL для них уже выполнен runner-о�
 
 Если выбран bank-required режим и bank недоступен, это валидная ошибка.
 
-## 9) Лимиты вставки строк
+## 9) Лимиты вставки строк и числа вариантов
 
-Два уровня:
+Пять полей:
 
-1. `insert_rows_limit` — общий fallback.
-2. `insert_rows_limits` — лимиты по mode-ключам (включая будущие custom ключи).
+1. `insert_rows_per_operation_limit` — общий fallback.
+2. `insert_rows_per_operation_limits` — лимиты по mode-ключам (включая будущие custom ключи).
+3. `source_insert_rows_per_operation_limit` — legacy fallback baseline-лимита.
+4. `source_insert_rows_per_operation_limits` — baseline-лимиты по mode.
+5. `max_benchmarks_limits` — лимиты числа variant jobs по mode.
+6. `max_type_benchmarks` / `max_index_benchmarks` — legacy compatibility.
 
 Приоритет `BenchmarkEngine.resolve_insert_rows_limit(...)`:
 
-1. `insert_rows_limits[variant_mode]`
-2. `insert_rows_limits[job_mode or table_plan.mode]`
-3. `insert_rows_limit`
+1. `insert_rows_per_operation_limits[variant_mode]`
+2. `insert_rows_per_operation_limits[job_mode or table_plan.mode]`
+3. `insert_rows_per_operation_limit`
+
+Приоритет `BenchmarkEngine.resolve_variant_generation_limit(...)`:
+
+1. `max_benchmarks_limits[variant_mode]`;
+2. `max_benchmarks_limits[job_mode or table_plan.mode]`;
+3. legacy `max_type_benchmarks` / `max_index_benchmarks`;
+4. legacy fallback `insert_operations_count`.
+
+Для baseline source benchmark:
+
+1. если задан `source_insert_rows_per_operation_limits[table_mode]`, используется он;
+2. затем используется legacy `source_insert_rows_per_operation_limit`, если задан;
+3. иначе используется стандартный fallback
+   `insert_rows_per_operation_limits -> insert_rows_per_operation_limit`.
+
+Семантика итераций и метрик:
+
+1. `insert_operations_count` — это количество insert-замеров (повторов).
+2. `insert_rows_per_operation_limit` — лимит строк на один insert-замер.
+3. Между повторами таблица не очищается.
+4. Итоговый объём строк в тестовой таблице после insert-этапа обычно:
+   `insert_operations_count * insert_rows_per_operation_limit`.
+5. Insert-перцентили считаются по одному объединённому массиву замеров
+   (без mean-of-means между итерациями).
 
 Для sequential это позволяет задавать разные лимиты отдельно для:
 
@@ -369,12 +475,17 @@ Baseline исходного DDL для них уже выполнен runner-о�
 1. `rules`
 2. `column_order_mode`
 3. `queries`
-4. `max_iterations`
-5. `sequential_top_n`
-6. `insert_rows_limit`
-7. `insert_rows_limits`
-8. `strategy`
-9. `test_database`
+4. `insert_operations_count`
+5. `sequential_types_top_n_for_indexes`
+6. `insert_rows_per_operation_limit`
+7. `source_insert_rows_per_operation_limit`
+8. `source_insert_rows_per_operation_limits`
+9. `insert_rows_per_operation_limits`
+10. `max_benchmarks_limits`
+11. `max_type_benchmarks` / `max_index_benchmarks` (legacy)
+12. `strategy`
+13. `test_database`
+14. `scoring`
 
 ## 11) Entry points
 
@@ -394,6 +505,7 @@ Baseline исходного DDL для них уже выполнен runner-о�
 3. `tests/test_combiner_and_naming.py`
 4. `tests/test_loader.py`
 5. `tests/test_validate_json_config.py`
+6. `tests/test_validate_scoring_formula.py`
 
 Запуск:
 
@@ -401,7 +513,7 @@ Baseline исходного DDL для них уже выполнен runner-о�
 ./venv/bin/python -m pytest -q
 ```
 
-На текущем состоянии проекта: `92 passed`.
+На текущем состоянии проекта: `175 passed, 2 subtests passed`.
 
 ## 13) Как расширять проект корректно
 

@@ -198,6 +198,35 @@ class SequentialScoringAdapter(BenchmarkExecutionAdapter):
         return result
 
 
+class SkippingSourceExecutionAdapter(BenchmarkExecutionAdapter):
+    """Адаптер, который помечает baseline как skipped (source table empty)."""
+
+    def __init__(self) -> None:
+        self.executed_jobs: List[VariantJob] = []
+        self.source_jobs: List[SourceBenchmarkJob] = []
+
+    def execute_source_benchmark(self, job: SourceBenchmarkJob) -> SourceBenchmarkResult:
+        self.source_jobs.append(job)
+        return SourceBenchmarkResult(
+            benchmark_run_id=job.benchmark_run_id,
+            benchmark_started_at=job.benchmark_started_at,
+            benchmark_id=job.benchmark_id,
+            source_database=job.source_database,
+            source_table=job.source_table,
+            source_table_ddl=job.source_table_ddl.to_ddl(),
+            score=None,
+            metrics={
+                "status": "skipped",
+                "skip_reason": "source_table_empty",
+                "total_n_rows_in_source_table": 0,
+            },
+        )
+
+    def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
+        self.executed_jobs.append(job)
+        raise AssertionError("variant jobs не должны исполняться, если baseline skipped")
+
+
 class AsyncSelfPersistingSequentialAdapter(BenchmarkExecutionAdapter):
     """
     Имитирует async execution:
@@ -364,11 +393,22 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             id="bench_overrides",
             connection_id="prod_ch",
             strategy="combined_strategy",
+            scoring={
+                "mode": "expression",
+                "expression": "1.5",
+            },
             databases=["analytics"],
             tables=["events"],
             test_database="bench_global",
             max_iterations=10,
+            max_benchmarks_limits=InsertRowsLimitsConfig(
+                types=40,
+                indexes=30,
+                sequential=20,
+            ),
             insert_rows_limit=1_000_000,
+            source_insert_rows_limit=600_000,
+            source_insert_rows_limits=InsertRowsLimitsConfig(sequential=500_000),
             insert_rows_limits=InsertRowsLimitsConfig(
                 types=400_000,
                 indexes=200_000,
@@ -390,7 +430,13 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                     test_database="bench_events",
                     strategy="sequential_topn_strategy",
                     max_iterations=2,
+                    max_benchmarks_limits=InsertRowsLimitsConfig(
+                        types=5,
+                        indexes=6,
+                    ),
                     insert_rows_limit=25_000,
+                    source_insert_rows_limit=120_000,
+                    source_insert_rows_limits=InsertRowsLimitsConfig(sequential=90_000),
                     insert_rows_limits=InsertRowsLimitsConfig(
                         indexes=50_000,
                         sequential=70_000,
@@ -415,6 +461,10 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                             QueryConfigItem(query="SELECT sum(revenue) FROM {table}")
                         ],
                     ),
+                    scoring={
+                        "mode": "expression",
+                        "expression": "2.5",
+                    },
                 )
             ],
         )
@@ -430,12 +480,21 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(plan.mode, "sequential")
         self.assertEqual(plan.test_database, "bench_events")
         self.assertEqual(plan.max_iterations, 2)
+        self.assertIsNotNone(plan.max_benchmarks_limits)
+        self.assertEqual(plan.max_benchmarks_limits.types, 5)
+        self.assertEqual(plan.max_benchmarks_limits.indexes, 6)
+        self.assertEqual(plan.max_benchmarks_limits.sequential, 20)
         self.assertEqual(plan.insert_rows_limit, 25_000)
+        self.assertEqual(plan.source_insert_rows_limit, 120_000)
+        self.assertIsNotNone(plan.source_insert_rows_limits)
+        self.assertEqual(plan.source_insert_rows_limits.sequential, 90_000)
         self.assertIsNotNone(plan.insert_rows_limits)
         self.assertEqual(plan.insert_rows_limits.types, 400_000)
         self.assertEqual(plan.insert_rows_limits.indexes, 50_000)
         self.assertEqual(plan.insert_rows_limits.combined, 800_000)
         self.assertEqual(plan.insert_rows_limits.sequential, 70_000)
+        self.assertEqual(plan.scoring.mode, "expression")
+        self.assertEqual(plan.scoring.expression, "2.5")
         self.assertEqual(plan.queries.mode, "manual")
         self.assertEqual(plan.celery.workers, 9)
         self.assertEqual(plan.celery.threads_per_worker, 5)
@@ -589,6 +648,10 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             id="bench_types",
             connection_id="prod_ch",
             strategy="types_strategy",
+            scoring={
+                "mode": "expression",
+                "expression": "3.14",
+            },
             databases=["analytics"],
             tables=["events"],
             max_iterations=1,
@@ -628,6 +691,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(job.total_variants, 1)
         self.assertEqual(job.variant_meta.global_index, 0)
         self.assertEqual(job.insert_rows_limit, 123)
+        self.assertEqual(job.scoring.mode, "expression")
+        self.assertEqual(job.scoring.expression, "3.14")
         self.assertEqual(job.variant_database, "analytics")
         self.assertTrue(job.variant_table.startswith("events__bench__bench_types__"))
         self.assertEqual(job.variant_ddl.name, f"analytics.{job.variant_table}")
@@ -635,6 +700,143 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertIn(job.variant_table, job.query_plan.test_queries[0].query)
         self.assertNotIn("{table}", job.query_plan.warmup_queries[0])
         self.assertNotIn("{table}", job.query_plan.test_queries[0].query)
+
+    def test_engine_source_benchmark_job_prefers_source_insert_rows_limit(self) -> None:
+        """Проверяет, что source baseline использует отдельный source_insert_rows_limit."""
+        benchmark = BenchmarkConfig(
+            id="bench_source_insert_limit",
+            connection_id="prod_ch",
+            strategy="sequential_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            insert_rows_limit=777,
+            source_insert_rows_limit=333,
+            insert_rows_limits=InsertRowsLimitsConfig(sequential=555),
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt32",
+                        by_name="user_id",
+                        indexes=[IndexConfig(type="minmax", granularity=4)],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}", weight=1.0)],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        table_plan = next(engine.iter_table_plans())
+        source_job = engine.build_source_benchmark_job(
+            table_plan=table_plan,
+            benchmark_run_id=1,
+            benchmark_started_at=datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(source_job.insert_rows_limit, 333)
+
+    def test_engine_source_benchmark_job_prefers_source_insert_rows_limits_by_mode(self) -> None:
+        """Проверяет приоритет source_insert_rows_per_operation_limits для baseline."""
+        benchmark = BenchmarkConfig(
+            id="bench_source_insert_limits_by_mode",
+            connection_id="prod_ch",
+            strategy="sequential_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            insert_rows_limit=777,
+            insert_rows_limits=InsertRowsLimitsConfig(sequential=555),
+            source_insert_rows_limits=InsertRowsLimitsConfig(sequential=444),
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt32",
+                        by_name="user_id",
+                        indexes=[IndexConfig(type="minmax", granularity=4)],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}", weight=1.0)],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        table_plan = next(engine.iter_table_plans())
+        source_job = engine.build_source_benchmark_job(
+            table_plan=table_plan,
+            benchmark_run_id=1,
+            benchmark_started_at=datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(source_job.insert_rows_limit, 444)
+
+    def test_engine_source_benchmark_job_falls_back_to_standard_insert_limits(self) -> None:
+        """Проверяет fallback baseline-лимита к insert_rows_limits/insert_rows_limit."""
+        benchmark = BenchmarkConfig(
+            id="bench_source_insert_limit_fallback",
+            connection_id="prod_ch",
+            strategy="sequential_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            insert_rows_limit=777,
+            insert_rows_limits=InsertRowsLimitsConfig(sequential=555),
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt32",
+                        by_name="user_id",
+                        indexes=[IndexConfig(type="minmax", granularity=4)],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}", weight=1.0)],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        table_plan = next(engine.iter_table_plans())
+        source_job = engine.build_source_benchmark_job(
+            table_plan=table_plan,
+            benchmark_run_id=1,
+            benchmark_started_at=datetime(2026, 2, 25, 12, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(source_job.insert_rows_limit, 555)
 
     def test_engine_uses_test_database_for_variant_tables_and_queries(self) -> None:
         """Проверяет, что engine использует test_database для variant-таблиц."""
@@ -1117,6 +1319,38 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(source_benchmark.source_database, job.source_database)
         self.assertEqual(source_benchmark.source_table, job.source_table)
 
+    def test_runner_skips_table_plan_when_source_baseline_is_skipped(self) -> None:
+        """Проверяет, что runner пропускает table-plan при skipped baseline."""
+        benchmark = BenchmarkConfig(
+            id="bench_skip_empty_source",
+            connection_id="prod_ch",
+            strategy="types_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=1,
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
+                ]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = SkippingSourceExecutionAdapter()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=InMemoryBenchmarkResultStore(),
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertEqual(len(adapter.source_jobs), 1)
+        self.assertEqual(len(adapter.executed_jobs), 0)
+
     def test_result_store_prefers_worker_variant_params_and_ddl_when_provided(self) -> None:
         """Проверяет, что result store сохраняет worker-side variant params/DDL."""
         benchmark = BenchmarkConfig(
@@ -1272,6 +1506,39 @@ class PlannerEngineRunnerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "должен быть > 0"):
             runner.run(benchmark_run_id=0)
+
+    def test_runner_stops_before_dispatch_when_scoring_expression_invalid(self) -> None:
+        """Проверяет, что pre-run validation останавливает запуск при битой формуле."""
+        benchmark = BenchmarkConfig(
+            id="bench_invalid_expression",
+            connection_id="prod_ch",
+            strategy="types_strategy",
+            scoring={
+                "mode": "expression",
+                "expression": "unknown_root.select.time_ms_percentiles[0]",
+            },
+            databases=["analytics"],
+            tables=["events"],
+            global_rules=RulesConfig(
+                column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = RecordingExecutionAdapter()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=InMemoryBenchmarkResultStore(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "Валидация scoring.expression не пройдена"):
+            runner.run()
+        self.assertEqual(len(adapter.source_jobs), 0)
+        self.assertEqual(len(adapter.executed_jobs), 0)
 
     def test_runner_assigns_single_serial_run_id_per_run(self) -> None:
         """Проверяет, что runner assigns single serial run id per run."""
@@ -1895,7 +2162,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                 ],
                 index_rules=[
                     IndexRuleConfig(
-                        by_type="UInt32",
+                        by_type="UInt64",
                         by_name="user_id",
                         indexes=[
                             IndexConfig(type="minmax", granularity=4),
@@ -2336,6 +2603,72 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(run_id, 1)
         self.assertEqual(len(adapter.executed_jobs), 4)
         self.assertTrue(all(job.insert_rows_limit == 555 for job in adapter.executed_jobs))
+
+    def test_sequential_mode_uses_dedicated_variant_caps_for_types_and_indexes(self) -> None:
+        """Проверяет, что cap генерации типов/индексов не зависит от insert_operations_count."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_stage_variant_caps",
+            connection_id="prod_ch",
+            strategy="sequential_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            # Это число измерений, а не лимит числа variant jobs.
+            max_iterations=3,
+            sequential_top_n=1,
+            max_benchmarks_limits=InsertRowsLimitsConfig(
+                types=2,
+                indexes=4,
+            ),
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt32",
+                        by_name="user_id",
+                        indexes=[
+                            IndexConfig(type="minmax", granularity=4),
+                            IndexConfig(type="bloom_filter(0.01)", granularity=2),
+                        ],
+                    ),
+                    IndexRuleConfig(
+                        by_type="Nullable(Decimal(18,4))",
+                        by_name="revenue",
+                        indexes=[
+                            IndexConfig(type="set(128)", granularity=2),
+                            IndexConfig(type="bloom_filter(0.01)", granularity=2),
+                        ],
+                    ),
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[QueryConfigItem(query="SELECT count() FROM {table}")],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = SequentialScoringAdapter()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=InMemoryBenchmarkResultStore(),
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        type_jobs = [job for job in adapter.executed_jobs if job.variant_meta.mode == "types"]
+        index_jobs = [job for job in adapter.executed_jobs if job.variant_meta.mode == "indexes"]
+        self.assertEqual(len(type_jobs), 2)
+        self.assertEqual(len(index_jobs), 4)
 
 
 if __name__ == "__main__":

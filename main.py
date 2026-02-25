@@ -9,10 +9,18 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import logging
+import os
+import subprocess
 from typing import Dict, List, Optional, Tuple
 
-from src.benchmark_engine import BenchmarkEngine, BenchmarkPlanner, BenchmarkRunner
+from src.benchmark_engine import (
+    BenchmarkEngine,
+    BenchmarkPlanner,
+    BenchmarkRunner,
+    MaxIdBenchmarkRunIdProvider,
+)
 from src.benchmark_runtime import FetcherMetadataProvider
 from src.benchmark_runtime.implementations.clickhouse_celery import (
     CeleryClickHouseExecutionAdapter,
@@ -25,6 +33,119 @@ from src.models import BenchmarkRootConfig, ConnectionConfig
 from settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_git_output(args: List[str]) -> str:
+    """Возвращает вывод git-команды или `unknown`, если git недоступен."""
+    try:
+        completed = subprocess.run(
+            args,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return "unknown"
+    output = completed.stdout.strip()
+    return output or "unknown"
+
+
+def _resolve_build_metadata() -> Tuple[str, str, str]:
+    """
+    Возвращает build metadata для стартовых логов.
+
+    Приоритет:
+      1) BENCH_BUILD_DATETIME / BENCH_GIT_COMMIT / BENCH_GIT_BRANCH из env;
+      2) fallback на runtime-значения (UTC now + git).
+    """
+    build_date = (
+        os.getenv("BENCH_BUILD_DATETIME")
+        or datetime.now(timezone.utc).isoformat()
+    )
+    git_commit = os.getenv("BENCH_GIT_COMMIT") or _safe_git_output(
+        ["git", "rev-parse", "--short", "HEAD"]
+    )
+    git_branch = os.getenv("BENCH_GIT_BRANCH") or _safe_git_output(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"]
+    )
+    return build_date, git_commit, git_branch
+
+
+def _resolve_current_benchmark_run_id(
+    *,
+    requested_run_id: Optional[int],
+    result_store: object,
+) -> Optional[int]:
+    """
+    Определяет benchmark_run_id для стартовых логов.
+
+    Приоритет:
+      1) явный `requested_run_id` из env;
+      2) auto-режим: `max_benchmark_run_id() + 1`;
+      3) `None`, если определить не удалось.
+    """
+    if requested_run_id is not None:
+        return int(requested_run_id)
+
+    max_id_getter = getattr(result_store, "max_benchmark_run_id", None)
+    if not callable(max_id_getter):
+        return None
+
+    try:
+        current_max = int(max_id_getter() or 0)
+    except Exception:
+        logger.exception(
+            "Не удалось получить max benchmark_run_id из result store для стартового лога"
+        )
+        return None
+    return current_max + 1
+
+
+def _log_build_metadata(run_id: Optional[int]) -> None:
+    """Пишет build metadata + текущий benchmark_run_id."""
+    build_date, git_commit, git_branch = _resolve_build_metadata()
+    logger.info("=== Build metadata ===")
+    logger.info("Build date: %s", build_date)
+    logger.info("Git commit: %s", git_commit)
+    logger.info("Git branch: %s", git_branch)
+    logger.info(
+        "Benchmark run id: %s",
+        run_id if run_id is not None else "unknown (auto)",
+    )
+    logger.info("======================")
+
+
+def _log_benchmark_selection(
+    config: BenchmarkRootConfig,
+    requested_benchmark_ids: Optional[List[str]],
+) -> None:
+    """Пишет в лог, какие benchmark_id реально будут запущены."""
+    available_ids = [benchmark.id for benchmark in config.benchmarks]
+    available_set = set(available_ids)
+
+    if requested_benchmark_ids:
+        effective_ids = [bid for bid in requested_benchmark_ids if bid in available_set]
+        missing_ids = [bid for bid in requested_benchmark_ids if bid not in available_set]
+    else:
+        effective_ids = available_ids
+        missing_ids = []
+
+    logger.info("=== Benchmark selection ===")
+    logger.info(
+        "Requested benchmark_ids: %s",
+        ", ".join(requested_benchmark_ids) if requested_benchmark_ids else "all",
+    )
+    logger.info(
+        "Effective benchmark_ids (%d): %s",
+        len(effective_ids),
+        ", ".join(effective_ids) if effective_ids else "none",
+    )
+    if missing_ids:
+        logger.warning(
+            "benchmark_ids не найдены в конфиге: %s",
+            ", ".join(missing_ids),
+        )
+    logger.info("===========================")
 
 
 def _configure_logging(level_name: str) -> None:
@@ -158,6 +279,11 @@ def run_from_settings() -> int:
         len(config.connections),
         len(config.benchmarks),
     )
+    benchmark_ids: Optional[List[str]] = app_settings.benchmark_ids or None
+    _log_benchmark_selection(
+        config=config,
+        requested_benchmark_ids=benchmark_ids,
+    )
 
     result_connection = _resolve_result_connection(
         config=config,
@@ -174,6 +300,12 @@ def run_from_settings() -> int:
         database=app_settings.result_database,
         table=app_settings.result_table,
         create_table_if_missing=True,
+    )
+    _log_build_metadata(
+        _resolve_current_benchmark_run_id(
+            requested_run_id=app_settings.benchmark_run_id,
+            result_store=result_store,
+        )
     )
 
     connections_by_id = {connection.id: connection for connection in config.connections}
@@ -200,9 +332,13 @@ def run_from_settings() -> int:
             engine=engine,
             execution_adapter=execution_adapter,
             result_store=result_store,
+            run_id_provider=MaxIdBenchmarkRunIdProvider(
+                max_id_getter=lambda: int(
+                    getattr(result_store, "max_benchmark_run_id", lambda: 0)() or 0
+                )
+            ),
         )
 
-        benchmark_ids: Optional[List[str]] = app_settings.benchmark_ids or None
         run_id = runner.run(
             benchmark_ids=benchmark_ids,
             benchmark_run_id=app_settings.benchmark_run_id,
@@ -225,4 +361,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

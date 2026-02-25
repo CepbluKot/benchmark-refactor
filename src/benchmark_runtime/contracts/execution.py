@@ -51,4 +51,5 @@ class BenchmarkExecutionAdapter(ABC):
         при необходимости мог сам сохранять результаты (например, имитировать
         worker-side сохранение в тестах/демо).
         """
-        del result_store
+        # Базовая реализация ничего не делает.
+        return None

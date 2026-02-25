@@ -21,6 +21,7 @@ from ...types import (
     StoredBenchmarkResult,
     TopTypeVariant,
     VariantJob,
+    build_legacy_index_params,
     build_variant_params,
 )
 from .common import json_dumps
@@ -82,6 +83,14 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_insert_bytes_per_second_measurements_percentiles_readable",
         "source_table_insert_bytes_per_second_measurements_percentiles",
         "source_table_insert_bytes_per_second_measurements_percentiles_readable",
+        "tested_table_insert_memory_usage_measurements",
+        "tested_table_insert_memory_usage_measurements_readable",
+        "source_table_insert_memory_usage_measurements",
+        "source_table_insert_memory_usage_measurements_readable",
+        "tested_table_insert_memory_usage_measurements_percentiles",
+        "tested_table_insert_memory_usage_measurements_percentiles_readable",
+        "source_table_insert_memory_usage_measurements_percentiles",
+        "source_table_insert_memory_usage_measurements_percentiles_readable",
         "tested_table_select_test_query",
         "source_table_select_test_query",
         "tested_table_select_time_ms_measurements",
@@ -101,6 +110,14 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_select_bytes_per_second_measurements_percentiles_readable",
         "source_table_select_bytes_per_second_measurements_percentiles",
         "source_table_select_bytes_per_second_measurements_percentiles_readable",
+        "tested_table_select_memory_usage_measurements",
+        "tested_table_select_memory_usage_measurements_readable",
+        "source_table_select_memory_usage_measurements",
+        "source_table_select_memory_usage_measurements_readable",
+        "tested_table_select_memory_usage_measurements_percentiles",
+        "tested_table_select_memory_usage_measurements_percentiles_readable",
+        "source_table_select_memory_usage_measurements_percentiles",
+        "source_table_select_memory_usage_measurements_percentiles_readable",
         "tested_table_select_metrics_by_query_json",
         "source_table_select_metrics_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
@@ -121,8 +138,19 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "variant_table",
         "variant_mode",
         "variant_params",
+        "score_calculation_json",
         "score",
     ]
+    _PRETTY_JSON_STRING_COLUMNS: tuple[str, ...] = (
+        "tested_table_select_metrics_by_query_json",
+        "source_table_select_metrics_by_query_json",
+        "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
+        "tested_table_consumed_compressed_size_bytes_by_each_column",
+        "source_table_consumed_compressed_size_bytes_by_each_column",
+        "tested_table_compression_by_each_column_coef",
+        "tested_table_cols_sizes",
+        "score_calculation_json",
+    )
 
     def __init__(
         self,
@@ -201,6 +229,14 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `tested_table_insert_bytes_per_second_measurements_percentiles_readable` Array(String),
                 `source_table_insert_bytes_per_second_measurements_percentiles` Array(Float64),
                 `source_table_insert_bytes_per_second_measurements_percentiles_readable` Array(String),
+                `tested_table_insert_memory_usage_measurements` Array(Float64),
+                `tested_table_insert_memory_usage_measurements_readable` Array(String),
+                `source_table_insert_memory_usage_measurements` Array(Float64),
+                `source_table_insert_memory_usage_measurements_readable` Array(String),
+                `tested_table_insert_memory_usage_measurements_percentiles` Array(Float64),
+                `tested_table_insert_memory_usage_measurements_percentiles_readable` Array(String),
+                `source_table_insert_memory_usage_measurements_percentiles` Array(Float64),
+                `source_table_insert_memory_usage_measurements_percentiles_readable` Array(String),
                 `tested_table_select_test_query` Nullable(String),
                 `source_table_select_test_query` Nullable(String),
                 `tested_table_select_time_ms_measurements` Array(Float64),
@@ -220,6 +256,14 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `tested_table_select_bytes_per_second_measurements_percentiles_readable` Array(String),
                 `source_table_select_bytes_per_second_measurements_percentiles` Array(Float64),
                 `source_table_select_bytes_per_second_measurements_percentiles_readable` Array(String),
+                `tested_table_select_memory_usage_measurements` Array(Float64),
+                `tested_table_select_memory_usage_measurements_readable` Array(String),
+                `source_table_select_memory_usage_measurements` Array(Float64),
+                `source_table_select_memory_usage_measurements_readable` Array(String),
+                `tested_table_select_memory_usage_measurements_percentiles` Array(Float64),
+                `tested_table_select_memory_usage_measurements_percentiles_readable` Array(String),
+                `source_table_select_memory_usage_measurements_percentiles` Array(Float64),
+                `source_table_select_memory_usage_measurements_percentiles_readable` Array(String),
                 `tested_table_select_metrics_by_query_json` Nullable(String),
                 `source_table_select_metrics_by_query_json` Nullable(String),
                 `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json` Nullable(String),
@@ -240,6 +284,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `variant_table` String,
                 `variant_mode` String,
                 `variant_params` String,
+                `score_calculation_json` Nullable(String),
                 `score` Nullable(Float64)
             )
             ENGINE = MergeTree
@@ -253,7 +298,24 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             ALTER TABLE `{self._database}`.`{self._table}`
                 ADD COLUMN IF NOT EXISTS `tested_table_select_metrics_by_query_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `source_table_select_metrics_by_query_json` Nullable(String),
-                ADD COLUMN IF NOT EXISTS `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json` Nullable(String)
+                ADD COLUMN IF NOT EXISTS `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_insert_memory_usage_measurements` Array(Float64),
+                ADD COLUMN IF NOT EXISTS `tested_table_insert_memory_usage_measurements_readable` Array(String),
+                ADD COLUMN IF NOT EXISTS `source_table_insert_memory_usage_measurements` Array(Float64),
+                ADD COLUMN IF NOT EXISTS `source_table_insert_memory_usage_measurements_readable` Array(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_insert_memory_usage_measurements_percentiles` Array(Float64),
+                ADD COLUMN IF NOT EXISTS `tested_table_insert_memory_usage_measurements_percentiles_readable` Array(String),
+                ADD COLUMN IF NOT EXISTS `source_table_insert_memory_usage_measurements_percentiles` Array(Float64),
+                ADD COLUMN IF NOT EXISTS `source_table_insert_memory_usage_measurements_percentiles_readable` Array(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_select_memory_usage_measurements` Array(Float64),
+                ADD COLUMN IF NOT EXISTS `tested_table_select_memory_usage_measurements_readable` Array(String),
+                ADD COLUMN IF NOT EXISTS `source_table_select_memory_usage_measurements` Array(Float64),
+                ADD COLUMN IF NOT EXISTS `source_table_select_memory_usage_measurements_readable` Array(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_select_memory_usage_measurements_percentiles` Array(Float64),
+                ADD COLUMN IF NOT EXISTS `tested_table_select_memory_usage_measurements_percentiles_readable` Array(String),
+                ADD COLUMN IF NOT EXISTS `source_table_select_memory_usage_measurements_percentiles` Array(Float64),
+                ADD COLUMN IF NOT EXISTS `source_table_select_memory_usage_measurements_percentiles_readable` Array(String),
+                ADD COLUMN IF NOT EXISTS `score_calculation_json` Nullable(String)
             """
         )
 
@@ -409,7 +471,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         if index_params is None:
             index_choices = variant_params.get("index_choices")
             if index_choices is not None:
-                index_params = json_dumps(index_choices)
+                index_params = build_legacy_index_params(index_choices)
 
         return StoredBenchmarkResult(
             benchmark_run_id=benchmark_run_id,
@@ -477,6 +539,30 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             source_table_insert_bytes_per_second_measurements_percentiles_readable=list(
                 result.source_table_insert_bytes_per_second_measurements_percentiles_readable
             ),
+            tested_table_insert_memory_usage_measurements=list(
+                result.tested_table_insert_memory_usage_measurements
+            ),
+            tested_table_insert_memory_usage_measurements_readable=list(
+                result.tested_table_insert_memory_usage_measurements_readable
+            ),
+            source_table_insert_memory_usage_measurements=list(
+                result.source_table_insert_memory_usage_measurements
+            ),
+            source_table_insert_memory_usage_measurements_readable=list(
+                result.source_table_insert_memory_usage_measurements_readable
+            ),
+            tested_table_insert_memory_usage_measurements_percentiles=list(
+                result.tested_table_insert_memory_usage_measurements_percentiles
+            ),
+            tested_table_insert_memory_usage_measurements_percentiles_readable=list(
+                result.tested_table_insert_memory_usage_measurements_percentiles_readable
+            ),
+            source_table_insert_memory_usage_measurements_percentiles=list(
+                result.source_table_insert_memory_usage_measurements_percentiles
+            ),
+            source_table_insert_memory_usage_measurements_percentiles_readable=list(
+                result.source_table_insert_memory_usage_measurements_percentiles_readable
+            ),
             tested_table_select_test_query=result.tested_table_select_test_query,
             source_table_select_test_query=result.source_table_select_test_query,
             tested_table_select_time_ms_measurements=list(
@@ -530,6 +616,30 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             source_table_select_bytes_per_second_measurements_percentiles_readable=list(
                 result.source_table_select_bytes_per_second_measurements_percentiles_readable
             ),
+            tested_table_select_memory_usage_measurements=list(
+                result.tested_table_select_memory_usage_measurements
+            ),
+            tested_table_select_memory_usage_measurements_readable=list(
+                result.tested_table_select_memory_usage_measurements_readable
+            ),
+            source_table_select_memory_usage_measurements=list(
+                result.source_table_select_memory_usage_measurements
+            ),
+            source_table_select_memory_usage_measurements_readable=list(
+                result.source_table_select_memory_usage_measurements_readable
+            ),
+            tested_table_select_memory_usage_measurements_percentiles=list(
+                result.tested_table_select_memory_usage_measurements_percentiles
+            ),
+            tested_table_select_memory_usage_measurements_percentiles_readable=list(
+                result.tested_table_select_memory_usage_measurements_percentiles_readable
+            ),
+            source_table_select_memory_usage_measurements_percentiles=list(
+                result.source_table_select_memory_usage_measurements_percentiles
+            ),
+            source_table_select_memory_usage_measurements_percentiles_readable=list(
+                result.source_table_select_memory_usage_measurements_percentiles_readable
+            ),
             tested_table_select_metrics_by_query_json=(
                 result.tested_table_select_metrics_by_query_json
             ),
@@ -572,6 +682,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             variant_table=variant_table,
             variant_mode=variant_mode,
             variant_params=variant_params,
+            score_calculation_json=result.score_calculation_json,
             score=result.score,
         )
 
@@ -589,11 +700,43 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         if started_at_utc.tzinfo is not None:
             started_at_utc = started_at_utc.astimezone(timezone.utc).replace(tzinfo=None)
 
-        return {
+        row_map = {
             **record.model_dump(),
             "benchmark_started_at": started_at_utc,
-            "variant_params": json_dumps(record.variant_params),
+            "variant_params": json.dumps(
+                record.variant_params,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                default=str,
+            ),
         }
+        for column_name in self._PRETTY_JSON_STRING_COLUMNS:
+            row_map[column_name] = self._pretty_json_string_or_as_is(
+                row_map.get(column_name)
+            )
+        return row_map
+
+    @staticmethod
+    def _pretty_json_string_or_as_is(value: Any) -> Any:
+        """
+        Нормализует JSON-строку в pretty-формат для удобства чтения в UI.
+
+        Если значение не строка или невалидный JSON, возвращает как есть.
+        """
+        if not isinstance(value, str):
+            return value
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return value
+        return json.dumps(
+            parsed,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
 
     def _build_client(self):
         try:

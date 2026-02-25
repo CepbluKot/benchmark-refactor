@@ -53,10 +53,16 @@
         ],
         "marketing": "*"
       },
-      "max_iterations": 25,
-      "sequential_top_n": 5,
-      "insert_rows_limit": 1000000,
-      "insert_rows_limits": {
+      "insert_operations_count": 25,
+      "sequential_types_top_n_for_indexes": 5,
+      "insert_rows_per_operation_limit": 1000000,
+      "source_insert_rows_per_operation_limit": 700000,
+      "scoring": {
+        "mode": "expression",
+        "expression": "0.5 * safe_div(source_select_time_ms_by_percentile[100], tested_select_time_ms_by_percentile[100]) + 0.3 * safe_div(source_insert_time_ms_by_percentile['p100'], tested_insert_time_ms_by_percentile['p100']) + 0.2 * coalesce(compression_overall_coef, 0)",
+        "on_error_score": -1.0
+      },
+      "insert_rows_per_operation_limits": {
         "types": 800000,
         "indexes": 300000,
         "combined": 1200000,
@@ -134,10 +140,16 @@
               }
             ]
           },
-          "max_iterations": 12,
-          "sequential_top_n": 3,
-          "insert_rows_limit": 250000,
-          "insert_rows_limits": {
+          "insert_operations_count": 12,
+          "sequential_types_top_n_for_indexes": 3,
+          "insert_rows_per_operation_limit": 250000,
+          "source_insert_rows_per_operation_limit": 180000,
+          "scoring": {
+            "mode": "expression",
+            "expression": "safe_div(source_select_time_ms_percentiles[1], tested_select_time_ms_percentiles[1])",
+            "on_error_score": -1.0
+          },
+          "insert_rows_per_operation_limits": {
             "types": 200000,
             "indexes": 100000,
             "combined": 280000,

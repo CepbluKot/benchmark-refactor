@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 
 BenchmarkMode = Literal["types", "indexes", "sequential", "combined"]
@@ -22,6 +22,7 @@ BenchmarkStrategy = Literal[
     "combined_strategy",
     "sequential_topn_strategy",
 ]
+ScoringMode = Literal["builtin", "expression"]
 ColumnOrderMode = Literal["compressed_size_desc"]
 RuleSourceMode = Literal[
     "global_bank_only",
@@ -194,6 +195,48 @@ class QueriesConfig(_Base):
         return self
 
 
+class ScoringConfig(_Base):
+    """
+    Конфигурация вычисления итогового `score`.
+
+    Режимы:
+      - `builtin`: стандартная встроенная формула runtime;
+      - `expression`: кастомное безопасное выражение.
+    """
+
+    mode: ScoringMode = "builtin"
+    expression: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("expression", "score_expression", "sql_expression"),
+        serialization_alias="expression",
+    )
+    on_error_score: Optional[float] = None
+
+    @field_validator("expression")
+    @classmethod
+    def normalize_expression(cls, value: Optional[str]) -> Optional[str]:
+        """Нормализует и валидирует строку expression."""
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("scoring.expression не должен быть пустым")
+        if len(cleaned) > 4000:
+            raise ValueError("scoring.expression слишком длинный (максимум 4000 символов)")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_mode_fields(self) -> "ScoringConfig":
+        """Проверяет согласованность `mode` и полей expression."""
+        if self.mode == "expression" and self.expression is None:
+            raise ValueError("scoring.mode=expression требует непустой scoring.expression")
+        if self.mode == "builtin" and self.expression is not None:
+            raise ValueError(
+                "scoring.expression нельзя задавать при scoring.mode=builtin"
+            )
+        return self
+
+
 class CeleryConfig(_Base):
     """Параметры запуска Celery-воркеров для бенчмарк-джоб."""
 
@@ -203,7 +246,7 @@ class CeleryConfig(_Base):
 
 class InsertRowsLimitsConfig(_Base):
     """
-    Лимиты копирования строк из source в variant по режимам бенчмарка.
+    Лимиты строк за одну insert-операцию из source в variant по режимам бенчмарка.
 
     Каждый ключ опционален:
       - `types`
@@ -254,10 +297,12 @@ class InsertRowsLimitsConfig(_Base):
         """
         for mode, value in (self.model_extra or {}).items():
             if not mode or not mode.strip():
-                raise ValueError("ключ режима в insert_rows_limits не должен быть пустым")
+                raise ValueError(
+                    "ключ режима в insert_rows_per_operation_limits не должен быть пустым"
+                )
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(
-                    f"insert_rows_limits[{mode!r}] должен быть целым числом > 0"
+                    f"insert_rows_per_operation_limits[{mode!r}] должен быть целым числом > 0"
                 )
         return self
 
@@ -269,13 +314,18 @@ class TableRuleConfig(_Base):
     Может переопределять:
       - rules;
       - column_order_mode;
-      - max_iterations;
-      - sequential_top_n;
-      - insert_rows_limit;
-      - insert_rows_limits;
+      - insert_operations_count (legacy: max_iterations);
+      - sequential_types_top_n_for_indexes (legacy: sequential_top_n);
+      - insert_rows_per_operation_limit (legacy: insert_rows_limit);
+      - source_insert_rows_per_operation_limit (legacy: source_insert_rows_limit);
+      - source_insert_rows_per_operation_limits;
+      - insert_rows_per_operation_limits (legacy: insert_rows_limits);
+      - max_benchmarks_limits;
+      - max_type_benchmarks/max_index_benchmarks (legacy compatibility);
       - test_database;
       - strategy;
       - queries.
+      - scoring.
     """
 
     database: str
@@ -284,10 +334,59 @@ class TableRuleConfig(_Base):
     rules: RulesConfig = Field(default_factory=RulesConfig)
     column_order_mode: Optional[ColumnOrderMode] = None
     queries: Optional[QueriesConfig] = None
-    max_iterations: Optional[int] = Field(default=None, gt=0)
-    sequential_top_n: Optional[int] = Field(default=None, gt=0)
-    insert_rows_limit: Optional[int] = Field(default=None, gt=0)
-    insert_rows_limits: Optional[InsertRowsLimitsConfig] = None
+    scoring: Optional[ScoringConfig] = None
+    max_iterations: Optional[int] = Field(
+        default=None,
+        gt=0,
+        validation_alias=AliasChoices("insert_operations_count", "max_iterations"),
+        serialization_alias="insert_operations_count",
+    )
+    sequential_top_n: Optional[int] = Field(
+        default=None,
+        gt=0,
+        validation_alias=AliasChoices(
+            "sequential_types_top_n_for_indexes",
+            "sequential_top_n",
+        ),
+        serialization_alias="sequential_types_top_n_for_indexes",
+    )
+    insert_rows_limit: Optional[int] = Field(
+        default=None,
+        gt=0,
+        validation_alias=AliasChoices(
+            "insert_rows_per_operation_limit",
+            "insert_rows_limit",
+        ),
+        serialization_alias="insert_rows_per_operation_limit",
+    )
+    source_insert_rows_limit: Optional[int] = Field(
+        default=None,
+        gt=0,
+        validation_alias=AliasChoices(
+            "source_insert_rows_per_operation_limit",
+            "source_insert_rows_limit",
+        ),
+        serialization_alias="source_insert_rows_per_operation_limit",
+    )
+    source_insert_rows_limits: Optional[InsertRowsLimitsConfig] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "source_insert_rows_per_operation_limits",
+            "source_insert_rows_limits",
+        ),
+        serialization_alias="source_insert_rows_per_operation_limits",
+    )
+    insert_rows_limits: Optional[InsertRowsLimitsConfig] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "insert_rows_per_operation_limits",
+            "insert_rows_limits",
+        ),
+        serialization_alias="insert_rows_per_operation_limits",
+    )
+    max_benchmarks_limits: Optional[InsertRowsLimitsConfig] = None
+    max_type_benchmarks: Optional[int] = Field(default=None, gt=0)
+    max_index_benchmarks: Optional[int] = Field(default=None, gt=0)
     strategy: Optional[BenchmarkStrategy] = None
 
     @field_validator("database", "table")
@@ -343,10 +442,19 @@ class BenchmarkConfig(_Base):
       - strategy исполнения таблицы (table-level execution strategy);
       - режим резолвинга column/index правил относительно глобального rule bank;
       - режим вычисления `column_order` (опционально);
-      - ограничение по итерациям и режим комбинатора.
-      - `sequential_top_n` для двухфазного режима sequential.
-      - `insert_rows_limit` — сколько строк копировать из source-таблицы в variant.
-      - `insert_rows_limits` — лимиты копирования по конкретным mode.
+      - режим вычисления `score` (встроенный или expression);
+      - ограничение по числу insert-замеров и режим комбинатора.
+      - `sequential_types_top_n_for_indexes` (legacy: `sequential_top_n`) для двухфазного режима sequential.
+      - `insert_rows_per_operation_limit` (legacy: `insert_rows_limit`) — сколько строк
+        копировать за один insert-замер из source-таблицы в variant.
+      - `source_insert_rows_per_operation_limit` (legacy: `source_insert_rows_limit`) —
+        сколько строк копировать за один insert-замер в baseline-копию
+        исходной таблицы (source benchmark) перед запуском вариантов.
+      - `source_insert_rows_per_operation_limits` — лимиты baseline-вставки по mode.
+      - `insert_rows_per_operation_limits` (legacy: `insert_rows_limits`) —
+        лимиты копирования за один insert-замер по конкретным mode.
+      - `max_benchmarks_limits` — лимиты числа variant jobs по mode.
+      - `max_type_benchmarks`/`max_index_benchmarks` — legacy-совместимость.
       - `test_database` — БД для создания variant-таблиц (по умолчанию source БД).
     """
 
@@ -355,15 +463,64 @@ class BenchmarkConfig(_Base):
     strategy: BenchmarkStrategy
     global_rules: RulesConfig = Field(default_factory=RulesConfig)
     column_order_mode: Optional[ColumnOrderMode] = None
+    scoring: ScoringConfig = Field(default_factory=ScoringConfig)
 
     databases: DatabasesSelector = "*"
     tables: TablesSelector = "*"
     test_database: Optional[str] = None
 
-    max_iterations: int = Field(default=100, gt=0)
-    sequential_top_n: int = Field(default=1, gt=0)
-    insert_rows_limit: Optional[int] = Field(default=None, gt=0)
-    insert_rows_limits: Optional[InsertRowsLimitsConfig] = None
+    max_iterations: int = Field(
+        default=100,
+        gt=0,
+        validation_alias=AliasChoices("insert_operations_count", "max_iterations"),
+        serialization_alias="insert_operations_count",
+    )
+    sequential_top_n: int = Field(
+        default=1,
+        gt=0,
+        validation_alias=AliasChoices(
+            "sequential_types_top_n_for_indexes",
+            "sequential_top_n",
+        ),
+        serialization_alias="sequential_types_top_n_for_indexes",
+    )
+    insert_rows_limit: Optional[int] = Field(
+        default=None,
+        gt=0,
+        validation_alias=AliasChoices(
+            "insert_rows_per_operation_limit",
+            "insert_rows_limit",
+        ),
+        serialization_alias="insert_rows_per_operation_limit",
+    )
+    source_insert_rows_limit: Optional[int] = Field(
+        default=None,
+        gt=0,
+        validation_alias=AliasChoices(
+            "source_insert_rows_per_operation_limit",
+            "source_insert_rows_limit",
+        ),
+        serialization_alias="source_insert_rows_per_operation_limit",
+    )
+    source_insert_rows_limits: Optional[InsertRowsLimitsConfig] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "source_insert_rows_per_operation_limits",
+            "source_insert_rows_limits",
+        ),
+        serialization_alias="source_insert_rows_per_operation_limits",
+    )
+    insert_rows_limits: Optional[InsertRowsLimitsConfig] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "insert_rows_per_operation_limits",
+            "insert_rows_limits",
+        ),
+        serialization_alias="insert_rows_per_operation_limits",
+    )
+    max_benchmarks_limits: Optional[InsertRowsLimitsConfig] = None
+    max_type_benchmarks: Optional[int] = Field(default=None, gt=0)
+    max_index_benchmarks: Optional[int] = Field(default=None, gt=0)
     column_rules_mode: Optional[RuleSourceMode] = None
     index_rules_mode: Optional[RuleSourceMode] = None
     queries: QueriesConfig = Field(default_factory=QueriesConfig)

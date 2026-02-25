@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
+import math
+import os
 import re
 import threading
 import time
@@ -11,11 +14,17 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.clickhouse_ddl import TableDDL
+from src.models import ScoringConfig
+from src.naming import is_variant_table
 
-from ...types import BenchmarkVariantResult, SourceBenchmarkResult
+from ...types import (
+    BenchmarkVariantResult,
+    SourceBenchmarkResult,
+    build_legacy_index_params,
+)
 from .common import (
     DEFAULT_MEASURED_PERCENTILES,
     compute_percentiles,
@@ -24,12 +33,118 @@ from .common import (
     make_readable_bytes,
 )
 from .result_store import ClickHouseBenchmarkResultStore, ClickHouseConnectionParams
+from .scoring import ScoreEvaluationError, build_percentile_lookup, evaluate_score_expression
 from .settings import get_clickhouse_celery_worker_settings
 
 logger = logging.getLogger(__name__)
 
 SOURCE_BENCHMARK_TASK_NAME = "bench.source_benchmark"
 VARIANT_BENCHMARK_TASK_NAME = "bench.variant_benchmark"
+
+_DANGEROUS_INPUT_KEYWORDS = (
+    "drop",
+    "alter",
+    "delete",
+    "truncate",
+    "insert",
+    "update",
+    "grant",
+    "revoke",
+)
+_READ_ONLY_SQL_PREFIXES = ("select", "with", "show", "describe", "desc", "explain")
+_BASELINE_TABLE_MARKER = "__source_baseline__"
+
+
+def _resolve_worker_start_benchmark_run_id() -> str:
+    """Возвращает benchmark_run_id для стартового лога worker-процесса."""
+    from_env = (os.getenv("BENCH_BENCHMARK_RUN_ID") or "").strip()
+    if from_env:
+        return from_env
+    return "unknown (из payload задач)"
+
+
+def _log_worker_build_metadata() -> None:
+    """Пишет в лог build metadata на старте Celery worker."""
+    build_date = (os.getenv("BENCH_BUILD_DATETIME") or "").strip()
+    if not build_date:
+        build_date = f"{datetime.utcnow().isoformat()}Z"
+    git_commit = (os.getenv("BENCH_GIT_COMMIT") or "unknown").strip() or "unknown"
+    git_branch = (os.getenv("BENCH_GIT_BRANCH") or "unknown").strip() or "unknown"
+
+    logger.info("=== Build metadata ===")
+    logger.info("Build date: %s", build_date)
+    logger.info("Git commit: %s", git_commit)
+    logger.info("Git branch: %s", git_branch)
+    logger.info("Benchmark run id: %s", _resolve_worker_start_benchmark_run_id())
+    logger.info("======================")
+
+
+def _strip_leading_sql_comments(query: str) -> str:
+    """Удаляет ведущие block comments и пробелы."""
+    stripped = query.lstrip()
+    while stripped.startswith("/*"):
+        end_pos = stripped.find("*/")
+        if end_pos == -1:
+            break
+        stripped = stripped[end_pos + 2 :].lstrip()
+    return stripped
+
+
+def is_safe_input_parameter(param: str) -> bool:
+    """
+    Проверяет строковый параметр на опасные SQL-ключевые слова.
+
+    Сделано по аналогии с legacy `check_input_params_decorator`.
+    """
+    if not isinstance(param, str):
+        return False
+    stripped = param.strip()
+    if not stripped:
+        return False
+    pattern = r"\b(" + "|".join(_DANGEROUS_INPUT_KEYWORDS) + r")\b"
+    return re.search(pattern, stripped.lower()) is None
+
+
+def are_all_input_params_safe(params: Sequence[str]) -> bool:
+    """Проверяет список строковых параметров на безопасность."""
+    return all(is_safe_input_parameter(param) for param in params)
+
+
+def _assert_read_only_query(query: str, *, context: str) -> None:
+    """Запрещает любые не read-only SQL-запросы в пользовательском query-plan."""
+    normalized = _strip_leading_sql_comments(query).lower()
+    if not normalized.startswith(_READ_ONLY_SQL_PREFIXES):
+        raise ValueError(
+            f"{context}: разрешены только read-only SQL-запросы "
+            f"({', '.join(_READ_ONLY_SQL_PREFIXES)})."
+        )
+
+
+def check_input_params_decorator(func):
+    """
+    Legacy-совместимый декоратор проверки строковых входных параметров.
+
+    Блокирует выполнение, если среди строковых аргументов обнаружены опасные ключевые слова.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        str_args = [arg for arg in args if isinstance(arg, str)]
+        str_args.extend(value for value in kwargs.values() if isinstance(value, str))
+        if not are_all_input_params_safe(str_args):
+            raise ValueError(
+                f"Обнаружены потенциально опасные input-параметры в {func.__name__}: "
+                f"args={args}, kwargs={kwargs}"
+            )
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+@check_input_params_decorator
+def _validate_user_read_only_sql_input(query: str) -> None:
+    """Проверяет один пользовательский SQL на безопасность и read-only характер."""
+    _assert_read_only_query(query, context="user_query")
 
 
 def _error_query_metrics() -> Dict[str, float]:
@@ -40,6 +155,7 @@ def _error_query_metrics() -> Dict[str, float]:
         "read_bytes": -1.0,
         "written_rows": -1.0,
         "written_bytes": -1.0,
+        "memory_usage": -1.0,
     }
 
 
@@ -53,9 +169,307 @@ def _to_metric_or_error(value: Any) -> float:
         return -1.0
 
 
+def _is_benchmark_temp_table_name(table: str) -> bool:
+    """Проверяет, что имя относится к временным benchmark-таблицам."""
+    normalized = str(table).strip()
+    if not normalized:
+        return False
+    if _BASELINE_TABLE_MARKER in normalized:
+        return True
+    return is_variant_table(normalized)
+
+
 def _is_error_query_metrics(metrics: Dict[str, float]) -> bool:
     """Определяет, что метрики помечены как ошибочные."""
     return float(metrics.get("elapsed_ns", -1.0)) < 0
+
+
+def _filter_positive_finite_measurements(
+    values: Sequence[float],
+    *,
+    metric_name: str,
+    context: str,
+) -> List[float]:
+    """
+    Оставляет только валидные замеры (> 0 и конечные).
+
+    Это защищает percentiles от загрязнения нулями/ошибочными значениями.
+    """
+    cleaned: list[float] = []
+    dropped = 0
+    for value in values:
+        try:
+            numeric = float(value)
+        except Exception:
+            dropped += 1
+            continue
+        if math.isfinite(numeric) and numeric > 0:
+            cleaned.append(numeric)
+        else:
+            dropped += 1
+
+    if dropped > 0:
+        logger.warning(
+            "%s: отброшено %d невалидных замеров `%s` (<= 0/NaN/Inf)",
+            context,
+            dropped,
+            metric_name,
+        )
+    return cleaned
+
+
+def _to_readable_memory_measurements(values: Sequence[float]) -> List[str]:
+    """Преобразует байтовые memory-замеры в человекочитаемый формат."""
+    readable: list[str] = []
+    for value in values:
+        try:
+            numeric = float(value)
+        except Exception:
+            continue
+        readable.append(make_readable_bytes(numeric))
+    return readable
+
+
+def _to_pretty_score_calculation_json(value: Dict[str, Any]) -> str:
+    """Сериализует детали расчёта score в человекочитаемый JSON."""
+    def _normalize_jsonable(payload: Any) -> Any:
+        if isinstance(payload, dict):
+            return {
+                str(key): _normalize_jsonable(inner_value)
+                for key, inner_value in payload.items()
+            }
+        if isinstance(payload, list):
+            return [_normalize_jsonable(item) for item in payload]
+        if isinstance(payload, tuple):
+            return [_normalize_jsonable(item) for item in payload]
+        return payload
+
+    return json.dumps(
+        _normalize_jsonable(value),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _build_metric_bucket(
+    *,
+    measured_percentiles: Sequence[int],
+    time_ms_percentiles: Sequence[float],
+    rows_per_second_percentiles: Sequence[float],
+    bytes_per_second_percentiles: Sequence[float],
+    memory_usage_percentiles: Sequence[float],
+) -> Dict[str, Any]:
+    """Строит унифицированный контейнер метрик + lookup по перцентилям."""
+    return {
+        "time_ms_percentiles": list(time_ms_percentiles),
+        "time_ms_by_percentile": build_percentile_lookup(
+            measured_percentiles,
+            time_ms_percentiles,
+        ),
+        "rows_per_second_percentiles": list(rows_per_second_percentiles),
+        "rows_per_second_by_percentile": build_percentile_lookup(
+            measured_percentiles,
+            rows_per_second_percentiles,
+        ),
+        "bytes_per_second_percentiles": list(bytes_per_second_percentiles),
+        "bytes_per_second_by_percentile": build_percentile_lookup(
+            measured_percentiles,
+            bytes_per_second_percentiles,
+        ),
+        "memory_usage_percentiles": list(memory_usage_percentiles),
+        "memory_usage_by_percentile": build_percentile_lookup(
+            measured_percentiles,
+            memory_usage_percentiles,
+        ),
+    }
+
+
+def _compute_builtin_source_score(
+    *,
+    select_time_ms_percentiles: Sequence[float],
+) -> tuple[Optional[float], Dict[str, Any]]:
+    """Встроенный baseline score: `1 / p_last(select_latency_ms)`."""
+    selected_latency_ms: Optional[float] = None
+    score: Optional[float] = None
+    if select_time_ms_percentiles and select_time_ms_percentiles[-1] > 0:
+        selected_latency_ms = float(select_time_ms_percentiles[-1])
+        score = 1.0 / selected_latency_ms
+
+    details: Dict[str, Any] = {
+        "formula": "1 / tested_select_time_ms_percentiles[-1]",
+        "inputs": {
+            "tested_select_time_ms_percentiles": list(select_time_ms_percentiles),
+            "selected_latency_ms": selected_latency_ms,
+        },
+        "result": score,
+        "note": (
+            None
+            if score is not None
+            else "Не удалось вычислить score: отсутствует/некорректен последний select percentile"
+        ),
+    }
+    return score, details
+
+
+def _compute_builtin_variant_score(
+    *,
+    insert_time_speedup_percentiles: Sequence[float],
+    select_time_speedup_percentiles: Sequence[float],
+    compression_overall_coef: Optional[float],
+    tested_select_time_ms_percentiles: Sequence[float],
+) -> tuple[Optional[float], Dict[str, Any]]:
+    """Встроенная формула score для variant benchmark (legacy-compatible)."""
+    score_parts: list[float] = []
+    part_entries: list[Dict[str, Any]] = []
+    fallback_used = False
+
+    if insert_time_speedup_percentiles:
+        value = float(insert_time_speedup_percentiles[-1])
+        score_parts.append(value)
+        part_entries.append(
+            {"name": "insert_time_speedup_last_percentile", "value": value}
+        )
+    if select_time_speedup_percentiles:
+        value = float(select_time_speedup_percentiles[-1])
+        score_parts.append(value)
+        part_entries.append(
+            {"name": "select_time_speedup_last_percentile", "value": value}
+        )
+    if compression_overall_coef and compression_overall_coef > 0:
+        value = float(compression_overall_coef)
+        score_parts.append(value)
+        part_entries.append({"name": "compression_overall_coef", "value": value})
+
+    if (
+        not score_parts
+        and tested_select_time_ms_percentiles
+        and tested_select_time_ms_percentiles[-1] > 0
+    ):
+        fallback_used = True
+        value = 1.0 / float(tested_select_time_ms_percentiles[-1])
+        score_parts.append(value)
+        part_entries.append(
+            {"name": "inverse_tested_select_time_last_percentile", "value": value}
+        )
+
+    score = (sum(score_parts) / len(score_parts)) if score_parts else None
+    details: Dict[str, Any] = {
+        "formula": (
+            "avg(insert_time_speedup_last_percentile, "
+            "select_time_speedup_last_percentile, compression_overall_coef)"
+            if not fallback_used
+            else "1 / tested_select_time_ms_percentiles[-1]"
+        ),
+        "inputs": {
+            "insert_time_speedup_percentiles": list(insert_time_speedup_percentiles),
+            "select_time_speedup_percentiles": list(select_time_speedup_percentiles),
+            "compression_overall_coef": compression_overall_coef,
+            "tested_select_time_ms_percentiles": list(tested_select_time_ms_percentiles),
+        },
+        "parts": part_entries,
+        "result": score,
+        "fallback_used": fallback_used,
+        "note": (
+            None
+            if score is not None
+            else "Не удалось вычислить score: нет валидных компонентов формулы"
+        ),
+    }
+    return score, details
+
+
+def _resolve_score(
+    *,
+    scoring: ScoringConfig,
+    builtin_score: Optional[float],
+    builtin_score_details: Optional[Dict[str, Any]],
+    expression_context: Dict[str, Any],
+    context_label: str,
+) -> tuple[Optional[float], str]:
+    """
+    Вычисляет итоговый score по конфигу scoring.
+
+    - `builtin` -> возвращает `builtin_score`;
+    - `expression` -> вычисляет безопасное expression.
+    """
+    if scoring.mode == "builtin":
+        details: Dict[str, Any] = {
+            "mode": "builtin",
+            "status": "ok" if builtin_score is not None else "empty",
+            "final_score": builtin_score,
+            "on_error_score": scoring.on_error_score,
+            "details": builtin_score_details or {},
+        }
+        return builtin_score, _to_pretty_score_calculation_json(details)
+
+    base_details: Dict[str, Any] = {
+        "mode": "expression",
+        "expression": scoring.expression,
+        "on_error_score": scoring.on_error_score,
+        "builtin_score_fallback": builtin_score,
+        "context": expression_context,
+    }
+
+    try:
+        score = evaluate_score_expression(
+            scoring.expression or "",
+            expression_context,
+        )
+    except ScoreEvaluationError as exc:
+        logger.warning(
+            "%s: ошибка вычисления scoring.expression: %s",
+            context_label,
+            exc,
+        )
+        if scoring.on_error_score is not None:
+            fallback_score = float(scoring.on_error_score)
+            return fallback_score, _to_pretty_score_calculation_json(
+                {
+                    **base_details,
+                    "status": "fallback_on_error",
+                    "error": str(exc),
+                    "final_score": fallback_score,
+                }
+            )
+        return None, _to_pretty_score_calculation_json(
+            {
+                **base_details,
+                "status": "error",
+                "error": str(exc),
+                "final_score": None,
+            }
+        )
+
+    if not math.isfinite(score):
+        logger.warning("%s: scoring.expression вернуло неfinite score=%s", context_label, score)
+        if scoring.on_error_score is not None:
+            fallback_score = float(scoring.on_error_score)
+            return fallback_score, _to_pretty_score_calculation_json(
+                {
+                    **base_details,
+                    "status": "fallback_non_finite",
+                    "error": f"non-finite score: {score}",
+                    "final_score": fallback_score,
+                }
+            )
+        return None, _to_pretty_score_calculation_json(
+            {
+                **base_details,
+                "status": "non_finite",
+                "error": f"non-finite score: {score}",
+                "final_score": None,
+            }
+        )
+    final_score = float(score)
+    return final_score, _to_pretty_score_calculation_json(
+        {
+            **base_details,
+            "status": "ok",
+            "final_score": final_score,
+        }
+    )
 
 
 class QueryPlanPayload(BaseModel):
@@ -65,6 +479,24 @@ class QueryPlanPayload(BaseModel):
 
     warmup_queries: List[str] = Field(default_factory=list)
     test_queries: List[str] = Field(default_factory=list)
+
+    @field_validator("warmup_queries", "test_queries")
+    @classmethod
+    def _validate_queries_are_safe_and_read_only(
+        cls,
+        values: List[str],
+        info,
+    ) -> List[str]:
+        """Проверяет, что пользовательские SQL-запросы безопасны и read-only."""
+        validated: list[str] = []
+        for index, query in enumerate(values):
+            if not is_safe_input_parameter(query):
+                raise ValueError(
+                    f"{info.field_name}[{index}] содержит потенциально опасный SQL."
+                )
+            _assert_read_only_query(query, context=f"{info.field_name}[{index}]")
+            validated.append(query)
+        return validated
 
 
 class ConnectionPayload(BaseModel):
@@ -100,9 +532,13 @@ class SourceBenchmarkTaskPayload(BaseModel):
     test_database: Optional[str] = None
     source_table: str
     source_table_ddl: str
+    result_connection: Optional[ConnectionPayload] = None
+    result_database: Optional[str] = None
+    result_table: Optional[str] = None
     query_plan: QueryPlanPayload
     max_iterations: int
     insert_rows_limit: Optional[int] = None
+    scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     measured_percentiles: List[int] = Field(default_factory=lambda: list(DEFAULT_MEASURED_PERCENTILES))
 
 
@@ -131,6 +567,7 @@ class VariantBenchmarkTaskPayload(BaseModel):
 
     max_iterations: int
     insert_rows_limit: Optional[int] = None
+    scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     query_plan: QueryPlanPayload
 
     source_benchmark: Optional[Dict[str, Any]] = None
@@ -142,6 +579,8 @@ class _ClickHouseRuntimeClient:
 
     _stream_slots_lock = threading.Lock()
     _stream_slots: dict[tuple[str, int, str], threading.BoundedSemaphore] = {}
+    _autogen_session_configured = False
+    _autogen_session_configured_lock = threading.Lock()
 
     def __init__(self, connection: ConnectionPayload) -> None:
         try:
@@ -151,16 +590,14 @@ class _ClickHouseRuntimeClient:
                 "clickhouse-connect не установлен. Установи зависимости из requirements.txt"
             ) from exc
 
-        self._client = clickhouse_connect.get_client(
-            host=connection.host,
-            port=connection.port,
-            username=connection.login,
-            password=connection.password,
-        )
+        self._configure_clickhouse_common_settings()
+        self._client = self._build_clickhouse_client(connection)
         worker_settings = get_clickhouse_celery_worker_settings()
         self._stream_connection = connection
         self._stream_client: Any = None
         self._stream_client_checked = False
+        self._stream_insert_client: Any = None
+        self._stream_insert_client_checked = False
         self._max_concurrent_streams_per_process = (
             worker_settings.clickhouse_manager_max_concurrent_streams_per_process
         )
@@ -189,6 +626,14 @@ class _ClickHouseRuntimeClient:
                     close_method()
                 except Exception:
                     logger.exception("_ClickHouseRuntimeClient: ошибка close stream client")
+        stream_insert_client = getattr(self, "_stream_insert_client", None)
+        if stream_insert_client is not None:
+            close_method = getattr(stream_insert_client, "close", None)
+            if callable(close_method):
+                try:
+                    close_method()
+                except Exception:
+                    logger.exception("_ClickHouseRuntimeClient: ошибка close stream insert client")
 
     def execute(self, query: str, params: Optional[Dict[str, Any]] = None):
         """Проксирует SQL execute."""
@@ -238,13 +683,7 @@ class _ClickHouseRuntimeClient:
     @staticmethod
     def _strip_leading_sql_comments(query: str) -> str:
         """Удаляет ведущие block comments и пробелы."""
-        stripped = query.lstrip()
-        while stripped.startswith("/*"):
-            end_pos = stripped.find("*/")
-            if end_pos == -1:
-                break
-            stripped = stripped[end_pos + 2 :].lstrip()
-        return stripped
+        return _strip_leading_sql_comments(query)
 
     @classmethod
     def _is_read_query(cls, query: str) -> bool:
@@ -258,9 +697,35 @@ class _ClickHouseRuntimeClient:
         """Создаёт БД при отсутствии."""
         self.execute(f"CREATE DATABASE IF NOT EXISTS `{database}`")
 
-    def drop_table_if_exists(self, database: str, table: str) -> None:
-        """Удаляет таблицу если существует."""
-        self.execute(f"DROP TABLE IF EXISTS `{database}`.`{table}`")
+    def drop_table_if_exists(
+        self,
+        database: str,
+        table: str,
+        *,
+        allowed_database: str,
+    ) -> None:
+        """
+        Безопасно удаляет только benchmark-таблицу из явно разрешённой тестовой БД.
+        """
+        normalized_database = str(database).strip()
+        normalized_allowed_database = str(allowed_database).strip()
+        normalized_table = str(table).strip()
+
+        if not normalized_database:
+            raise ValueError("DROP TABLE: database не должен быть пустым")
+        if not normalized_allowed_database:
+            raise ValueError("DROP TABLE: allowed_database не должен быть пустым")
+        if normalized_database != normalized_allowed_database:
+            raise ValueError(
+                "DROP TABLE разрешён только в тестовой БД, где создаются benchmark-таблицы"
+            )
+        if not _is_benchmark_temp_table_name(normalized_table):
+            raise ValueError(
+                "DROP TABLE разрешён только для benchmark-таблиц "
+                "(variant `__bench__...__NNNN` или `__source_baseline__`)"
+            )
+
+        self.execute(f"DROP TABLE IF EXISTS `{normalized_database}`.`{normalized_table}`")
 
     def count_rows(self, database: str, table: str) -> int:
         """Количество строк в таблице."""
@@ -334,25 +799,34 @@ class _ClickHouseRuntimeClient:
             }
         return result
 
-    def execute_with_query_log_metrics(
+    @staticmethod
+    def _build_tagged_query(query: str, query_tag: Optional[str]) -> str:
+        """Добавляет комментарий-тег к SQL, чтобы запрос проще находился в логах."""
+        if not query_tag:
+            return query
+        return f"/* bench_qid:{query_tag} */ {query}"
+
+    def _execute_command_with_summary_metrics(
         self,
         query: str,
         *,
-        query_tag: str,
-        poll_attempts: int = 25,
-        poll_sleep_sec: float = 0.1,
+        query_tag: Optional[str] = None,
     ) -> Dict[str, float]:
-        """Выполняет запрос и возвращает метрики из `system.query_log`."""
-        tag = f"bench_qid:{query_tag}"
-        self.execute(f"/* {tag} */ {query}")
-        metrics = self._poll_query_log_metrics(
-            tag=tag,
-            poll_attempts=poll_attempts,
-            poll_sleep_sec=poll_sleep_sec,
-        )
-        if metrics is not None:
-            return metrics
+        """
+        Выполняет SQL через `command` и достаёт метрики только из `result.summary`.
+        """
+        tagged_query = self._build_tagged_query(query, query_tag)
+        try:
+            command_result = self._client.command(tagged_query)
+        except Exception:
+            logger.exception("Не удалось выполнить command SQL для получения summary")
+            return _error_query_metrics()
 
+        summary_metrics = self._extract_stream_query_summary(command_result)
+        if summary_metrics is not None:
+            return summary_metrics
+
+        logger.warning("SQL выполнен, но clickhouse-connect не вернул .summary")
         return _error_query_metrics()
 
     def execute_select_with_metrics(
@@ -360,19 +834,17 @@ class _ClickHouseRuntimeClient:
         query: str,
         *,
         query_tag: str,
-        poll_attempts: int = 25,
-        poll_sleep_sec: float = 0.1,
     ) -> Dict[str, float]:
         """
-        Выполняет SELECT и возвращает метрики максимально быстрым способом.
+        Выполняет SELECT и возвращает метрики только из `.summary`.
 
         Приоритет:
-        1) `clickhouse-connect.command` с `QuerySummary` (без похода в system.query_log);
-        2) если summary недоступен — читаем query_log по уже выполненному tagged запросу;
-        3) если запрос через stream-клиент не удался — fallback на стандартный путь.
+        1) `stream_client.command(...)`;
+        2) `stream_client.query(...)`;
+        3) `self._client.query(...)`.
         """
-        tag = f"bench_qid:{query_tag}"
-        tagged_query = f"/* {tag} */ {query}"
+        _validate_user_read_only_sql_input(query)
+        tagged_query = self._build_tagged_query(query, query_tag)
 
         stream_client = self._get_stream_client()
         if stream_client is not None:
@@ -381,69 +853,34 @@ class _ClickHouseRuntimeClient:
                 summary_metrics = self._extract_stream_query_summary(command_result)
                 if summary_metrics is not None:
                     return summary_metrics
-
-                query_log_metrics = self._poll_query_log_metrics(
-                    tag=tag,
-                    poll_attempts=poll_attempts,
-                    poll_sleep_sec=poll_sleep_sec,
-                )
-                if query_log_metrics is not None:
-                    return query_log_metrics
-
-                logger.warning("Нет summary/query_log метрик для select tag=%s после stream command", tag)
-                return _error_query_metrics()
             except Exception:
-                logger.exception("Stream command для select не удался: fallback на query_log путь")
+                logger.exception("Stream command для select не удался")
+            try:
+                query_result = stream_client.query(tagged_query)
+                summary_metrics = self._extract_stream_query_summary(query_result)
+                if summary_metrics is not None:
+                    return summary_metrics
+            except Exception:
+                logger.exception("Stream query для select не удался")
 
-        return self.execute_with_query_log_metrics(
-            query,
-            query_tag=query_tag,
-            poll_attempts=poll_attempts,
-            poll_sleep_sec=poll_sleep_sec,
-        )
+        try:
+            query_result = self._client.query(tagged_query)
+        except Exception:
+            logger.exception("Client query для select не удался")
+            return _error_query_metrics()
 
-    def _poll_query_log_metrics(
-        self,
-        *,
-        tag: str,
-        poll_attempts: int,
-        poll_sleep_sec: float,
-    ) -> Optional[Dict[str, float]]:
-        """Ищет метрики запроса в `system.query_log` по tag."""
-        pattern = f"%{tag}%"
-        for _ in range(max(1, poll_attempts)):
-            rows = self.execute(
-                """
-                SELECT
-                    query_duration_ms,
-                    read_rows,
-                    read_bytes,
-                    written_rows,
-                    written_bytes
-                FROM system.query_log
-                WHERE type = 'QueryFinish'
-                  AND query LIKE %(pattern)s
-                ORDER BY event_time DESC
-                LIMIT 1
-                """,
-                {"pattern": pattern},
-            )
-            if rows:
-                duration_ms, read_rows, read_bytes, written_rows, written_bytes = rows[0]
-                duration_ms_value = _to_metric_or_error(duration_ms)
-                elapsed_ns = (
-                    duration_ms_value * 1_000_000.0 if duration_ms_value >= 0 else -1.0
-                )
-                return {
-                    "elapsed_ns": elapsed_ns,
-                    "read_rows": _to_metric_or_error(read_rows),
-                    "read_bytes": _to_metric_or_error(read_bytes),
-                    "written_rows": _to_metric_or_error(written_rows),
-                    "written_bytes": _to_metric_or_error(written_bytes),
-                }
-            time.sleep(poll_sleep_sec)
-        logger.warning("Query log не найден для tag=%s", tag)
-        return None
+        summary_metrics = self._extract_stream_query_summary(query_result)
+        if summary_metrics is not None:
+            return summary_metrics
+
+        logger.warning("SELECT выполнен, но clickhouse-connect не вернул .summary")
+        return _error_query_metrics()
+
+    @check_input_params_decorator
+    def execute_user_read_only_query(self, query: str) -> list:
+        """Выполняет только безопасный read-only SQL из пользовательского query-plan."""
+        _assert_read_only_query(query, context="user_query")
+        return self.execute(query)
 
     def _get_stream_client(self) -> Any:
         """
@@ -451,28 +888,88 @@ class _ClickHouseRuntimeClient:
 
         Возвращает `None`, если библиотека/подключение недоступны.
         """
-        if self._stream_client_checked:
-            return self._stream_client
+        if getattr(self, "_stream_client_checked", False):
+            return getattr(self, "_stream_client", None)
 
         self._stream_client_checked = True
         try:
-            import clickhouse_connect
+            self._stream_client = self._build_clickhouse_client(self._stream_connection)
         except ImportError:
-            logger.debug("clickhouse-connect не установлен: используем fallback insert через query_log")
+            logger.debug("clickhouse-connect не установлен: stream-клиент недоступен")
             self._stream_client = None
             return None
-
-        try:
-            self._stream_client = clickhouse_connect.get_client(
-                host=self._stream_connection.host,
-                port=self._stream_connection.port,
-                username=self._stream_connection.login,
-                password=self._stream_connection.password,
-            )
         except Exception:
             logger.exception("Не удалось создать clickhouse-connect client: используем fallback insert")
             self._stream_client = None
         return self._stream_client
+
+    def _get_stream_insert_client(self) -> Any:
+        """
+        Возвращает отдельный clickhouse-connect client для raw_insert.
+
+        Важно: клиент записи должен отличаться от клиента чтения (`raw_stream`),
+        иначе ClickHouse может вернуть SESSION_IS_LOCKED.
+        """
+        if getattr(self, "_stream_insert_client_checked", False):
+            return getattr(self, "_stream_insert_client", None)
+
+        self._stream_insert_client_checked = True
+        try:
+            self._stream_insert_client = self._build_clickhouse_client(self._stream_connection)
+        except ImportError:
+            logger.debug("clickhouse-connect не установлен: stream-insert клиент недоступен")
+            self._stream_insert_client = None
+            return None
+        except Exception:
+            logger.exception(
+                "Не удалось создать отдельный clickhouse-connect client для raw_insert"
+            )
+            self._stream_insert_client = None
+        return self._stream_insert_client
+
+    @classmethod
+    def _configure_clickhouse_common_settings(cls) -> None:
+        """
+        Применяет legacy-настройку clickhouse-connect:
+        `autogenerate_session_id = False`.
+        """
+        if cls._autogen_session_configured:
+            return
+        with cls._autogen_session_configured_lock:
+            if cls._autogen_session_configured:
+                return
+            try:
+                from clickhouse_connect import common
+
+                common.set_setting("autogenerate_session_id", False)
+            except Exception as exc:
+                logger.warning(
+                    "Не удалось применить clickhouse_connect common setting "
+                    "autogenerate_session_id=False: %s",
+                    exc,
+                )
+            cls._autogen_session_configured = True
+
+    @classmethod
+    def _build_clickhouse_client(cls, connection: ConnectionPayload) -> Any:
+        """
+        Создаёт clickhouse-connect client с попыткой отключить auto-session-id.
+        """
+        import clickhouse_connect
+
+        kwargs = {
+            "host": connection.host,
+            "port": connection.port,
+            "username": connection.login,
+            "password": connection.password,
+        }
+        try:
+            return clickhouse_connect.get_client(
+                **kwargs,
+                autogenerate_session_id=False,
+            )
+        except TypeError:
+            return clickhouse_connect.get_client(**kwargs)
 
     def _stream_slot_key(self) -> tuple[str, int, str]:
         """Ключ semaphore для ограничения concurrent stream на connection."""
@@ -582,6 +1079,7 @@ class _ClickHouseRuntimeClient:
                 "read_bytes",
                 "written_rows",
                 "written_bytes",
+                "memory_usage",
             )
         ):
             return None
@@ -591,6 +1089,7 @@ class _ClickHouseRuntimeClient:
             "read_bytes": _to_metric_or_error(summary.get("read_bytes")),
             "written_rows": _to_metric_or_error(summary.get("written_rows")),
             "written_bytes": _to_metric_or_error(summary.get("written_bytes")),
+            "memory_usage": _to_metric_or_error(summary.get("memory_usage")),
         }
 
     @staticmethod
@@ -608,7 +1107,9 @@ class _ClickHouseRuntimeClient:
             return read_rows <= 0
         except Exception:
             logger.exception("Не удалось распарсить stream summary header")
-            return False
+            # Legacy-совместимое безопасное поведение:
+            # при любой ошибке парсинга считаем stream пустым.
+            return True
 
     def insert_from_source_with_metrics(
         self,
@@ -628,7 +1129,7 @@ class _ClickHouseRuntimeClient:
 
         Приоритет:
         1) streaming путь через clickhouse-connect (`raw_stream` + `raw_insert`);
-        2) fallback через `INSERT INTO ... SELECT ...` + query_log.
+        2) fallback через `INSERT INTO ... SELECT ...` + `.summary`.
         """
         if n_rows is not None and n_rows <= 0:
             return _error_query_metrics()
@@ -648,6 +1149,9 @@ class _ClickHouseRuntimeClient:
         )
         stream_client = self._get_stream_client()
         if stream_client is not None:
+            insert_client = self._get_stream_insert_client()
+            if insert_client is None:
+                insert_client = stream_client
             source_stream = None
             stream_slot_acquired = False
             try:
@@ -662,7 +1166,7 @@ class _ClickHouseRuntimeClient:
                 source_stream = stream_client.raw_stream(source_select_query, fmt="Native")
                 if self._is_stream_empty(source_stream):
                     return _error_query_metrics()
-                query_summary = stream_client.raw_insert(
+                query_summary = insert_client.raw_insert(
                     table=f"{target_database}.{target_table}",
                     insert_block=source_stream,
                     fmt="Native",
@@ -689,7 +1193,10 @@ class _ClickHouseRuntimeClient:
             f"INSERT INTO `{target_database}`.`{target_table}`\n"
             f"{source_select_query}"
         )
-        return self.execute_with_query_log_metrics(insert_query, query_tag=query_tag)
+        return self._execute_command_with_summary_metrics(
+            insert_query,
+            query_tag=query_tag,
+        )
 
 
 def _rows_per_second(rows: float, elapsed_ns: float) -> float:
@@ -729,8 +1236,9 @@ def _measure_insert(
 ) -> Dict[str, List[float]]:
     """Собирает замеры INSERT со streaming-fast path и strict-fill режимом."""
     elapsed_ns_entries: list[float] = []
-    read_rows_per_second_entries: list[float] = []
+    written_rows_per_second_entries: list[float] = []
     read_bytes_per_second_entries: list[float] = []
+    memory_usage_entries: list[float] = []
     written_rows_entries: list[float] = []
     max_retries, initial_sleep_sec, retry_sleep_increment = client.get_retry_policy()
 
@@ -780,20 +1288,43 @@ def _measure_insert(
             sleep_sec += retry_sleep_increment
 
         elapsed_ns = float(query_metrics["elapsed_ns"])
-        read_rows = float(query_metrics["read_rows"])
         read_bytes = float(query_metrics["read_bytes"])
         written_rows = float(query_metrics["written_rows"])
+        memory_usage = float(query_metrics.get("memory_usage", -1.0))
 
         elapsed_ns_entries.append(elapsed_ns)
-        read_rows_per_second_entries.append(_rows_per_second(read_rows, elapsed_ns))
+        written_rows_per_second_entries.append(_rows_per_second(written_rows, elapsed_ns))
         read_bytes_per_second_entries.append(_bytes_per_second(read_bytes, elapsed_ns))
+        memory_usage_entries.append(memory_usage)
         written_rows_entries.append(written_rows)
 
+    context = f"insert metrics {target_database}.{target_table}"
     return {
-        "elapsed_ns": elapsed_ns_entries,
-        "rows_per_second": read_rows_per_second_entries,
-        "bytes_per_second": read_bytes_per_second_entries,
-        "written_rows": written_rows_entries,
+        "elapsed_ns": _filter_positive_finite_measurements(
+            elapsed_ns_entries,
+            metric_name="elapsed_ns",
+            context=context,
+        ),
+        "rows_per_second": _filter_positive_finite_measurements(
+            written_rows_per_second_entries,
+            metric_name="rows_per_second",
+            context=context,
+        ),
+        "bytes_per_second": _filter_positive_finite_measurements(
+            read_bytes_per_second_entries,
+            metric_name="bytes_per_second",
+            context=context,
+        ),
+        "memory_usage": _filter_positive_finite_measurements(
+            memory_usage_entries,
+            metric_name="memory_usage",
+            context=context,
+        ),
+        "written_rows": _filter_positive_finite_measurements(
+            written_rows_entries,
+            metric_name="written_rows",
+            context=context,
+        ),
     }
 
 
@@ -807,6 +1338,7 @@ def _measure_select_queries(
     elapsed_ns_entries: list[float] = []
     read_rows_per_second_entries: list[float] = []
     read_bytes_per_second_entries: list[float] = []
+    memory_usage_entries: list[float] = []
     per_query_entries: list[dict[str, Any]] = []
     max_retries, initial_sleep_sec, retry_sleep_increment = client.get_retry_policy()
 
@@ -815,6 +1347,7 @@ def _measure_select_queries(
             "elapsed_ns": elapsed_ns_entries,
             "rows_per_second": read_rows_per_second_entries,
             "bytes_per_second": read_bytes_per_second_entries,
+            "memory_usage": memory_usage_entries,
             "per_query": per_query_entries,
         }
 
@@ -822,6 +1355,7 @@ def _measure_select_queries(
         query_elapsed_ns_entries: list[float] = []
         query_rows_per_second_entries: list[float] = []
         query_bytes_per_second_entries: list[float] = []
+        query_memory_usage_entries: list[float] = []
         for measurement_id in range(max(1, n_measurements)):
             attempt_n = 0
             sleep_sec = initial_sleep_sec
@@ -859,16 +1393,41 @@ def _measure_select_queries(
             elapsed_ns = float(query_metrics["elapsed_ns"])
             read_rows = float(query_metrics["read_rows"])
             read_bytes = float(query_metrics["read_bytes"])
+            memory_usage = float(query_metrics.get("memory_usage", -1.0))
             query_rows_per_second = _rows_per_second(read_rows, elapsed_ns)
             query_bytes_per_second = _bytes_per_second(read_bytes, elapsed_ns)
-
-            elapsed_ns_entries.append(elapsed_ns)
-            read_rows_per_second_entries.append(query_rows_per_second)
-            read_bytes_per_second_entries.append(query_bytes_per_second)
 
             query_elapsed_ns_entries.append(elapsed_ns)
             query_rows_per_second_entries.append(query_rows_per_second)
             query_bytes_per_second_entries.append(query_bytes_per_second)
+            query_memory_usage_entries.append(memory_usage)
+
+        query_context = f"select metrics query[{query_index}]"
+        query_elapsed_ns_entries = _filter_positive_finite_measurements(
+            query_elapsed_ns_entries,
+            metric_name="elapsed_ns",
+            context=query_context,
+        )
+        query_rows_per_second_entries = _filter_positive_finite_measurements(
+            query_rows_per_second_entries,
+            metric_name="rows_per_second",
+            context=query_context,
+        )
+        query_bytes_per_second_entries = _filter_positive_finite_measurements(
+            query_bytes_per_second_entries,
+            metric_name="bytes_per_second",
+            context=query_context,
+        )
+        query_memory_usage_entries = _filter_positive_finite_measurements(
+            query_memory_usage_entries,
+            metric_name="memory_usage",
+            context=query_context,
+        )
+
+        elapsed_ns_entries.extend(query_elapsed_ns_entries)
+        read_rows_per_second_entries.extend(query_rows_per_second_entries)
+        read_bytes_per_second_entries.extend(query_bytes_per_second_entries)
+        memory_usage_entries.extend(query_memory_usage_entries)
 
         per_query_entries.append(
             {
@@ -877,6 +1436,7 @@ def _measure_select_queries(
                 "elapsed_ns_measurements": query_elapsed_ns_entries,
                 "rows_per_second_measurements": query_rows_per_second_entries,
                 "bytes_per_second_measurements": query_bytes_per_second_entries,
+                "memory_usage_measurements": query_memory_usage_entries,
             }
         )
 
@@ -884,6 +1444,7 @@ def _measure_select_queries(
         "elapsed_ns": elapsed_ns_entries,
         "rows_per_second": read_rows_per_second_entries,
         "bytes_per_second": read_bytes_per_second_entries,
+        "memory_usage": memory_usage_entries,
         "per_query": per_query_entries,
     }
 
@@ -905,38 +1466,66 @@ def _build_select_per_query_metrics(
         query = str(raw_entry.get("query", ""))
         query_index = int(raw_entry.get("query_index", fallback_index))
 
-        elapsed_ns_measurements = list(
-            float(value) for value in (raw_entry.get("elapsed_ns_measurements", []) or [])
+        entry_context = f"select per-query metrics query[{query_index}]"
+        elapsed_ns_measurements = _filter_positive_finite_measurements(
+            list(float(value) for value in (raw_entry.get("elapsed_ns_measurements", []) or [])),
+            metric_name="elapsed_ns",
+            context=entry_context,
         )
-        rows_per_second_measurements = list(
-            float(value) for value in (raw_entry.get("rows_per_second_measurements", []) or [])
+        rows_per_second_measurements = _filter_positive_finite_measurements(
+            list(float(value) for value in (raw_entry.get("rows_per_second_measurements", []) or [])),
+            metric_name="rows_per_second",
+            context=entry_context,
         )
-        bytes_per_second_measurements = list(
-            float(value) for value in (raw_entry.get("bytes_per_second_measurements", []) or [])
+        bytes_per_second_measurements = _filter_positive_finite_measurements(
+            list(float(value) for value in (raw_entry.get("bytes_per_second_measurements", []) or [])),
+            metric_name="bytes_per_second",
+            context=entry_context,
+        )
+        memory_usage_measurements = _filter_positive_finite_measurements(
+            list(float(value) for value in (raw_entry.get("memory_usage_measurements", []) or [])),
+            metric_name="memory_usage",
+            context=entry_context,
         )
 
         elapsed_ms_measurements = [
             value / 1_000_000.0 for value in elapsed_ns_measurements
         ]
 
+        elapsed_ms_percentiles = compute_percentiles(
+            elapsed_ms_measurements,
+            measured_percentiles,
+        )
+        rows_per_second_percentiles = compute_percentiles(
+            rows_per_second_measurements,
+            measured_percentiles,
+        )
+        bytes_per_second_percentiles = compute_percentiles(
+            bytes_per_second_measurements,
+            measured_percentiles,
+        )
+        memory_usage_percentiles = compute_percentiles(
+            memory_usage_measurements,
+            measured_percentiles,
+        )
+
         result.append(
             {
                 "query_index": query_index,
                 "query": query,
                 "elapsed_ms_measurements": elapsed_ms_measurements,
-                "elapsed_ms_percentiles": compute_percentiles(
-                    elapsed_ms_measurements,
-                    measured_percentiles,
-                ),
+                "elapsed_ms_percentiles": elapsed_ms_percentiles,
                 "rows_per_second_measurements": rows_per_second_measurements,
-                "rows_per_second_percentiles": compute_percentiles(
-                    rows_per_second_measurements,
-                    measured_percentiles,
-                ),
+                "rows_per_second_percentiles": rows_per_second_percentiles,
                 "bytes_per_second_measurements": bytes_per_second_measurements,
-                "bytes_per_second_percentiles": compute_percentiles(
-                    bytes_per_second_measurements,
-                    measured_percentiles,
+                "bytes_per_second_percentiles": bytes_per_second_percentiles,
+                "memory_usage_measurements": memory_usage_measurements,
+                "memory_usage_measurements_readable": _to_readable_memory_measurements(
+                    memory_usage_measurements
+                ),
+                "memory_usage_percentiles": memory_usage_percentiles,
+                "memory_usage_percentiles_readable": _to_readable_memory_measurements(
+                    memory_usage_percentiles
                 ),
             }
         )
@@ -956,7 +1545,38 @@ def _extract_source_select_per_query_metrics(
     """
     direct_value = source_metrics.get("source_table_select_metrics_by_query")
     if isinstance(direct_value, list):
-        return [entry for entry in direct_value if isinstance(entry, dict)]
+        def _coerce_float_list(values: Any) -> list[float]:
+            numeric_values: list[float] = []
+            if not isinstance(values, list):
+                return numeric_values
+            for value in values:
+                try:
+                    numeric_values.append(float(value))
+                except Exception:
+                    continue
+            return numeric_values
+
+        normalized_entries: list[dict[str, Any]] = []
+        for entry in direct_value:
+            if not isinstance(entry, dict):
+                continue
+            normalized_entry = dict(entry)
+            measurements = normalized_entry.get("memory_usage_measurements")
+            measurements_values = _coerce_float_list(measurements)
+            if measurements_values:
+                normalized_entry.setdefault(
+                    "memory_usage_measurements_readable",
+                    _to_readable_memory_measurements(measurements_values),
+                )
+            percentiles = normalized_entry.get("memory_usage_percentiles")
+            percentiles_values = _coerce_float_list(percentiles)
+            if percentiles_values:
+                normalized_entry.setdefault(
+                    "memory_usage_percentiles_readable",
+                    _to_readable_memory_measurements(percentiles_values),
+                )
+            normalized_entries.append(normalized_entry)
+        return normalized_entries
 
     legacy_query = source_metrics.get("source_table_select_test_query")
     legacy_elapsed_ms_measurements = list(
@@ -977,6 +1597,19 @@ def _extract_source_select_per_query_metrics(
     legacy_bytes_per_second_percentiles = list(
         source_metrics.get("source_table_select_bytes_per_second_measurements_percentiles", []) or []
     )
+    legacy_memory_usage_measurements = list(
+        source_metrics.get("source_table_select_memory_usage_measurements", []) or []
+    )
+    legacy_memory_usage_measurements_readable = list(
+        source_metrics.get("source_table_select_memory_usage_measurements_readable", []) or []
+    )
+    legacy_memory_usage_percentiles = list(
+        source_metrics.get("source_table_select_memory_usage_measurements_percentiles", []) or []
+    )
+    legacy_memory_usage_percentiles_readable = list(
+        source_metrics.get("source_table_select_memory_usage_measurements_percentiles_readable", [])
+        or []
+    )
     if (
         not legacy_query
         and not legacy_elapsed_ms_measurements
@@ -985,6 +1618,10 @@ def _extract_source_select_per_query_metrics(
         and not legacy_rows_per_second_percentiles
         and not legacy_bytes_per_second_measurements
         and not legacy_bytes_per_second_percentiles
+        and not legacy_memory_usage_measurements
+        and not legacy_memory_usage_measurements_readable
+        and not legacy_memory_usage_percentiles
+        and not legacy_memory_usage_percentiles_readable
     ):
         return []
 
@@ -998,6 +1635,22 @@ def _extract_source_select_per_query_metrics(
             "rows_per_second_percentiles": [float(v) for v in legacy_rows_per_second_percentiles],
             "bytes_per_second_measurements": [float(v) for v in legacy_bytes_per_second_measurements],
             "bytes_per_second_percentiles": [float(v) for v in legacy_bytes_per_second_percentiles],
+            "memory_usage_measurements": [float(v) for v in legacy_memory_usage_measurements],
+            "memory_usage_measurements_readable": (
+                [str(v) for v in legacy_memory_usage_measurements_readable]
+                if legacy_memory_usage_measurements_readable
+                else _to_readable_memory_measurements(
+                    [float(v) for v in legacy_memory_usage_measurements]
+                )
+            ),
+            "memory_usage_percentiles": [float(v) for v in legacy_memory_usage_percentiles],
+            "memory_usage_percentiles_readable": (
+                [str(v) for v in legacy_memory_usage_percentiles_readable]
+                if legacy_memory_usage_percentiles_readable
+                else _to_readable_memory_measurements(
+                    [float(v) for v in legacy_memory_usage_percentiles]
+                )
+            ),
         }
     ]
 
@@ -1065,26 +1718,9 @@ def _build_baseline_copy_ddl(
 
     Основной путь: парсим через `TableDDL` и только меняем полное имя таблицы.
     """
-    try:
-        parsed = TableDDL.from_ddl(source_table_ddl)
-        parsed.name = f"{target_database}.{target_table}"
-        return parsed.to_ddl()
-    except Exception:
-        # Fallback для synthetic/legacy DDL из тестов (например, с `(...)`),
-        # когда строгий парсер не может разобрать список колонок.
-        target_ref = f"`{target_database}`.`{target_table}`"
-        create_table_pattern = re.compile(
-            r"(?is)^\s*(CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?)\s+"
-            r"((?:`[^`]+`|\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_]*)(?:\s*\.\s*(?:`[^`]+`|\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_]*))?)"
-        )
-        rewritten_ddl, replaced = create_table_pattern.subn(
-            rf"\1 {target_ref}",
-            source_table_ddl,
-            count=1,
-        )
-        if replaced == 0:
-            raise
-        return rewritten_ddl
+    parsed = TableDDL.from_ddl(source_table_ddl)
+    parsed.name = f"{target_database}.{target_table}"
+    return parsed.to_ddl()
 
 
 def _rewrite_queries_to_baseline_copy(
@@ -1117,6 +1753,374 @@ def _rewrite_queries_to_baseline_copy(
     return rewritten
 
 
+def _to_json_or_none(value: Any) -> Optional[str]:
+    """Сериализует структуру в JSON-строку или возвращает None."""
+    if value is None:
+        return None
+    return json_dumps(value)
+
+
+def _to_legacy_pretty_json_or_none(value: Any) -> Optional[str]:
+    """Сериализует структуру в legacy-совместимый pretty JSON или возвращает None."""
+    if value is None:
+        return None
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _build_baseline_variant_result(
+    *,
+    payload: SourceBenchmarkTaskPayload,
+    baseline_database: str,
+    baseline_table: str,
+    baseline_ddl: str,
+    metrics: Dict[str, Any],
+    baseline_score: Optional[float],
+    baseline_score_calculation_json: Optional[str],
+) -> BenchmarkVariantResult:
+    """
+    Строит `BenchmarkVariantResult` для baseline-замера исходного DDL.
+
+    Записывается отдельной строкой в result-store как `variant_mode=source_baseline`.
+    """
+    measured_percentiles = list(metrics.get("measured_percentiles", []) or [])
+
+    source_insert_ms = list(metrics.get("source_table_insert_time_ms_measurements", []) or [])
+    source_insert_ms_percentiles = list(
+        metrics.get("source_table_insert_time_ms_measurements_percentiles", []) or []
+    )
+    source_insert_rows_per_sec = list(
+        metrics.get("source_table_insert_rows_per_second_measurements", []) or []
+    )
+    source_insert_rows_per_sec_percentiles = list(
+        metrics.get("source_table_insert_rows_per_second_measurements_percentiles", []) or []
+    )
+    source_insert_bytes_per_sec = list(
+        metrics.get("source_table_insert_bytes_per_second_measurements", []) or []
+    )
+    source_insert_bytes_per_sec_readable = list(
+        metrics.get("source_table_insert_bytes_per_second_measurements_readable", []) or []
+    )
+    source_insert_bytes_per_sec_percentiles = list(
+        metrics.get("source_table_insert_bytes_per_second_measurements_percentiles", []) or []
+    )
+    source_insert_bytes_per_sec_percentiles_readable = list(
+        metrics.get("source_table_insert_bytes_per_second_measurements_percentiles_readable", [])
+        or []
+    )
+    source_insert_memory_usage = list(
+        metrics.get("source_table_insert_memory_usage_measurements", []) or []
+    )
+    source_insert_memory_usage_readable = list(
+        metrics.get("source_table_insert_memory_usage_measurements_readable", []) or []
+    )
+    if not source_insert_memory_usage_readable and source_insert_memory_usage:
+        source_insert_memory_usage_readable = [
+            make_readable_bytes(value) for value in source_insert_memory_usage
+        ]
+    source_insert_memory_usage_percentiles = list(
+        metrics.get("source_table_insert_memory_usage_measurements_percentiles", []) or []
+    )
+    source_insert_memory_usage_percentiles_readable = list(
+        metrics.get("source_table_insert_memory_usage_measurements_percentiles_readable", [])
+        or []
+    )
+    if (
+        not source_insert_memory_usage_percentiles_readable
+        and source_insert_memory_usage_percentiles
+    ):
+        source_insert_memory_usage_percentiles_readable = [
+            make_readable_bytes(value) for value in source_insert_memory_usage_percentiles
+        ]
+
+    source_select_ms = list(metrics.get("source_table_select_time_ms_measurements", []) or [])
+    source_select_ms_percentiles = list(
+        metrics.get("source_table_select_time_ms_measurements_percentiles", []) or []
+    )
+    source_select_rows_per_sec = list(
+        metrics.get("source_table_select_rows_per_second_measurements", []) or []
+    )
+    source_select_rows_per_sec_percentiles = list(
+        metrics.get("source_table_select_rows_per_second_measurements_percentiles", []) or []
+    )
+    source_select_bytes_per_sec = list(
+        metrics.get("source_table_select_bytes_per_second_measurements", []) or []
+    )
+    source_select_bytes_per_sec_readable = list(
+        metrics.get("source_table_select_bytes_per_second_measurements_readable", []) or []
+    )
+    source_select_bytes_per_sec_percentiles = list(
+        metrics.get("source_table_select_bytes_per_second_measurements_percentiles", []) or []
+    )
+    source_select_bytes_per_sec_percentiles_readable = list(
+        metrics.get("source_table_select_bytes_per_second_measurements_percentiles_readable", [])
+        or []
+    )
+    source_select_memory_usage = list(
+        metrics.get("source_table_select_memory_usage_measurements", []) or []
+    )
+    source_select_memory_usage_readable = list(
+        metrics.get("source_table_select_memory_usage_measurements_readable", []) or []
+    )
+    if not source_select_memory_usage_readable and source_select_memory_usage:
+        source_select_memory_usage_readable = [
+            make_readable_bytes(value) for value in source_select_memory_usage
+        ]
+    source_select_memory_usage_percentiles = list(
+        metrics.get("source_table_select_memory_usage_measurements_percentiles", []) or []
+    )
+    source_select_memory_usage_percentiles_readable = list(
+        metrics.get("source_table_select_memory_usage_measurements_percentiles_readable", [])
+        or []
+    )
+    if (
+        not source_select_memory_usage_percentiles_readable
+        and source_select_memory_usage_percentiles
+    ):
+        source_select_memory_usage_percentiles_readable = [
+            make_readable_bytes(value) for value in source_select_memory_usage_percentiles
+        ]
+
+    source_total_size_bytes = float(
+        metrics.get("source_table_consumed_compressed_size_bytes_overall", 0.0) or 0.0
+    )
+    tested_total_size_bytes = float(
+        metrics.get("tested_table_consumed_compressed_size_bytes_overall", source_total_size_bytes)
+        or source_total_size_bytes
+    )
+    source_rows = int(metrics.get("total_n_rows_in_source_table", 0) or 0)
+    tested_rows = int(metrics.get("total_n_rows_in_tested_table", source_rows) or source_rows)
+    tested_columns_size_map = (
+        metrics.get("tested_table_consumed_compressed_size_bytes_by_each_column")
+        or metrics.get("source_table_consumed_compressed_size_bytes_by_each_column")
+    )
+    compression_overall_coef: Optional[float] = None
+    if source_total_size_bytes > 0:
+        compression_overall_coef = tested_total_size_bytes / source_total_size_bytes
+
+    return BenchmarkVariantResult(
+        benchmark_run_id=payload.benchmark_run_id,
+        benchmark_started_at=payload.benchmark_started_at,
+        benchmark_id=payload.benchmark_id,
+        source_database=payload.source_database,
+        source_table=payload.source_table,
+        variant_table=baseline_table,
+        variant_mode="source_baseline",
+        variant_params={
+            "kind": "source_baseline",
+            "baseline_database": baseline_database,
+            "baseline_table": baseline_table,
+        },
+        source_table_ddl=payload.source_table_ddl,
+        tested_table_ddl=baseline_ddl,
+        is_source_table_copy=True,
+        total_n_rows_in_tested_table=tested_rows,
+        total_n_rows_in_source_table=source_rows,
+        measured_percentiles=measured_percentiles,
+        insert_test_n_rows=payload.insert_rows_limit,
+        tested_table_insert_time_ms_measurements=source_insert_ms,
+        source_table_insert_time_ms_measurements=source_insert_ms,
+        tested_table_insert_time_ms_measurements_percentiles=source_insert_ms_percentiles,
+        source_table_insert_time_ms_measurements_percentiles=source_insert_ms_percentiles,
+        tested_table_insert_time_ms_measurements_percentiles_speed_up_coefs=(
+            compute_speedup_coefficients(source_insert_ms_percentiles, source_insert_ms_percentiles)
+        ),
+        tested_table_insert_rows_per_second_measurements=source_insert_rows_per_sec,
+        source_table_insert_rows_per_second_measurements=source_insert_rows_per_sec,
+        tested_table_insert_rows_per_second_measurements_percentiles=(
+            source_insert_rows_per_sec_percentiles
+        ),
+        source_table_insert_rows_per_second_measurements_percentiles=(
+            source_insert_rows_per_sec_percentiles
+        ),
+        tested_table_insert_bytes_per_second_measurements=source_insert_bytes_per_sec,
+        tested_table_insert_bytes_per_second_measurements_readable=source_insert_bytes_per_sec_readable,
+        source_table_insert_bytes_per_second_measurements=source_insert_bytes_per_sec,
+        source_table_insert_bytes_per_second_measurements_readable=(
+            source_insert_bytes_per_sec_readable
+        ),
+        tested_table_insert_bytes_per_second_measurements_percentiles=(
+            source_insert_bytes_per_sec_percentiles
+        ),
+        tested_table_insert_bytes_per_second_measurements_percentiles_readable=(
+            source_insert_bytes_per_sec_percentiles_readable
+        ),
+        source_table_insert_bytes_per_second_measurements_percentiles=(
+            source_insert_bytes_per_sec_percentiles
+        ),
+        source_table_insert_bytes_per_second_measurements_percentiles_readable=(
+            source_insert_bytes_per_sec_percentiles_readable
+        ),
+        tested_table_insert_memory_usage_measurements=source_insert_memory_usage,
+        tested_table_insert_memory_usage_measurements_readable=(
+            source_insert_memory_usage_readable
+        ),
+        source_table_insert_memory_usage_measurements=source_insert_memory_usage,
+        source_table_insert_memory_usage_measurements_readable=(
+            source_insert_memory_usage_readable
+        ),
+        tested_table_insert_memory_usage_measurements_percentiles=(
+            source_insert_memory_usage_percentiles
+        ),
+        tested_table_insert_memory_usage_measurements_percentiles_readable=(
+            source_insert_memory_usage_percentiles_readable
+        ),
+        source_table_insert_memory_usage_measurements_percentiles=(
+            source_insert_memory_usage_percentiles
+        ),
+        source_table_insert_memory_usage_measurements_percentiles_readable=(
+            source_insert_memory_usage_percentiles_readable
+        ),
+        tested_table_select_test_query=metrics.get("source_table_select_test_query"),
+        source_table_select_test_query=metrics.get("source_table_select_test_query"),
+        tested_table_select_time_ms_measurements=source_select_ms,
+        source_table_select_time_ms_measurements=source_select_ms,
+        tested_table_select_time_ms_measurements_percentiles=source_select_ms_percentiles,
+        source_table_select_time_ms_measurements_percentiles=source_select_ms_percentiles,
+        tested_table_select_time_ms_measurements_percentiles_speed_up_coefs=(
+            compute_speedup_coefficients(source_select_ms_percentiles, source_select_ms_percentiles)
+        ),
+        tested_table_select_rows_per_second_measurements=source_select_rows_per_sec,
+        source_table_select_rows_per_second_measurements=source_select_rows_per_sec,
+        tested_table_select_rows_per_second_measurements_percentiles=(
+            source_select_rows_per_sec_percentiles
+        ),
+        source_table_select_rows_per_second_measurements_percentiles=(
+            source_select_rows_per_sec_percentiles
+        ),
+        tested_table_select_bytes_per_second_measurements=source_select_bytes_per_sec,
+        tested_table_select_bytes_per_second_measurements_readable=source_select_bytes_per_sec_readable,
+        source_table_select_bytes_per_second_measurements=source_select_bytes_per_sec,
+        source_table_select_bytes_per_second_measurements_readable=(
+            source_select_bytes_per_sec_readable
+        ),
+        tested_table_select_bytes_per_second_measurements_percentiles=(
+            source_select_bytes_per_sec_percentiles
+        ),
+        tested_table_select_bytes_per_second_measurements_percentiles_readable=(
+            source_select_bytes_per_sec_percentiles_readable
+        ),
+        source_table_select_bytes_per_second_measurements_percentiles=(
+            source_select_bytes_per_sec_percentiles
+        ),
+        source_table_select_bytes_per_second_measurements_percentiles_readable=(
+            source_select_bytes_per_sec_percentiles_readable
+        ),
+        tested_table_select_memory_usage_measurements=source_select_memory_usage,
+        tested_table_select_memory_usage_measurements_readable=(
+            source_select_memory_usage_readable
+        ),
+        source_table_select_memory_usage_measurements=source_select_memory_usage,
+        source_table_select_memory_usage_measurements_readable=(
+            source_select_memory_usage_readable
+        ),
+        tested_table_select_memory_usage_measurements_percentiles=(
+            source_select_memory_usage_percentiles
+        ),
+        tested_table_select_memory_usage_measurements_percentiles_readable=(
+            source_select_memory_usage_percentiles_readable
+        ),
+        source_table_select_memory_usage_measurements_percentiles=(
+            source_select_memory_usage_percentiles
+        ),
+        source_table_select_memory_usage_measurements_percentiles_readable=(
+            source_select_memory_usage_percentiles_readable
+        ),
+        tested_table_select_metrics_by_query_json=_to_legacy_pretty_json_or_none(
+            metrics.get("source_table_select_metrics_by_query")
+        ),
+        source_table_select_metrics_by_query_json=_to_legacy_pretty_json_or_none(
+            metrics.get("source_table_select_metrics_by_query")
+        ),
+        tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json=_to_legacy_pretty_json_or_none(
+            _compute_select_time_speedup_by_query(
+                metrics.get("source_table_select_metrics_by_query", []) or [],
+                metrics.get("source_table_select_metrics_by_query", []) or [],
+            )
+        ),
+        tested_table_consumed_compressed_size_bytes_by_each_column=_to_legacy_pretty_json_or_none(
+            tested_columns_size_map
+        ),
+        source_table_consumed_compressed_size_bytes_by_each_column=_to_legacy_pretty_json_or_none(
+            metrics.get("source_table_consumed_compressed_size_bytes_by_each_column")
+        ),
+        tested_table_consumed_compressed_size_bytes_overall=tested_total_size_bytes,
+        tested_table_consumed_compressed_size_bytes_overall_readable=make_readable_bytes(
+            tested_total_size_bytes
+        ),
+        source_table_consumed_compressed_size_bytes_overall=source_total_size_bytes,
+        source_table_consumed_compressed_size_bytes_overall_readable=make_readable_bytes(
+            source_total_size_bytes
+        ),
+        tested_table_compression_overall_coef=compression_overall_coef,
+        tested_table_compression_by_each_column_coef=_to_legacy_pretty_json_or_none({}),
+        source_table_n_rows_in_size_test=source_rows,
+        tested_table_n_rows_in_size_test=int(
+            metrics.get("tested_table_n_rows_in_size_test", tested_rows) or tested_rows
+        ),
+        score_calculation_json=baseline_score_calculation_json,
+        score=baseline_score,
+        extra_json=_to_json_or_none(
+            {
+                "baseline_database": baseline_database,
+                "baseline_table": baseline_table,
+            }
+        ),
+    )
+
+
+def _store_source_benchmark_result_if_configured(
+    *,
+    payload: SourceBenchmarkTaskPayload,
+    baseline_database: str,
+    baseline_table: str,
+    baseline_ddl: str,
+    result: SourceBenchmarkResult,
+) -> None:
+    """Сохраняет baseline-результат в result-store, если target задан в payload."""
+    if payload.result_connection is None:
+        return
+    if not payload.result_database or not payload.result_table:
+        return
+
+    store = ClickHouseBenchmarkResultStore(
+        connection=payload.result_connection.to_result_store_params(),
+        database=payload.result_database,
+        table=payload.result_table,
+        create_table_if_missing=True,
+    )
+    try:
+        row_result = _build_baseline_variant_result(
+            payload=payload,
+            baseline_database=baseline_database,
+            baseline_table=baseline_table,
+            baseline_ddl=baseline_ddl,
+            metrics=result.metrics,
+            baseline_score=result.score,
+            baseline_score_calculation_json=result.score_calculation_json,
+        )
+        store.store_worker_result(
+            benchmark_run_id=payload.benchmark_run_id,
+            benchmark_started_at=payload.benchmark_started_at,
+            benchmark_id=payload.benchmark_id,
+            source_database=payload.source_database,
+            source_table=payload.source_table,
+            variant_table=baseline_table,
+            variant_mode="source_baseline",
+            variant_params=dict(row_result.variant_params),
+            tested_table_ddl_fallback=baseline_ddl,
+            source_table_ddl_fallback=payload.source_table_ddl,
+            result=row_result,
+        )
+    finally:
+        store.close()
+
+
 def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmarkResult:
     """
     Реальное выполнение baseline benchmark на исходном DDL.
@@ -1131,8 +2135,44 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
     baseline_database = payload.test_database or f"{payload.source_database}__benchmark_tmp"
     baseline_table = f"{payload.source_table}__source_baseline__{uuid.uuid4().hex}"
     try:
+        source_total_rows = client.count_rows(payload.source_database, payload.source_table)
+        if source_total_rows <= 0:
+            logger.warning(
+                "run_source_benchmark: source таблица %s.%s содержит 0 строк, "
+                "baseline-бенчмарк пропущен",
+                payload.source_database,
+                payload.source_table,
+            )
+            return SourceBenchmarkResult(
+                benchmark_run_id=payload.benchmark_run_id,
+                benchmark_started_at=payload.benchmark_started_at,
+                benchmark_id=payload.benchmark_id,
+                source_database=payload.source_database,
+                source_table=payload.source_table,
+                source_table_ddl=payload.source_table_ddl,
+                score_calculation_json=_to_pretty_score_calculation_json(
+                    {
+                        "mode": payload.scoring.mode,
+                        "status": "skipped",
+                        "reason": "source_table_empty",
+                        "final_score": None,
+                    }
+                ),
+                score=None,
+                metrics={
+                    "status": "skipped",
+                    "skip_reason": "source_table_empty",
+                    "total_n_rows_in_source_table": 0,
+                    "total_n_rows_in_tested_table": 0,
+                },
+            )
+
         client.create_database_if_not_exists(baseline_database)
-        client.drop_table_if_exists(baseline_database, baseline_table)
+        client.drop_table_if_exists(
+            baseline_database,
+            baseline_table,
+            allowed_database=baseline_database,
+        )
         baseline_ddl = _build_baseline_copy_ddl(
             payload.source_table_ddl,
             target_database=baseline_database,
@@ -1179,9 +2219,13 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             insert_stats["bytes_per_second"],
             payload.measured_percentiles,
         )
+        insert_memory_usage_percentiles = compute_percentiles(
+            insert_stats["memory_usage"],
+            payload.measured_percentiles,
+        )
 
         for warmup_query in baseline_warmup_queries:
-            client.execute(warmup_query)
+            client.execute_user_read_only_query(warmup_query)
 
         select_stats = _measure_select_queries(
             client,
@@ -1208,12 +2252,22 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             select_stats["bytes_per_second"],
             payload.measured_percentiles,
         )
+        select_memory_usage_percentiles = compute_percentiles(
+            select_stats["memory_usage"],
+            payload.measured_percentiles,
+        )
 
         source_total_rows = client.count_rows(payload.source_database, payload.source_table)
+        tested_total_rows = client.count_rows(baseline_database, baseline_table)
         source_columns_sizes = client.get_column_sizes(payload.source_database, payload.source_table)
+        tested_columns_sizes = client.get_column_sizes(baseline_database, baseline_table)
         source_total_size_bytes = client.get_total_compressed_size_bytes(
             payload.source_database,
             payload.source_table,
+        )
+        tested_total_size_bytes = client.get_total_compressed_size_bytes(
+            baseline_database,
+            baseline_table,
         )
 
         metrics: dict[str, Any] = {
@@ -1235,6 +2289,16 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             "source_table_insert_bytes_per_second_measurements_percentiles_readable": [
                 make_readable_bytes(value) for value in insert_bytes_per_second_percentiles
             ],
+            "source_table_insert_memory_usage_measurements": insert_stats["memory_usage"],
+            "source_table_insert_memory_usage_measurements_readable": [
+                make_readable_bytes(value) for value in insert_stats["memory_usage"]
+            ],
+            "source_table_insert_memory_usage_measurements_percentiles": (
+                insert_memory_usage_percentiles
+            ),
+            "source_table_insert_memory_usage_measurements_percentiles_readable": [
+                make_readable_bytes(value) for value in insert_memory_usage_percentiles
+            ],
             "source_table_select_test_query": (
                 baseline_test_queries[0] if baseline_test_queries else ""
             ),
@@ -1254,35 +2318,150 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             "source_table_select_bytes_per_second_measurements_percentiles_readable": [
                 make_readable_bytes(value) for value in select_bytes_per_second_percentiles
             ],
+            "source_table_select_memory_usage_measurements": select_stats["memory_usage"],
+            "source_table_select_memory_usage_measurements_readable": [
+                make_readable_bytes(value) for value in select_stats["memory_usage"]
+            ],
+            "source_table_select_memory_usage_measurements_percentiles": (
+                select_memory_usage_percentiles
+            ),
+            "source_table_select_memory_usage_measurements_percentiles_readable": [
+                make_readable_bytes(value) for value in select_memory_usage_percentiles
+            ],
             "source_table_select_metrics_by_query": source_select_per_query_metrics,
+            "tested_table_consumed_compressed_size_bytes_by_each_column": tested_columns_sizes,
             "source_table_consumed_compressed_size_bytes_by_each_column": source_columns_sizes,
+            "tested_table_consumed_compressed_size_bytes_overall": tested_total_size_bytes,
+            "tested_table_consumed_compressed_size_bytes_overall_readable": make_readable_bytes(
+                tested_total_size_bytes
+            ),
             "source_table_consumed_compressed_size_bytes_overall": source_total_size_bytes,
             "source_table_consumed_compressed_size_bytes_overall_readable": make_readable_bytes(
                 source_total_size_bytes
             ),
+            "tested_table_n_rows_in_size_test": tested_total_rows,
             "source_table_n_rows_in_size_test": source_total_rows,
+            "total_n_rows_in_tested_table": tested_total_rows,
             "total_n_rows_in_source_table": source_total_rows,
         }
 
-        baseline_score: Optional[float]
-        if select_time_ms_percentiles and select_time_ms_percentiles[-1] > 0:
-            baseline_score = 1.0 / float(select_time_ms_percentiles[-1])
-        else:
-            baseline_score = None
+        builtin_baseline_score, builtin_baseline_score_details = _compute_builtin_source_score(
+            select_time_ms_percentiles=select_time_ms_percentiles,
+        )
+        source_bucket = _build_metric_bucket(
+            measured_percentiles=payload.measured_percentiles,
+            time_ms_percentiles=select_time_ms_percentiles,
+            rows_per_second_percentiles=select_rows_per_second_percentiles,
+            bytes_per_second_percentiles=select_bytes_per_second_percentiles,
+            memory_usage_percentiles=select_memory_usage_percentiles,
+        )
+        insert_bucket = _build_metric_bucket(
+            measured_percentiles=payload.measured_percentiles,
+            time_ms_percentiles=insert_time_ms_percentiles,
+            rows_per_second_percentiles=insert_rows_per_second_percentiles,
+            bytes_per_second_percentiles=insert_bytes_per_second_percentiles,
+            memory_usage_percentiles=insert_memory_usage_percentiles,
+        )
+        baseline_score, baseline_score_calculation_json = _resolve_score(
+            scoring=payload.scoring,
+            builtin_score=builtin_baseline_score,
+            builtin_score_details=builtin_baseline_score_details,
+            expression_context={
+                "measured_percentiles": list(payload.measured_percentiles),
+                "source": {
+                    "insert": insert_bucket,
+                    "select": source_bucket,
+                },
+                "tested": {
+                    "insert": insert_bucket,
+                    "select": source_bucket,
+                },
+                "speedup": {
+                    "insert": {
+                        "time_ms_percentiles": compute_speedup_coefficients(
+                            insert_time_ms_percentiles,
+                            insert_time_ms_percentiles,
+                        ),
+                        "time_ms_by_percentile": build_percentile_lookup(
+                            payload.measured_percentiles,
+                            compute_speedup_coefficients(
+                                insert_time_ms_percentiles,
+                                insert_time_ms_percentiles,
+                            ),
+                        ),
+                    },
+                    "select": {
+                        "time_ms_percentiles": compute_speedup_coefficients(
+                            select_time_ms_percentiles,
+                            select_time_ms_percentiles,
+                        ),
+                        "time_ms_by_percentile": build_percentile_lookup(
+                            payload.measured_percentiles,
+                            compute_speedup_coefficients(
+                                select_time_ms_percentiles,
+                                select_time_ms_percentiles,
+                            ),
+                        ),
+                    },
+                },
+                "compression_overall_coef": (
+                    (tested_total_size_bytes / source_total_size_bytes)
+                    if source_total_size_bytes > 0
+                    else None
+                ),
+                "source_insert_time_ms_percentiles": list(insert_time_ms_percentiles),
+                "source_insert_time_ms_by_percentile": build_percentile_lookup(
+                    payload.measured_percentiles,
+                    insert_time_ms_percentiles,
+                ),
+                "tested_insert_time_ms_percentiles": list(insert_time_ms_percentiles),
+                "tested_insert_time_ms_by_percentile": build_percentile_lookup(
+                    payload.measured_percentiles,
+                    insert_time_ms_percentiles,
+                ),
+                "source_select_time_ms_percentiles": list(select_time_ms_percentiles),
+                "source_select_time_ms_by_percentile": build_percentile_lookup(
+                    payload.measured_percentiles,
+                    select_time_ms_percentiles,
+                ),
+                "tested_select_time_ms_percentiles": list(select_time_ms_percentiles),
+                "tested_select_time_ms_by_percentile": build_percentile_lookup(
+                    payload.measured_percentiles,
+                    select_time_ms_percentiles,
+                ),
+            },
+            context_label=(
+                "run_source_benchmark "
+                f"{payload.benchmark_id} {payload.source_database}.{payload.source_table}"
+            ),
+        )
 
-        return SourceBenchmarkResult(
+        source_result = SourceBenchmarkResult(
             benchmark_run_id=payload.benchmark_run_id,
             benchmark_started_at=payload.benchmark_started_at,
             benchmark_id=payload.benchmark_id,
             source_database=payload.source_database,
             source_table=payload.source_table,
             source_table_ddl=payload.source_table_ddl,
+            score_calculation_json=baseline_score_calculation_json,
             score=baseline_score,
             metrics=metrics,
         )
+        _store_source_benchmark_result_if_configured(
+            payload=payload,
+            baseline_database=baseline_database,
+            baseline_table=baseline_table,
+            baseline_ddl=baseline_ddl,
+            result=source_result,
+        )
+        return source_result
     finally:
         try:
-            client.drop_table_if_exists(baseline_database, baseline_table)
+            client.drop_table_if_exists(
+                baseline_database,
+                baseline_table,
+                allowed_database=baseline_database,
+            )
         except Exception:
             logger.exception(
                 "run_source_benchmark: ошибка drop table %s.%s",
@@ -1315,7 +2494,11 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
 
     try:
         client.create_database_if_not_exists(payload.variant_database)
-        client.drop_table_if_exists(payload.variant_database, payload.variant_table)
+        client.drop_table_if_exists(
+            payload.variant_database,
+            payload.variant_table,
+            allowed_database=payload.variant_database,
+        )
         client.execute(payload.variant_ddl)
 
         insert_stats = _measure_insert(
@@ -1344,9 +2527,13 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
             insert_stats["bytes_per_second"],
             measured_percentiles,
         )
+        tested_insert_memory_usage_percentiles = compute_percentiles(
+            insert_stats["memory_usage"],
+            measured_percentiles,
+        )
 
         for warmup_query in payload.query_plan.warmup_queries:
-            client.execute(warmup_query)
+            client.execute_user_read_only_query(warmup_query)
 
         select_stats = _measure_select_queries(
             client,
@@ -1371,6 +2558,10 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
         )
         tested_select_bytes_per_second_percentiles = compute_percentiles(
             select_stats["bytes_per_second"],
+            measured_percentiles,
+        )
+        tested_select_memory_usage_percentiles = compute_percentiles(
+            select_stats["memory_usage"],
             measured_percentiles,
         )
 
@@ -1406,6 +2597,66 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
         source_select_time_ms_percentiles = list(
             source_metrics.get("source_table_select_time_ms_measurements_percentiles", []) or []
         )
+        source_insert_memory_usage_percentiles = list(
+            source_metrics.get("source_table_insert_memory_usage_measurements_percentiles", []) or []
+        )
+        source_insert_memory_usage_measurements = list(
+            source_metrics.get("source_table_insert_memory_usage_measurements", []) or []
+        )
+        source_insert_memory_usage_measurements_readable = list(
+            source_metrics.get("source_table_insert_memory_usage_measurements_readable", []) or []
+        )
+        if (
+            not source_insert_memory_usage_measurements_readable
+            and source_insert_memory_usage_measurements
+        ):
+            source_insert_memory_usage_measurements_readable = [
+                make_readable_bytes(value) for value in source_insert_memory_usage_measurements
+            ]
+        source_insert_memory_usage_percentiles_readable = list(
+            source_metrics.get(
+                "source_table_insert_memory_usage_measurements_percentiles_readable",
+                [],
+            )
+            or []
+        )
+        if (
+            not source_insert_memory_usage_percentiles_readable
+            and source_insert_memory_usage_percentiles
+        ):
+            source_insert_memory_usage_percentiles_readable = [
+                make_readable_bytes(value) for value in source_insert_memory_usage_percentiles
+            ]
+        source_select_memory_usage_percentiles = list(
+            source_metrics.get("source_table_select_memory_usage_measurements_percentiles", []) or []
+        )
+        source_select_memory_usage_measurements = list(
+            source_metrics.get("source_table_select_memory_usage_measurements", []) or []
+        )
+        source_select_memory_usage_measurements_readable = list(
+            source_metrics.get("source_table_select_memory_usage_measurements_readable", []) or []
+        )
+        if (
+            not source_select_memory_usage_measurements_readable
+            and source_select_memory_usage_measurements
+        ):
+            source_select_memory_usage_measurements_readable = [
+                make_readable_bytes(value) for value in source_select_memory_usage_measurements
+            ]
+        source_select_memory_usage_percentiles_readable = list(
+            source_metrics.get(
+                "source_table_select_memory_usage_measurements_percentiles_readable",
+                [],
+            )
+            or []
+        )
+        if (
+            not source_select_memory_usage_percentiles_readable
+            and source_select_memory_usage_percentiles
+        ):
+            source_select_memory_usage_percentiles_readable = [
+                make_readable_bytes(value) for value in source_select_memory_usage_percentiles
+            ]
 
         tested_insert_time_speedup = compute_speedup_coefficients(
             source_insert_time_ms_percentiles,
@@ -1439,16 +2690,133 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
         else:
             compression_overall_coef = None
 
-        score_parts: list[float] = []
-        if tested_insert_time_speedup:
-            score_parts.append(float(tested_insert_time_speedup[-1]))
-        if tested_select_time_speedup:
-            score_parts.append(float(tested_select_time_speedup[-1]))
-        if compression_overall_coef and compression_overall_coef > 0:
-            score_parts.append(float(compression_overall_coef))
-        if not score_parts and tested_select_time_ms_percentiles and tested_select_time_ms_percentiles[-1] > 0:
-            score_parts.append(1.0 / float(tested_select_time_ms_percentiles[-1]))
-        score = sum(score_parts) / len(score_parts) if score_parts else None
+        source_insert_bucket = _build_metric_bucket(
+            measured_percentiles=measured_percentiles,
+            time_ms_percentiles=source_insert_time_ms_percentiles,
+            rows_per_second_percentiles=list(
+                source_metrics.get("source_table_insert_rows_per_second_measurements_percentiles", [])
+                or []
+            ),
+            bytes_per_second_percentiles=list(
+                source_metrics.get("source_table_insert_bytes_per_second_measurements_percentiles", [])
+                or []
+            ),
+            memory_usage_percentiles=source_insert_memory_usage_percentiles,
+        )
+        tested_insert_bucket = _build_metric_bucket(
+            measured_percentiles=measured_percentiles,
+            time_ms_percentiles=tested_insert_time_ms_percentiles,
+            rows_per_second_percentiles=tested_insert_rows_per_second_percentiles,
+            bytes_per_second_percentiles=tested_insert_bytes_per_second_percentiles,
+            memory_usage_percentiles=tested_insert_memory_usage_percentiles,
+        )
+        source_select_bucket = _build_metric_bucket(
+            measured_percentiles=measured_percentiles,
+            time_ms_percentiles=source_select_time_ms_percentiles,
+            rows_per_second_percentiles=list(
+                source_metrics.get("source_table_select_rows_per_second_measurements_percentiles", [])
+                or []
+            ),
+            bytes_per_second_percentiles=list(
+                source_metrics.get("source_table_select_bytes_per_second_measurements_percentiles", [])
+                or []
+            ),
+            memory_usage_percentiles=source_select_memory_usage_percentiles,
+        )
+        tested_select_bucket = _build_metric_bucket(
+            measured_percentiles=measured_percentiles,
+            time_ms_percentiles=tested_select_time_ms_percentiles,
+            rows_per_second_percentiles=tested_select_rows_per_second_percentiles,
+            bytes_per_second_percentiles=tested_select_bytes_per_second_percentiles,
+            memory_usage_percentiles=tested_select_memory_usage_percentiles,
+        )
+        insert_speedup_bucket = {
+            "time_ms_percentiles": list(tested_insert_time_speedup),
+            "time_ms_by_percentile": build_percentile_lookup(
+                measured_percentiles,
+                tested_insert_time_speedup,
+            ),
+        }
+        select_speedup_bucket = {
+            "time_ms_percentiles": list(tested_select_time_speedup),
+            "time_ms_by_percentile": build_percentile_lookup(
+                measured_percentiles,
+                tested_select_time_speedup,
+            ),
+        }
+        builtin_score, builtin_score_details = _compute_builtin_variant_score(
+            insert_time_speedup_percentiles=tested_insert_time_speedup,
+            select_time_speedup_percentiles=tested_select_time_speedup,
+            compression_overall_coef=compression_overall_coef,
+            tested_select_time_ms_percentiles=tested_select_time_ms_percentiles,
+        )
+        score, score_calculation_json = _resolve_score(
+            scoring=payload.scoring,
+            builtin_score=builtin_score,
+            builtin_score_details=builtin_score_details,
+            expression_context={
+                "measured_percentiles": list(measured_percentiles),
+                "source": {
+                    "insert": source_insert_bucket,
+                    "select": source_select_bucket,
+                },
+                "tested": {
+                    "insert": tested_insert_bucket,
+                    "select": tested_select_bucket,
+                },
+                "speedup": {
+                    "insert": insert_speedup_bucket,
+                    "select": select_speedup_bucket,
+                    "compression_overall_coef": compression_overall_coef,
+                },
+                "compression_overall_coef": compression_overall_coef,
+                "compression": {
+                    "overall_coef": compression_overall_coef,
+                },
+                "source_insert_time_ms_percentiles": source_insert_bucket[
+                    "time_ms_percentiles"
+                ],
+                "source_insert_time_ms_by_percentile": source_insert_bucket[
+                    "time_ms_by_percentile"
+                ],
+                "tested_insert_time_ms_percentiles": tested_insert_bucket[
+                    "time_ms_percentiles"
+                ],
+                "tested_insert_time_ms_by_percentile": tested_insert_bucket[
+                    "time_ms_by_percentile"
+                ],
+                "insert_time_speedup_percentiles": insert_speedup_bucket[
+                    "time_ms_percentiles"
+                ],
+                "insert_time_speedup_by_percentile": insert_speedup_bucket[
+                    "time_ms_by_percentile"
+                ],
+                "source_select_time_ms_percentiles": source_select_bucket[
+                    "time_ms_percentiles"
+                ],
+                "source_select_time_ms_by_percentile": source_select_bucket[
+                    "time_ms_by_percentile"
+                ],
+                "tested_select_time_ms_percentiles": tested_select_bucket[
+                    "time_ms_percentiles"
+                ],
+                "tested_select_time_ms_by_percentile": tested_select_bucket[
+                    "time_ms_by_percentile"
+                ],
+                "select_time_speedup_percentiles": select_speedup_bucket[
+                    "time_ms_percentiles"
+                ],
+                "select_time_speedup_by_percentile": select_speedup_bucket[
+                    "time_ms_by_percentile"
+                ],
+                "select_time_speedup_by_query": tested_select_time_speedup_by_query,
+            },
+            context_label=(
+                "run_variant_benchmark "
+                f"{payload.benchmark_id} {payload.source_database}.{payload.source_table} "
+                f"{payload.variant_table}"
+            ),
+        )
 
         result = BenchmarkVariantResult(
             benchmark_run_id=payload.benchmark_run_id,
@@ -1466,10 +2834,8 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
             ),
             tested_table_ddl=payload.variant_ddl,
             is_source_table_copy=False,
-            index_params=(
-                json_dumps(payload.variant_params.get("index_choices"))
-                if payload.variant_params.get("index_choices") is not None
-                else None
+            index_params=build_legacy_index_params(
+                payload.variant_params.get("index_choices")
             ),
             total_n_rows_in_tested_table=tested_rows_count,
             total_n_rows_in_source_table=source_rows_count,
@@ -1520,6 +2886,27 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
                     [],
                 )
                 or []
+            ),
+            tested_table_insert_memory_usage_measurements=insert_stats["memory_usage"],
+            tested_table_insert_memory_usage_measurements_readable=[
+                make_readable_bytes(value) for value in insert_stats["memory_usage"]
+            ],
+            source_table_insert_memory_usage_measurements=source_insert_memory_usage_measurements,
+            source_table_insert_memory_usage_measurements_readable=(
+                source_insert_memory_usage_measurements_readable
+            ),
+            tested_table_insert_memory_usage_measurements_percentiles=(
+                tested_insert_memory_usage_percentiles
+            ),
+            tested_table_insert_memory_usage_measurements_percentiles_readable=[
+                make_readable_bytes(value)
+                for value in tested_insert_memory_usage_percentiles
+            ],
+            source_table_insert_memory_usage_measurements_percentiles=(
+                source_insert_memory_usage_percentiles
+            ),
+            source_table_insert_memory_usage_measurements_percentiles_readable=(
+                source_insert_memory_usage_percentiles_readable
             ),
             tested_table_select_test_query=(
                 payload.query_plan.test_queries[0] if payload.query_plan.test_queries else None
@@ -1575,24 +2962,73 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
                 )
                 or []
             ),
+            tested_table_select_memory_usage_measurements=select_stats["memory_usage"],
+            tested_table_select_memory_usage_measurements_readable=[
+                make_readable_bytes(value) for value in select_stats["memory_usage"]
+            ],
+            source_table_select_memory_usage_measurements=source_select_memory_usage_measurements,
+            source_table_select_memory_usage_measurements_readable=(
+                source_select_memory_usage_measurements_readable
+            ),
+            tested_table_select_memory_usage_measurements_percentiles=(
+                tested_select_memory_usage_percentiles
+            ),
+            tested_table_select_memory_usage_measurements_percentiles_readable=[
+                make_readable_bytes(value)
+                for value in tested_select_memory_usage_percentiles
+            ],
+            source_table_select_memory_usage_measurements_percentiles=(
+                source_select_memory_usage_percentiles
+            ),
+            source_table_select_memory_usage_measurements_percentiles_readable=(
+                source_select_memory_usage_percentiles_readable
+            ),
             tested_table_select_metrics_by_query_json=(
-                json_dumps(tested_select_per_query_metrics)
+                json.dumps(
+                    tested_select_per_query_metrics,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
                 if tested_select_per_query_metrics
                 else None
             ),
             source_table_select_metrics_by_query_json=(
-                json_dumps(source_select_per_query_metrics)
+                json.dumps(
+                    source_select_per_query_metrics,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
                 if source_select_per_query_metrics
                 else None
             ),
             tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json=(
-                json_dumps(tested_select_time_speedup_by_query)
+                json.dumps(
+                    tested_select_time_speedup_by_query,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
                 if tested_select_time_speedup_by_query
                 else None
             ),
-            tested_table_consumed_compressed_size_bytes_by_each_column=json_dumps(tested_columns_sizes),
+            # Legacy-совместимый формат хранения: человекочитаемый JSON с отступами.
+            tested_table_consumed_compressed_size_bytes_by_each_column=json.dumps(
+                tested_columns_sizes,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
             source_table_consumed_compressed_size_bytes_by_each_column=(
-                json_dumps(source_columns_size_map) if source_columns_size_map else None
+                json.dumps(
+                    source_columns_size_map,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                if source_columns_size_map
+                else None
             ),
             tested_table_consumed_compressed_size_bytes_overall=tested_total_size_bytes,
             tested_table_consumed_compressed_size_bytes_overall_readable=make_readable_bytes(
@@ -1603,16 +3039,39 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
                 source_total_size_bytes
             ),
             tested_table_compression_overall_coef=compression_overall_coef,
-            tested_table_compression_by_each_column_coef=json_dumps(compression_by_column_coef),
+            # Legacy-совместимый формат хранения: человекочитаемый JSON с отступами.
+            tested_table_compression_by_each_column_coef=json.dumps(
+                compression_by_column_coef,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
             source_table_n_rows_in_size_test=int(
                 source_metrics.get("source_table_n_rows_in_size_test", 0) or 0
             ),
             tested_table_n_rows_in_size_test=tested_rows_count,
-            tested_table_cols_sizes=json_dumps(tested_columns_sizes),
-            tested_table_indexes_sizes=json_dumps(tested_indexes_sizes),
-            tested_table_indexes_sizes_percent_from_col_size=json_dumps(
-                tested_table_indexes_sizes_percent_from_col_size
+            # Legacy-совместимый формат хранения: человекочитаемый JSON с отступами.
+            tested_table_cols_sizes=json.dumps(
+                tested_columns_sizes,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
             ),
+            # Legacy-совместимый формат хранения: человекочитаемый JSON с отступами.
+            tested_table_indexes_sizes=json.dumps(
+                tested_indexes_sizes,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            # Legacy-совместимый формат хранения: человекочитаемый JSON с отступами.
+            tested_table_indexes_sizes_percent_from_col_size=json.dumps(
+                tested_table_indexes_sizes_percent_from_col_size,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            score_calculation_json=score_calculation_json,
             score=score,
         )
 
@@ -1637,7 +3096,11 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
         return result
     finally:
         try:
-            client.drop_table_if_exists(payload.variant_database, payload.variant_table)
+            client.drop_table_if_exists(
+                payload.variant_database,
+                payload.variant_table,
+                allowed_database=payload.variant_database,
+            )
         except Exception:
             logger.exception(
                 "run_variant_benchmark: ошибка drop table %s.%s",
@@ -1682,11 +3145,30 @@ app = _build_default_celery_app()
 
 
 if app is not None:
+    try:
+        from celery.signals import worker_ready
+    except ImportError:  # pragma: no cover - Celery отсутствует.
+        worker_ready = None
+
+    if worker_ready is not None:
+
+        @worker_ready.connect
+        def _announce_worker_build_info(sender=None, **kwargs):
+            """Логирует build metadata при старте Celery worker (как в legacy)."""
+            del sender, kwargs
+            _log_worker_build_metadata()
 
     @app.task(name=SOURCE_BENCHMARK_TASK_NAME, ignore_result=False)
     def source_benchmark_task(payload: Dict[str, Any]) -> Dict[str, Any]:
         """Celery task: baseline benchmark исходной таблицы."""
         typed_payload = SourceBenchmarkTaskPayload.model_validate(payload)
+        logger.info(
+            "Celery worker: старт source task (benchmark_run_id=%d, benchmark_id=%s, table=%s.%s)",
+            typed_payload.benchmark_run_id,
+            typed_payload.benchmark_id,
+            typed_payload.source_database,
+            typed_payload.source_table,
+        )
         result = run_source_benchmark(typed_payload)
         return result.model_dump(mode="json")
 
@@ -1695,5 +3177,14 @@ if app is not None:
     def variant_benchmark_task(payload: Dict[str, Any]) -> Dict[str, Any]:
         """Celery task: benchmark варианта таблицы + сохранение результата."""
         typed_payload = VariantBenchmarkTaskPayload.model_validate(payload)
+        logger.info(
+            "Celery worker: старт variant task "
+            "(benchmark_run_id=%d, benchmark_id=%s, mode=%s, table=%s.%s)",
+            typed_payload.benchmark_run_id,
+            typed_payload.benchmark_id,
+            typed_payload.variant_mode,
+            typed_payload.variant_database,
+            typed_payload.variant_table,
+        )
         result = run_variant_benchmark(typed_payload)
         return result.model_dump(mode="json")

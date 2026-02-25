@@ -114,6 +114,7 @@ class _FakeFetcher:
 
 class _FakeResultStore:
     last_instance = None
+    max_run_id = 0
 
     def __init__(self, *args, **kwargs) -> None:
         self.args = args
@@ -123,6 +124,10 @@ class _FakeResultStore:
 
     def close(self) -> None:
         self.closed = True
+
+    @classmethod
+    def max_benchmark_run_id(cls) -> int:
+        return int(cls.max_run_id)
 
     @staticmethod
     def store_result(job, result) -> None:
@@ -184,6 +189,7 @@ class MainMockedRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         _FakeFetcher.instances = []
         _FakeResultStore.last_instance = None
+        _FakeResultStore.max_run_id = 0
         _FakeExecutionAdapter.last_instance = None
 
     def test_run_from_settings_executes_benchmark_with_mocked_runtime(self) -> None:
@@ -219,7 +225,30 @@ class MainMockedRuntimeTests(unittest.TestCase):
         self.assertEqual(adapter.kwargs["result_table"], "combined_results")
         self.assertEqual(adapter.kwargs["result_connections_by_id"]["prod_ch"].id, "prod_ch")
 
+    def test_run_from_settings_uses_max_run_id_from_result_store(self) -> None:
+        """Проверяет, что run_id берётся от max(benchmark_run_id) из result-store."""
+        _FakeResultStore.max_run_id = 41
+
+        with patch("main.get_settings", return_value=_FakeSettings()), patch(
+            "main.make_fetcher",
+            side_effect=lambda connection: _FakeFetcher(connection),
+        ), patch(
+            "main.ClickHouseBenchmarkResultStore",
+            _FakeResultStore,
+        ), patch(
+            "main.CeleryClickHouseExecutionAdapter",
+            _FakeExecutionAdapter,
+        ):
+            run_id = main.run_from_settings()
+
+        self.assertEqual(run_id, 42)
+        adapter = _FakeExecutionAdapter.last_instance
+        self.assertIsNotNone(adapter)
+        self.assertTrue(adapter.source_jobs)
+        self.assertTrue(adapter.variant_jobs)
+        self.assertTrue(all(job.benchmark_run_id == 42 for job in adapter.source_jobs))
+        self.assertTrue(all(job.benchmark_run_id == 42 for job in adapter.variant_jobs))
+
 
 if __name__ == "__main__":
     unittest.main()
-

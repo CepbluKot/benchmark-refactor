@@ -16,9 +16,15 @@
           "user_events"
         ]
       },
-      "max_iterations": 5,
-      "insert_rows_limit": 5000000,
-      "insert_rows_limits": {
+      "insert_operations_count": 5,
+      "insert_rows_per_operation_limit": 5000000,
+      "source_insert_rows_per_operation_limit": 1200000,
+      "scoring": {
+        "mode": "expression",
+        "expression": "0.6 * safe_div(source_select_time_ms_by_percentile[100], tested_select_time_ms_by_percentile[100]) + 0.3 * safe_div(source_insert_time_ms_percentiles[1], tested_insert_time_ms_percentiles[1]) + 0.1 * coalesce(compression_overall_coef, 0)",
+        "on_error_score": -1.0
+      },
+      "insert_rows_per_operation_limits": {
         "types": 900000,
         "indexes": 350000,
         "combined": 5500000,
@@ -41,10 +47,11 @@
           "database": "analytics",
           "table": "user_events",
           "test_database": "benchmark_tmp_user_events",
-          "max_iterations": 22,
-          "sequential_top_n": 3,
-          "insert_rows_limit": 250000,
-          "insert_rows_limits": {
+          "insert_operations_count": 22,
+          "sequential_types_top_n_for_indexes": 3,
+          "insert_rows_per_operation_limit": 250000,
+          "source_insert_rows_per_operation_limit": 180000,
+          "insert_rows_per_operation_limits": {
             "types": 300000,
             "indexes": 120000,
             "sequential": 180000
@@ -108,9 +115,13 @@
           "user_events"
         ]
       },
-      "max_iterations": 3,
-      "insert_rows_limit": 300000,
-      "insert_rows_limits": {
+      "insert_operations_count": 3,
+      "insert_rows_per_operation_limit": 300000,
+      "source_insert_rows_per_operation_limit": 220000,
+      "scoring": {
+        "mode": "builtin"
+      },
+      "insert_rows_per_operation_limits": {
         "types": 250000
       },
       "global_rules": {
@@ -132,9 +143,13 @@
           "user_events"
         ]
       },
-      "max_iterations": 3,
-      "insert_rows_limit": 200000,
-      "insert_rows_limits": {
+      "insert_operations_count": 3,
+      "insert_rows_per_operation_limit": 200000,
+      "source_insert_rows_per_operation_limit": 150000,
+      "scoring": {
+        "mode": "builtin"
+      },
+      "insert_rows_per_operation_limits": {
         "indexes": 120000
       },
       "global_rules": {

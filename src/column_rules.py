@@ -31,7 +31,7 @@ class ColumnAlternatives(BaseModel):
         codec_options = self.codecs if self.codecs else [original.codec]
         yield from itertools.product(type_options, codec_options)
 
-    def total(self, original: ColumnDef) -> int:
+    def total(self) -> int:
         """Количество комбинаций для колонки с учётом fallback на исходные значения."""
         return max(len(self.types), 1) * max(len(self.codecs), 1)
 

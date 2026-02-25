@@ -25,8 +25,30 @@ if TYPE_CHECKING:
 
 _TYPE_STAGE_WAIT_POLL_INTERVAL_SEC = 0.5
 _TYPE_STAGE_WAIT_TIMEOUT_SEC = 3600.0
+_STAGE_BANNER_LINE = "=" * 92
 
 logger = logging.getLogger(__name__)
+
+
+def _log_stage_banner(
+    *,
+    stage_name: str,
+    benchmark_run_id: int,
+    benchmark_id: str,
+    database: str,
+    table: str,
+) -> None:
+    """Пишет заметный баннер старта стадии в логах."""
+    logger.info(_STAGE_BANNER_LINE)
+    logger.info(
+        "СТАРТ СТАДИИ: %s | run_id=%d | benchmark=%s | table=%s.%s",
+        stage_name,
+        benchmark_run_id,
+        benchmark_id,
+        database,
+        table,
+    )
+    logger.info(_STAGE_BANNER_LINE)
 
 
 def _open_progress_scope_if_supported(
@@ -77,18 +99,24 @@ def _prepare_table_context(
 
 
 def _resolve_type_total(
+    runner: "BenchmarkRunner",
     table_plan: TableBenchmarkPlan,
     source_ddl: TableDDL,
     effective_column_order: Dict[str, int],
 ) -> int:
     """Считает общее число вариантов для type-stage."""
+    type_generation_limit = runner._engine.resolve_variant_generation_limit(
+        table_plan=table_plan,
+        variant_mode="types",
+        job_mode="sequential",
+    )
     return total_variants(
         table=source_ddl,
         mode="types",
         column_rules=table_plan.rules.column_rules,
         index_rules=table_plan.rules.index_rules,
         column_order=effective_column_order,
-        max_iterations=table_plan.max_iterations,
+        max_iterations=type_generation_limit,
     )
 
 
@@ -104,13 +132,18 @@ def _iter_type_jobs(
     source_benchmark: SourceBenchmarkResult,
 ) -> Iterator[VariantJob]:
     """Итерирует jobs первого этапа (`types`) для sequential top-N."""
+    type_generation_limit = runner._engine.resolve_variant_generation_limit(
+        table_plan=table_plan,
+        variant_mode="types",
+        job_mode="sequential",
+    )
     for variant_ddl, variant_meta in iter_variants(
         table=source_ddl,
         mode="types",
         column_rules=table_plan.rules.column_rules,
         index_rules=table_plan.rules.index_rules,
         column_order=effective_column_order,
-        max_iterations=table_plan.max_iterations,
+        max_iterations=type_generation_limit,
     ):
         yield runner._engine.build_variant_job(
             table_plan=table_plan,
@@ -190,6 +223,11 @@ def _iter_index_jobs_from_top_variants(
 ) -> Iterator[VariantJob]:
     """Итерирует jobs второго этапа (`indexes`) для выбранных top type-вариантов."""
     next_global_index = type_total
+    index_generation_limit = runner._engine.resolve_variant_generation_limit(
+        table_plan=table_plan,
+        variant_mode="indexes",
+        job_mode="sequential",
+    )
     for type_variant in top_variants:
         base_ddl = type_variant.variant_ddl.copy()
         index_total = total_variants(
@@ -198,7 +236,7 @@ def _iter_index_jobs_from_top_variants(
             column_rules=table_plan.rules.column_rules,
             index_rules=table_plan.rules.index_rules,
             column_order=effective_column_order,
-            max_iterations=table_plan.max_iterations,
+            max_iterations=index_generation_limit,
         )
 
         for variant_ddl, index_meta in iter_variants(
@@ -207,7 +245,7 @@ def _iter_index_jobs_from_top_variants(
             column_rules=table_plan.rules.column_rules,
             index_rules=table_plan.rules.index_rules,
             column_order=effective_column_order,
-            max_iterations=table_plan.max_iterations,
+            max_iterations=index_generation_limit,
         ):
             index_meta.global_index = next_global_index
             next_global_index += 1
@@ -250,9 +288,17 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
             table_plan=table_plan,
         )
         type_total = _resolve_type_total(
+            runner=runner,
             table_plan=table_plan,
             source_ddl=source_ddl,
             effective_column_order=effective_column_order,
+        )
+        _log_stage_banner(
+            stage_name="ТИПЫ+КОДЕКИ (sequential stage1)",
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=table_plan.benchmark_id,
+            database=table_plan.database,
+            table=table_plan.table,
         )
         logger.info(
             "SequentialTopN: type-stage dispatch "
@@ -321,6 +367,13 @@ class SequentialTopNTableExecutionStrategy(TableExecutionStrategy):
             )
             return
 
+        _log_stage_banner(
+            stage_name="ИНДЕКСЫ (sequential stage2)",
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=table_plan.benchmark_id,
+            database=table_plan.database,
+            table=table_plan.table,
+        )
         logger.info(
             "SequentialTopN: index-stage dispatch "
             "(run_id=%d, benchmark=%s, table=%s.%s, top_n=%d)",

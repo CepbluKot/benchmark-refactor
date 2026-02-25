@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Celery Worker",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "celery",
+      "args": [
+        "-A", "src.benchmark_runtime.implementations.clickhouse_celery.tasks",
+        "worker",
+        "--loglevel=info",
+        "--pool=solo",
+        "-E"
+      ],
+      "justMyCode": true
+    }
+  ]
+}

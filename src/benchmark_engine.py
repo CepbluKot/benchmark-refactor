@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import logging
+import os
 from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from src.clickhouse_ddl import TableDDL
@@ -18,6 +19,7 @@ from src.combiner import VariantMeta, iter_variants, total_variants
 from src.models import (
     BenchmarkConfig,
     BenchmarkMode,
+    ScoringConfig,
     BenchmarkStrategy,
     BenchmarkRootConfig,
     ConnectionConfig,
@@ -60,8 +62,27 @@ from src.benchmark_runtime.types import (
 from src.naming import variant_table_name
 from src.query_generator import generate_queries
 from src.resolver import RuleResolver
+from src.scoring_validation import collect_scoring_formula_issues
 
 logger = logging.getLogger(__name__)
+
+
+def _log_runner_build_metadata(
+    *,
+    benchmark_run_id: int,
+    run_started_at: datetime,
+) -> None:
+    """Пишет build metadata в лог на старте BenchmarkRunner.run()."""
+    build_date = os.getenv("BENCH_BUILD_DATETIME") or run_started_at.isoformat()
+    git_commit = os.getenv("BENCH_GIT_COMMIT") or "unknown"
+    git_branch = os.getenv("BENCH_GIT_BRANCH") or "unknown"
+
+    logger.info("=== Build metadata ===")
+    logger.info("Build date: %s", build_date)
+    logger.info("Git commit: %s", git_commit)
+    logger.info("Git branch: %s", git_branch)
+    logger.info("Benchmark run id: %d", benchmark_run_id)
+    logger.info("======================")
 
 
 class TableSelector:
@@ -308,6 +329,33 @@ class BenchmarkPlanner:
                     if table_rule and table_rule.insert_rows_limit is not None
                     else benchmark.insert_rows_limit
                 )
+                source_insert_rows_limit = (
+                    table_rule.source_insert_rows_limit
+                    if table_rule and table_rule.source_insert_rows_limit is not None
+                    else benchmark.source_insert_rows_limit
+                )
+                source_insert_rows_limits = self._merge_insert_rows_limits(
+                    benchmark_insert_rows_limits=benchmark.source_insert_rows_limits,
+                    table_insert_rows_limits=(
+                        table_rule.source_insert_rows_limits if table_rule else None
+                    ),
+                )
+                max_type_benchmarks = (
+                    table_rule.max_type_benchmarks
+                    if table_rule and table_rule.max_type_benchmarks is not None
+                    else benchmark.max_type_benchmarks
+                )
+                max_index_benchmarks = (
+                    table_rule.max_index_benchmarks
+                    if table_rule and table_rule.max_index_benchmarks is not None
+                    else benchmark.max_index_benchmarks
+                )
+                max_benchmarks_limits = self._merge_insert_rows_limits(
+                    benchmark_insert_rows_limits=benchmark.max_benchmarks_limits,
+                    table_insert_rows_limits=(
+                        table_rule.max_benchmarks_limits if table_rule else None
+                    ),
+                )
                 insert_rows_limits = self._merge_insert_rows_limits(
                     benchmark_insert_rows_limits=benchmark.insert_rows_limits,
                     table_insert_rows_limits=(
@@ -329,6 +377,10 @@ class BenchmarkPlanner:
                     if table_rule and table_rule.test_database is not None
                     else benchmark.test_database
                 )
+                scoring = self._resolve_scoring(
+                    benchmark=benchmark,
+                    table_rule=table_rule,
+                )
 
                 yield TableBenchmarkPlan(
                     benchmark_id=benchmark.id,
@@ -342,8 +394,14 @@ class BenchmarkPlanner:
                     max_iterations=max_iterations,
                     sequential_top_n=sequential_top_n,
                     insert_rows_limit=insert_rows_limit,
+                    source_insert_rows_limit=source_insert_rows_limit,
+                    source_insert_rows_limits=source_insert_rows_limits,
                     insert_rows_limits=insert_rows_limits,
+                    max_benchmarks_limits=max_benchmarks_limits,
+                    max_type_benchmarks=max_type_benchmarks,
+                    max_index_benchmarks=max_index_benchmarks,
                     column_order_mode=column_order_mode,
+                    scoring=scoring,
                     rules=resolved_rules,
                     queries=queries,
                     celery=self._config.celery,
@@ -358,6 +416,17 @@ class BenchmarkPlanner:
                     target.table,
                     test_database or target.database,
                 )
+
+    def iter_benchmarks(
+        self,
+        benchmark_ids: Optional[Sequence[str]] = None,
+    ) -> Iterator[BenchmarkConfig]:
+        """Итерирует benchmark-конфиги с учётом фильтра benchmark_ids."""
+        benchmark_filter = set(benchmark_ids) if benchmark_ids else None
+        for benchmark in sorted(self._config.benchmarks, key=lambda b: b.id):
+            if benchmark_filter and benchmark.id not in benchmark_filter:
+                continue
+            yield benchmark
 
     @staticmethod
     def _find_table_rule(
@@ -411,6 +480,22 @@ class BenchmarkPlanner:
         )
         return STRATEGY_TO_MODE[strategy]
 
+    @staticmethod
+    def _resolve_scoring(
+        benchmark: BenchmarkConfig,
+        table_rule: Optional[TableRuleConfig],
+    ) -> ScoringConfig:
+        """
+        Возвращает эффективный scoring-конфиг для таблицы.
+
+        Приоритет:
+          1) table_rule.scoring;
+          2) benchmark.scoring.
+        """
+        if table_rule is not None and table_rule.scoring is not None:
+            return table_rule.scoring.model_copy(deep=True)
+        return benchmark.scoring.model_copy(deep=True)
+
 
 class BenchmarkEngine:
     """
@@ -437,6 +522,13 @@ class BenchmarkEngine:
     ) -> Iterator[TableBenchmarkPlan]:
         """Проксирует table-level планы из planner для runner-оркестрации."""
         yield from self._planner.iter_table_plans(benchmark_ids=benchmark_ids)
+
+    def iter_benchmarks(
+        self,
+        benchmark_ids: Optional[Sequence[str]] = None,
+    ) -> Iterator[BenchmarkConfig]:
+        """Проксирует benchmark-конфиги из planner."""
+        yield from self._planner.iter_benchmarks(benchmark_ids=benchmark_ids)
 
     def prepare_table_context(
         self,
@@ -479,14 +571,22 @@ class BenchmarkEngine:
             database=table_plan.database,
             table=table_plan.table,
         )
-        source_insert_rows_limit = self.resolve_insert_rows_limit(
-            table_plan=table_plan,
-            variant_mode=table_plan.mode,
-            job_mode=table_plan.mode,
-        )
+        source_insert_rows_limit = None
+        if table_plan.source_insert_rows_limits is not None:
+            source_insert_rows_limit = table_plan.source_insert_rows_limits.for_mode(
+                table_plan.mode
+            )
+        if source_insert_rows_limit is None:
+            source_insert_rows_limit = table_plan.source_insert_rows_limit
+        if source_insert_rows_limit is None:
+            source_insert_rows_limit = self.resolve_insert_rows_limit(
+                table_plan=table_plan,
+                variant_mode=table_plan.mode,
+                job_mode=table_plan.mode,
+            )
         logger.debug(
             "BenchmarkEngine: source baseline job собран "
-            "(benchmark=%s, table=%s.%s, run_id=%d, insert_rows_limit=%s)",
+            "(benchmark=%s, table=%s.%s, run_id=%d, source_insert_rows_limit=%s)",
             table_plan.benchmark_id,
             table_plan.database,
             table_plan.table,
@@ -507,6 +607,7 @@ class BenchmarkEngine:
             query_plan=rendered_query_plan,
             max_iterations=table_plan.max_iterations,
             insert_rows_limit=source_insert_rows_limit,
+            scoring=table_plan.scoring,
             celery=table_plan.celery,
         )
 
@@ -606,6 +707,7 @@ class BenchmarkEngine:
             variant_ddl=prepared_ddl,
             source_benchmark=source_benchmark,
             query_plan=rendered_query_plan,
+            scoring=table_plan.scoring,
             celery=table_plan.celery,
         )
 
@@ -638,6 +740,38 @@ class BenchmarkEngine:
 
         return table_plan.insert_rows_limit
 
+    @staticmethod
+    def resolve_variant_generation_limit(
+        table_plan: TableBenchmarkPlan,
+        variant_mode: str,
+        job_mode: Optional[BenchmarkMode] = None,
+    ) -> Optional[int]:
+        """
+        Возвращает лимит числа variant jobs для указанной стадии генерации.
+
+        Приоритет:
+          1) `max_benchmarks_limits[variant_mode]`;
+          2) `max_benchmarks_limits[job_mode or table_plan.mode]`;
+          3) legacy `max_type_benchmarks`/`max_index_benchmarks`;
+          4) legacy fallback `max_iterations`.
+        """
+        normalized_variant_mode = str(variant_mode).strip().lower()
+        limits_by_mode = table_plan.max_benchmarks_limits
+        if limits_by_mode is not None:
+            variant_mode_limit = limits_by_mode.for_mode(normalized_variant_mode)
+            if variant_mode_limit is not None:
+                return variant_mode_limit
+            effective_job_mode = job_mode if job_mode is not None else table_plan.mode
+            job_mode_limit = limits_by_mode.for_mode(effective_job_mode)
+            if job_mode_limit is not None:
+                return job_mode_limit
+
+        if normalized_variant_mode == "types" and table_plan.max_type_benchmarks is not None:
+            return table_plan.max_type_benchmarks
+        if normalized_variant_mode == "indexes" and table_plan.max_index_benchmarks is not None:
+            return table_plan.max_index_benchmarks
+        return table_plan.max_iterations
+
     def iter_variant_jobs_for_table_plan(
         self,
         table_plan: TableBenchmarkPlan,
@@ -657,13 +791,17 @@ class BenchmarkEngine:
         variant_mode: BenchmarkMode = (
             "types" if table_plan.mode == "sequential" else table_plan.mode
         )
+        variant_generation_limit = self.resolve_variant_generation_limit(
+            table_plan=table_plan,
+            variant_mode=variant_mode,
+        )
         capped_total = total_variants(
             table=source_ddl,
             mode=variant_mode,
             column_rules=table_plan.rules.column_rules,
             index_rules=table_plan.rules.index_rules,
             column_order=effective_column_order,
-            max_iterations=table_plan.max_iterations,
+            max_iterations=variant_generation_limit,
         )
         logger.info(
             "BenchmarkEngine: генерация variant jobs "
@@ -689,7 +827,7 @@ class BenchmarkEngine:
             column_rules=table_plan.rules.column_rules,
             index_rules=table_plan.rules.index_rules,
             column_order=effective_column_order,
-            max_iterations=table_plan.max_iterations,
+            max_iterations=variant_generation_limit,
         ):
             yield self.build_variant_job(
                 table_plan=table_plan,
@@ -818,11 +956,16 @@ class BenchmarkRunner:
         baseline-бенчмарк исходного DDL (`execute_source_benchmark`) и затем
         прокидывает его результат в каждый `VariantJob.source_benchmark`.
         """
+        self._validate_scoring_formulas_before_run(benchmark_ids=benchmark_ids)
         run_id = benchmark_run_id if benchmark_run_id is not None else self._next_run_id()
         if run_id <= 0:
             raise ValueError(f"benchmark_run_id должен быть > 0, получено: {run_id}")
         run_started_at = self._next_run_started_at()
         self._last_benchmark_started_at = run_started_at
+        _log_runner_build_metadata(
+            benchmark_run_id=run_id,
+            run_started_at=run_started_at,
+        )
         logger.info(
             "BenchmarkRunner: старт run (run_id=%d, started_at=%s, benchmark_ids=%s)",
             run_id,
@@ -851,6 +994,17 @@ class BenchmarkRunner:
                 benchmark_started_at=run_started_at,
             )
             try:
+                if self._is_source_benchmark_skipped(self._active_source_benchmark):
+                    logger.warning(
+                        "BenchmarkRunner: table plan пропущен, baseline сообщил skip "
+                        "(run_id=%d, benchmark=%s, table=%s.%s, reason=%s)",
+                        run_id,
+                        table_plan.benchmark_id,
+                        table_plan.database,
+                        table_plan.table,
+                        self._active_source_benchmark.metrics.get("skip_reason", "unknown"),
+                    )
+                    continue
                 strategy.execute_table(
                     runner=self,
                     table_plan=table_plan,
@@ -995,6 +1149,14 @@ class BenchmarkRunner:
             )
 
     @staticmethod
+    def _is_source_benchmark_skipped(result: SourceBenchmarkResult) -> bool:
+        """Возвращает `True`, если baseline помечен как пропущенный."""
+        status = result.metrics.get("status")
+        if not isinstance(status, str):
+            return False
+        return status.strip().lower() == "skipped"
+
+    @staticmethod
     def _canonical_strategy_key(raw_key: str) -> str:
         """Нормализует strategy key."""
         normalized = raw_key.strip()
@@ -1014,6 +1176,29 @@ class BenchmarkRunner:
         if started_at.tzinfo is None:
             return started_at.replace(tzinfo=timezone.utc)
         return started_at.astimezone(timezone.utc)
+
+    def _validate_scoring_formulas_before_run(
+        self,
+        benchmark_ids: Optional[Sequence[str]],
+    ) -> None:
+        """
+        Валидирует scoring.expression до старта run.
+
+        Если найдены ошибки, пишет warning в лог и останавливает запуск.
+        """
+        selected_benchmarks = list(self._engine.iter_benchmarks(benchmark_ids=benchmark_ids))
+        issues = collect_scoring_formula_issues(selected_benchmarks)
+        if not issues:
+            return
+
+        logger.warning(
+            "BenchmarkRunner: обнаружены ошибки scoring.expression. Запуск benchmark остановлен."
+        )
+        for issue in issues:
+            logger.warning("Scoring validation: %s", issue)
+        raise ValueError(
+            "Валидация scoring.expression не пройдена: benchmark run остановлен"
+        )
 
     def _execute_and_store(self, job: VariantJob) -> None:
         """

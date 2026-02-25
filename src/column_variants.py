@@ -93,6 +93,6 @@ def total_column_variants(
     """Подсчитывает число column-вариантов без материализации самих таблиц."""
     resolved = _resolve_columns(table, rules, column_order or {})
     n = 1
-    for col_name, alt in resolved:
-        n *= alt.total(table.column(col_name))
+    for _, alt in resolved:
+        n *= alt.total()
     return n

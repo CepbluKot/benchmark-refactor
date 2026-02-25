@@ -17,10 +17,11 @@
         "user_events",
         "partner_stats"
       ],
-      "max_iterations": 20,
-      "sequential_top_n": 2,
-      "insert_rows_limit": 2000000,
-      "insert_rows_limits": {
+      "insert_operations_count": 20,
+      "sequential_types_top_n_for_indexes": 2,
+      "insert_rows_per_operation_limit": 2000000,
+      "source_insert_rows_per_operation_limit": 900000,
+      "insert_rows_per_operation_limits": {
         "types": 2500000,
         "indexes": 800000
       },
@@ -101,10 +102,11 @@
         {
           "database": "analytics",
           "table": "user_events",
-          "sequential_top_n": 1,
-          "max_iterations": 12,
-          "insert_rows_limit": 500000,
-          "insert_rows_limits": {
+          "sequential_types_top_n_for_indexes": 1,
+          "insert_operations_count": 12,
+          "insert_rows_per_operation_limit": 500000,
+          "source_insert_rows_per_operation_limit": 250000,
+          "insert_rows_per_operation_limits": {
             "types": 700000,
             "indexes": 250000
           },

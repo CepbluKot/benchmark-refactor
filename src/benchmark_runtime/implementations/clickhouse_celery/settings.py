@@ -42,7 +42,6 @@ class ClickHouseCeleryWorkerSettings(BaseSettings):
         validation_alias="MAX_COPY_RETRY_SLEEP_SEC_INCREMENT",
         ge=0,
     )
-
     rabbitmq_hostname: str = Field(
         default="localhost",
         validation_alias="RABBITMQ_HOSTNAME",

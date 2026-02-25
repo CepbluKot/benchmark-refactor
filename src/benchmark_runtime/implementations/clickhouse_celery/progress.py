@@ -42,6 +42,8 @@ class TaskMonitorCelery:
     Монитор Celery events (`task-succeeded` / `task-failed`) с progress-bar.
 
     Используется launcher-частью для ожидания завершения отправленного батча задач.
+    Важно: Celery worker должен быть запущен с `-E` (`--events`), иначе события
+    задач не будут приходить в monitor.
     """
 
     def __init__(self, app: Any, benchmark_name: str = "") -> None:
@@ -49,8 +51,15 @@ class TaskMonitorCelery:
         self.benchmark_name = benchmark_name
 
         try:
-            from tqdm.auto import tqdm  # type: ignore
+            # Используем тот же адаптер прогресс-бара, что и в legacy:
+            # tqdm_loggable помогает корректно писать прогресс в проблемных log-output средах.
+            from tqdm_loggable.auto import tqdm  # type: ignore
+        except Exception:
+            tqdm = None
 
+        if tqdm is None:
+            self.pbar = _NoopProgressBar(desc=f"{benchmark_name} tasks")
+        else:
             self.pbar: Any = tqdm(
                 total=0,
                 desc=f"{benchmark_name} tasks",
@@ -58,8 +67,6 @@ class TaskMonitorCelery:
                 dynamic_ncols=True,
                 file=sys.stdout,
             )
-        except Exception:
-            self.pbar = _NoopProgressBar(desc=f"{benchmark_name} tasks")
 
         self.pbar_lock = Lock()
         self._cond = Condition(self.pbar_lock)
@@ -79,6 +86,10 @@ class TaskMonitorCelery:
     def start_event_listener(self) -> None:
         """Запускает фоновый поток подписки на Celery events."""
         if not self.event_receiver_thr.is_alive():
+            logger.info(
+                "TaskMonitorCelery: запускаем listener событий. "
+                "Убедись, что worker стартовал с `-E` (`--events`)."
+            )
             self.event_receiver_thr.start()
 
     def close(self) -> None:

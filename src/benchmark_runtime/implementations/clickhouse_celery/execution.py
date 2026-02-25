@@ -40,6 +40,7 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
     - `execute_source_benchmark` отправляет baseline-задачу и ждёт результат.
     - `execute_variant` отправляет variant-задачу fire-and-forget.
     - сохранение variant-результатов выполняется в воркере.
+    - для progress-monitor/ожидания batch worker должен быть запущен с `-E` (`--events`).
     """
 
     def __init__(
@@ -194,6 +195,7 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
 
     def _build_source_payload(self, job: SourceBenchmarkJob) -> SourceBenchmarkTaskPayload:
         connection = self._resolve_connection(job.connection_id)
+        result_connection = self._resolve_result_connection(job.connection_id)
         return SourceBenchmarkTaskPayload(
             connection=self._to_connection_payload(connection),
             benchmark_run_id=job.benchmark_run_id,
@@ -203,12 +205,16 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
             test_database=job.test_database,
             source_table=job.source_table,
             source_table_ddl=job.source_table_ddl.to_ddl(),
+            result_connection=self._to_connection_payload(result_connection),
+            result_database=self._result_database,
+            result_table=self._result_table,
             query_plan=QueryPlanPayload(
                 warmup_queries=list(job.query_plan.warmup_queries),
                 test_queries=[query.query for query in job.query_plan.test_queries],
             ),
             max_iterations=job.max_iterations,
             insert_rows_limit=job.insert_rows_limit,
+            scoring=job.scoring,
             measured_percentiles=list(self._measured_percentiles),
         )
 
@@ -232,6 +238,7 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
             variant_ddl=job.variant_ddl.to_ddl(),
             max_iterations=job.max_iterations,
             insert_rows_limit=job.insert_rows_limit,
+            scoring=job.scoring,
             query_plan=QueryPlanPayload(
                 warmup_queries=list(job.query_plan.warmup_queries),
                 test_queries=[query.query for query in job.query_plan.test_queries],

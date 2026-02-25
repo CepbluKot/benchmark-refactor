@@ -21,6 +21,7 @@ from typing import Dict, List, Optional
 
 from src.models import ConnectionConfig
 from src.clickhouse_ddl import TableDDL
+from src.naming import is_variant_table
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ _SYSTEM_DATABASES = frozenset({
     "INFORMATION_SCHEMA",
     "_temporary_and_external_tables",
 })
+_BASELINE_TABLE_MARKER = "__source_baseline__"
 
 
 # ─── вспомогательные датаклассы ───────────────────────────────────────────────
@@ -55,7 +57,7 @@ class TableMetrics(BaseModel):
 class QueryResult(BaseModel):
     """Результат выполнения одного SELECT-запроса."""
     rows: list
-    duration_ms: float      # из system.query_log (серверное время)
+    duration_ms: float      # из clickhouse_connect .summary (или wall-time fallback)
     read_rows: int = 0
     read_bytes: int = 0
     result_rows: int = 0
@@ -291,12 +293,50 @@ class Fetcher:
         logger.info("Created table %s", table_ddl.name)
 
     def drop_table(
-        self, database: str, table: str, if_exists: bool = True
+        self,
+        database: str,
+        table: str,
+        if_exists: bool = True,
+        *,
+        allowed_database: Optional[str] = None,
+        only_benchmark_tables: bool = True,
     ) -> None:
-        """Удаляет таблицу-вариант после теста или перед пересозданием."""
+        """
+        Удаляет таблицу-вариант после теста или перед пересозданием.
+
+        Защита:
+        - если задан `allowed_database`, удаление разрешено только внутри этой БД;
+        - если `only_benchmark_tables=True`, удаляются только benchmark-таблицы:
+          variant (`__bench__...__NNNN`) и baseline (`__source_baseline__`).
+        """
+        normalized_database = str(database).strip()
+        normalized_table = str(table).strip()
+        if not normalized_database:
+            raise FetcherError("DROP TABLE: database не должен быть пустым")
+        if not normalized_table:
+            raise FetcherError("DROP TABLE: table не должен быть пустым")
+
+        if allowed_database is not None:
+            normalized_allowed = str(allowed_database).strip()
+            if not normalized_allowed:
+                raise FetcherError("DROP TABLE: allowed_database не должен быть пустым")
+            if normalized_database != normalized_allowed:
+                raise FetcherError(
+                    "DROP TABLE разрешён только в тестовой БД, где создаются benchmark-таблицы"
+                )
+
+        if only_benchmark_tables:
+            is_baseline = _BASELINE_TABLE_MARKER in normalized_table
+            is_variant = is_variant_table(normalized_table)
+            if not is_baseline and not is_variant:
+                raise FetcherError(
+                    "DROP TABLE разрешён только для benchmark-таблиц "
+                    "(variant `__bench__...__NNNN` или `__source_baseline__`)"
+                )
+
         exists = "IF EXISTS " if if_exists else ""
-        self._execute(f"DROP TABLE {exists}`{database}`.`{table}`")
-        logger.info("Dropped %s.%s", database, table)
+        self._execute(f"DROP TABLE {exists}`{normalized_database}`.`{normalized_table}`")
+        logger.info("Dropped %s.%s", normalized_database, normalized_table)
 
     # ── данные ───────────────────────────────────────────────────────────────
 
@@ -370,42 +410,64 @@ class Fetcher:
 
     def run_query(self, query: str) -> QueryResult:
         """
-        Выполняет SELECT и собирает метрики из system.query_log.
-        query_log записывается асинхронно, поэтому делаем небольшую паузу
-        и ищем последний запрос текущего соединения по initial_query_id.
+        Выполняет SELECT и собирает метрики из `clickhouse_connect` `.summary`.
+
+        Если `summary` не вернулась, использует wall-time как fallback только для duration.
         """
-        # Получаем query_id текущего подключения чтобы точно найти запрос в логе
-        query_id = self._generate_query_id()
+        if self._client is None:
+            raise FetcherError(
+                "Нет подключения — вызови connect() или используй контекстный менеджер"
+            )
+        if not self._is_read_query(query):
+            raise FetcherError("run_query поддерживает только read-only SQL")
 
         wall_start = time.perf_counter()
-        rows = self._execute(f"/* qid:{query_id} */ {query}")
+        try:
+            result = self._client.query(query)
+        except Exception as e:
+            raise FetcherError(f"ClickHouse error: {e}") from e
         wall_ms = (time.perf_counter() - wall_start) * 1000
 
-        # Ждём пока query_log запишется (обычно < 100 ms)
-        time.sleep(0.15)
+        rows = list(result.result_rows or [])
+        summary = getattr(result, "summary", None)
 
-        log_rows = self._execute(
-            """
-            SELECT
-                query_duration_ms,
-                read_rows,
-                read_bytes,
-                result_rows
-            FROM system.query_log
-            WHERE type = 'QueryFinish'
-              AND query LIKE %(pattern)s
-            ORDER BY event_time DESC
-            LIMIT 1
-            """,
-            {"pattern": f"%qid:{query_id}%"},
-        )
+        duration_ms = float(wall_ms)
+        read_rows = 0
+        read_bytes = 0
+        result_rows = len(rows)
 
-        if log_rows:
-            duration_ms, read_rows, read_bytes, result_rows = log_rows[0]
+        def _safe_float(value: object, default: float) -> float:
+            try:
+                return float(value)
+            except Exception:
+                return default
+
+        def _safe_int(value: object, default: int) -> int:
+            try:
+                return int(value)
+            except Exception:
+                try:
+                    return int(float(value))
+                except Exception:
+                    return default
+
+        if isinstance(summary, dict):
+            elapsed_ns = _safe_float(summary.get("elapsed_ns"), -1.0)
+            elapsed_sec = _safe_float(summary.get("elapsed"), -1.0)
+            duration_ms_raw = _safe_float(summary.get("query_duration_ms"), -1.0)
+
+            if elapsed_ns >= 0:
+                duration_ms = elapsed_ns / 1_000_000.0
+            elif elapsed_sec >= 0:
+                duration_ms = elapsed_sec * 1000.0
+            elif duration_ms_raw >= 0:
+                duration_ms = duration_ms_raw
+
+            read_rows = _safe_int(summary.get("read_rows", 0) or 0, 0)
+            read_bytes = _safe_int(summary.get("read_bytes", 0) or 0, 0)
+            result_rows = _safe_int(summary.get("result_rows", result_rows) or result_rows, result_rows)
         else:
-            logger.warning("query_log entry not found for qid=%s, using wall time", query_id)
-            duration_ms = wall_ms
-            read_rows = read_bytes = result_rows = 0
+            logger.warning("clickhouse_connect summary недоступен, используется wall-time fallback")
 
         return QueryResult(
             rows=rows,
@@ -414,12 +476,6 @@ class Fetcher:
             read_bytes=int(read_bytes or 0),
             result_rows=int(result_rows or 0),
         )
-
-    @staticmethod
-    def _generate_query_id() -> str:
-        """Генерирует короткий query id для поиска записи в `system.query_log`."""
-        import uuid
-        return uuid.uuid4().hex[:12]
 
     def warmup(self, query: str) -> None:
         """Прогревочный запрос — выполняется без сбора метрик."""

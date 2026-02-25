@@ -1,0 +1,120 @@
+{
+  "benchmarks": [
+    {
+      "id": "bench_hits_postgres_sequential_topn",
+      "connection_id": "local_ch_hits",
+      "strategy": "sequential_topn_strategy",
+      "column_rules_mode": "inline_only",
+      "index_rules_mode": "inline_only",
+      "column_order_mode": "compressed_size_desc",
+      "databases": [
+        "default"
+      ],
+      "tables": {
+        "default": [
+          "hits_postgres"
+        ]
+      },
+      "test_database": "benchmark_tmp",
+      "insert_operations_count": 10,
+      "sequential_types_top_n_for_indexes": 3,
+      "scoring": {
+        "mode": "expression",
+        "expression": "0.6 * safe_div(source_select_time_ms_by_percentile[100], tested_select_time_ms_by_percentile[100]) + 0.3 * safe_div(source_insert_time_ms_by_percentile[100], tested_insert_time_ms_by_percentile[100]) + 0.1 * safe_div(1, coalesce(compression_overall_coef, 1))",
+        "on_error_score": -1.0
+      },
+      "max_benchmarks_limits": {
+        "types": 30,
+        "indexes": 30,
+        "sequential": 30
+      },
+      "source_insert_rows_per_operation_limits": {
+        "sequential": 300000
+      },
+      "insert_rows_per_operation_limits": {
+        "types": 100000,
+        "indexes": 100000,
+        "sequential": 100000
+      },
+      "global_rules": {
+        "column_rules": [
+          {
+            "by_type": "String",
+            "types": [
+              "String",
+              "LowCardinality(String)"
+            ],
+            "codecs": [
+              "CODEC(LZ4)",
+              "CODEC(ZSTD(1))"
+            ]
+          }
+        ],
+        "index_rules": [
+          {
+            "by_name": "user_id",
+            "by_type": "Int32",
+            "indexes": [
+              {
+                "type": "set(512)",
+                "granularity": 2
+              },
+              {
+                "type": "bloom_filter(0.01)",
+                "granularity": 2
+              }
+            ]
+          },
+          {
+            "by_name": "country",
+            "by_type": "String",
+            "indexes": [
+              {
+                "type": "set(128)",
+                "granularity": 2
+              },
+              {
+                "type": "bloom_filter(0.01)",
+                "granularity": 2
+              }
+            ]
+          },
+          {
+            "by_name": "device_type",
+            "by_type": "String",
+            "indexes": [
+              {
+                "type": "ngrambf_v1(3, 256, 2, 0)",
+                "granularity": 2
+              }
+            ]
+          }
+        ]
+      },
+      "queries": {
+        "mode": "manual",
+        "warmup_queries": [
+          "SELECT count() FROM {table}"
+        ],
+        "test_queries": [
+          {
+            "query": "SELECT count() FROM {table}",
+            "weight": 1.0
+          },
+          {
+            "query": "SELECT country, count() FROM {table} GROUP BY country ORDER BY count() DESC LIMIT 100",
+            "weight": 1.2
+          },
+          {
+            "query": "SELECT sum(revenue) FROM {table} WHERE device_type = 'mobile'",
+            "weight": 1.1
+          },
+          {
+            "query": "SELECT user_id, sum(revenue) FROM {table} GROUP BY user_id ORDER BY sum(revenue) DESC LIMIT 100",
+            "weight": 1.3
+          }
+        ]
+      }
+    }
+  ]
+}

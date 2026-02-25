@@ -12,6 +12,7 @@ from src.models import (
     QueriesConfig,
     RuleBankConfig,
     RulesConfig,
+    ScoringConfig,
     TableRuleConfig,
 )
 from src.resolver import RuleResolver
@@ -75,6 +76,39 @@ class ModelsValidationTests(unittest.TestCase):
                     "column_rules_mode": "unknown_mode",
                 }
             )
+
+    def test_scoring_expression_mode_requires_expression(self) -> None:
+        """Проверяет, что scoring.expression обязателен при mode=expression."""
+        with self.assertRaises(ValidationError):
+            ScoringConfig(mode="expression")
+
+    def test_scoring_builtin_rejects_expression(self) -> None:
+        """Проверяет, что scoring.expression запрещён при mode=builtin."""
+        with self.assertRaises(ValidationError):
+            ScoringConfig(mode="builtin", expression="1 + 1")
+
+    def test_benchmark_config_accepts_scoring_sql_expression_alias(self) -> None:
+        """Проверяет alias `sql_expression` для scoring.expression."""
+        benchmark = BenchmarkConfig.model_validate(
+            {
+                "id": "bench_scoring_alias",
+                "connection_id": "conn",
+                "strategy": "types_strategy",
+                "databases": ["analytics"],
+                "tables": ["events"],
+                "global_rules": {
+                    "column_rules": [{"by_type": "UInt64", "types": ["UInt64"]}]
+                },
+                "scoring": {
+                    "mode": "expression",
+                    "sql_expression": "safe_div(2, 1)",
+                    "on_error_score": -1.0,
+                },
+            }
+        )
+        self.assertEqual(benchmark.scoring.mode, "expression")
+        self.assertEqual(benchmark.scoring.expression, "safe_div(2, 1)")
+        self.assertEqual(benchmark.scoring.on_error_score, -1.0)
 
     def test_benchmark_config_accepts_strategy(self) -> None:
         """Проверяет, что benchmark config accepts strategy."""
@@ -168,10 +202,62 @@ class ModelsValidationTests(unittest.TestCase):
             )
 
         with self.assertRaises(ValidationError):
+            BenchmarkConfig(
+                id="bench",
+                connection_id="conn",
+                strategy="types_strategy",
+                databases=["analytics"],
+                tables=["events"],
+                global_rules=RulesConfig(
+                    column_rules=[
+                        ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
+                    ]
+                ),
+                source_insert_rows_limit=0,
+            )
+
+        with self.assertRaises(ValidationError):
             TableRuleConfig(
                 database="analytics",
                 table="events",
                 insert_rows_limit=0,
+            )
+
+        with self.assertRaises(ValidationError):
+            TableRuleConfig(
+                database="analytics",
+                table="events",
+                source_insert_rows_limit=0,
+            )
+
+        with self.assertRaises(ValidationError):
+            BenchmarkConfig(
+                id="bench",
+                connection_id="conn",
+                strategy="types_strategy",
+                databases=["analytics"],
+                tables=["events"],
+                global_rules=RulesConfig(
+                    column_rules=[
+                        ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
+                    ]
+                ),
+                max_type_benchmarks=0,
+            )
+
+        with self.assertRaises(ValidationError):
+            BenchmarkConfig(
+                id="bench",
+                connection_id="conn",
+                strategy="types_strategy",
+                databases=["analytics"],
+                tables=["events"],
+                global_rules=RulesConfig(
+                    column_rules=[
+                        ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
+                    ]
+                ),
+                max_index_benchmarks=0,
             )
 
     def test_insert_rows_limits_by_mode_must_be_positive_when_set(self) -> None:
@@ -238,6 +324,96 @@ class ModelsValidationTests(unittest.TestCase):
                     },
                 }
             )
+
+    def test_new_insert_and_sequential_aliases_are_supported(self) -> None:
+        """Проверяет, что новые имена полей корректно мапятся в модель."""
+        bench = BenchmarkConfig.model_validate(
+            {
+                "id": "bench_new_aliases",
+                "connection_id": "conn",
+                "strategy": "sequential_topn_strategy",
+                "databases": ["analytics"],
+                "tables": ["events"],
+                "global_rules": {
+                    "column_rules": [{"by_type": "UInt64", "types": ["UInt64"]}]
+                },
+                "insert_operations_count": 7,
+                "sequential_types_top_n_for_indexes": 3,
+                "insert_rows_per_operation_limit": 123,
+                "source_insert_rows_per_operation_limit": 77,
+                "source_insert_rows_per_operation_limits": {
+                    "sequential": 66
+                },
+                "insert_rows_per_operation_limits": {
+                    "types": 100,
+                    "indexes": 50,
+                    "future_mode_x": 33,
+                },
+                "max_benchmarks_limits": {
+                    "types": 9,
+                    "indexes": 11,
+                    "sequential": 8,
+                },
+                "max_type_benchmarks": 9,
+                "max_index_benchmarks": 11,
+                "table_rules": [
+                    {
+                        "database": "analytics",
+                        "table": "events",
+                        "insert_operations_count": 4,
+                        "sequential_types_top_n_for_indexes": 2,
+                        "insert_rows_per_operation_limit": 99,
+                        "source_insert_rows_per_operation_limit": 44,
+                        "source_insert_rows_per_operation_limits": {
+                            "sequential": 33
+                        },
+                        "insert_rows_per_operation_limits": {
+                            "types": 88,
+                            "future_mode_y": 22,
+                        },
+                        "max_benchmarks_limits": {
+                            "types": 6,
+                            "indexes": 7,
+                        },
+                        "max_type_benchmarks": 6,
+                        "max_index_benchmarks": 7,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(bench.max_iterations, 7)
+        self.assertEqual(bench.sequential_top_n, 3)
+        self.assertEqual(bench.insert_rows_limit, 123)
+        self.assertEqual(bench.source_insert_rows_limit, 77)
+        self.assertIsNotNone(bench.source_insert_rows_limits)
+        self.assertEqual(bench.source_insert_rows_limits.sequential, 66)
+        self.assertIsNotNone(bench.max_benchmarks_limits)
+        self.assertEqual(bench.max_benchmarks_limits.types, 9)
+        self.assertEqual(bench.max_benchmarks_limits.indexes, 11)
+        self.assertEqual(bench.max_benchmarks_limits.sequential, 8)
+        self.assertEqual(bench.max_type_benchmarks, 9)
+        self.assertEqual(bench.max_index_benchmarks, 11)
+        self.assertIsNotNone(bench.insert_rows_limits)
+        self.assertEqual(bench.insert_rows_limits.for_mode("types"), 100)
+        self.assertEqual(bench.insert_rows_limits.for_mode("future_mode_x"), 33)
+
+        self.assertEqual(len(bench.table_rules), 1)
+        table_rule = bench.table_rules[0]
+        self.assertEqual(table_rule.max_iterations, 4)
+        self.assertEqual(table_rule.sequential_top_n, 2)
+        self.assertEqual(table_rule.insert_rows_limit, 99)
+        self.assertEqual(table_rule.source_insert_rows_limit, 44)
+        self.assertIsNotNone(table_rule.source_insert_rows_limits)
+        self.assertEqual(table_rule.source_insert_rows_limits.sequential, 33)
+        self.assertIsNotNone(table_rule.max_benchmarks_limits)
+        self.assertEqual(table_rule.max_benchmarks_limits.types, 6)
+        self.assertEqual(table_rule.max_benchmarks_limits.indexes, 7)
+        self.assertEqual(table_rule.max_type_benchmarks, 6)
+        self.assertEqual(table_rule.max_index_benchmarks, 7)
+        self.assertIsNotNone(table_rule.insert_rows_limits)
+        self.assertEqual(table_rule.insert_rows_limits.for_mode("types"), 88)
+        self.assertEqual(table_rule.insert_rows_limits.for_mode("future_mode_y"), 22)
 
 
 class RuleResolverTests(unittest.TestCase):

@@ -1,4 +1,5 @@
 import unittest
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -69,6 +70,7 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json=(
                 '[{"query_index":0,"elapsed_ms_percentiles_speed_up_coefs":[1.5,2.0]}]'
             ),
+            score_calculation_json='{"mode":"expression","final_score":1.0}',
             score=1.0,
         )
 
@@ -113,22 +115,36 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
 
         self.assertIn("tested_table_select_metrics_by_query_json", columns)
         self.assertIn("source_table_select_metrics_by_query_json", columns)
+        self.assertIn("score_calculation_json", columns)
         self.assertIn(
             "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
             columns,
         )
         self.assertEqual(
-            row_by_column["tested_table_select_metrics_by_query_json"],
-            '[{"query_index":0}]',
+            json.loads(row_by_column["tested_table_select_metrics_by_query_json"]),
+            [{"query_index": 0}],
         )
         self.assertEqual(
-            row_by_column["source_table_select_metrics_by_query_json"],
-            '[{"query_index":0}]',
+            json.loads(row_by_column["source_table_select_metrics_by_query_json"]),
+            [{"query_index": 0}],
         )
         self.assertEqual(
+            json.loads(row_by_column["tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json"]),
+            [{"query_index": 0, "elapsed_ms_percentiles_speed_up_coefs": [1.5, 2.0]}],
+        )
+        self.assertIn("\n", row_by_column["tested_table_select_metrics_by_query_json"])
+        self.assertIn("\n", row_by_column["source_table_select_metrics_by_query_json"])
+        self.assertIn("\n", row_by_column["score_calculation_json"])
+        self.assertEqual(
+            json.loads(row_by_column["score_calculation_json"]),
+            {"mode": "expression", "final_score": 1.0},
+        )
+        self.assertIn(
+            "\n",
             row_by_column["tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json"],
-            '[{"query_index":0,"elapsed_ms_percentiles_speed_up_coefs":[1.5,2.0]}]',
         )
+        self.assertIn("\n", row_by_column["variant_params"])
+        self.assertEqual(json.loads(row_by_column["variant_params"]), {"mode": "types"})
 
 
 if __name__ == "__main__":

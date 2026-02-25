@@ -49,6 +49,7 @@ metadata через fetcher, исполнение через Celery-задачи
 3. Какие правила перебора применяем.
 4. Какой режим перебора (`types`, `indexes`, `combined`, `sequential`).
 5. Какие запросы запускать.
+6. Как считать `score` (`scoring.mode=builtin` или `scoring.mode=expression`).
 
 На выход:
 1. `benchmark_run_id` одного запуска.
@@ -73,17 +74,38 @@ metadata через fetcher, исполнение через Celery-задачи
    (поле `VariantJob.source_benchmark`).
 8. Генерируются DDL-варианты и `VariantJob`.
 9. Каждый variant job выполняется через `BenchmarkExecutionAdapter`.
-10. `BenchmarkExecutionAdapter`/воркер сохраняет результат в `BenchmarkResultStore`.
+10. `BenchmarkExecutionAdapter`/воркер считает `score` по `scoring` (встроенная формула или expression).
+11. `BenchmarkExecutionAdapter`/воркер сохраняет результат в `BenchmarkResultStore`.
 
 Если режим `sequential`:
 1. Сначала гоняются варианты `types`.
-2. По score выбираются top-N (`sequential_top_n`).
+2. По score выбираются top-N (`sequential_types_top_n_for_indexes`).
 3. Только для top-N запускаются варианты `indexes`.
 
-Лимиты вставки строк (`insert_rows_limit`/`insert_rows_limits`) применяются по приоритету:
-1. `insert_rows_limits[variant_meta.mode]`
-2. `insert_rows_limits[job.mode]`
-3. `insert_rows_limit`
+Лимиты вставки строк (`insert_rows_per_operation_limit`/`insert_rows_per_operation_limits`) применяются по приоритету:
+1. `insert_rows_per_operation_limits[variant_meta.mode]`
+2. `insert_rows_per_operation_limits[job.mode]`
+3. `insert_rows_per_operation_limit`
+
+Для baseline исходной схемы есть отдельный лимит:
+1. `source_insert_rows_per_operation_limits[table_mode]` (если задан) — используется в `SourceBenchmarkJob`;
+2. затем legacy `source_insert_rows_per_operation_limit` (если задан);
+3. если не задано, baseline берёт fallback variant-лимитов (`insert_rows_per_operation_limits` -> `insert_rows_per_operation_limit`).
+
+Лимиты числа вариантов:
+1. `max_benchmarks_limits[types]` — максимум type/codec-вариантов.
+2. `max_benchmarks_limits[indexes]` — максимум index-вариантов.
+3. Затем legacy `max_type_benchmarks/max_index_benchmarks`.
+4. Если не задано, используется legacy fallback `insert_operations_count`.
+
+Как работают insert-итерации:
+1. `insert_operations_count` — это количество insert-замеров (повторов), а не количество строк.
+2. Каждый повтор добавляет в таблицу до `insert_rows_per_operation_limit` строк.
+3. Таблица между повторами не очищается.
+4. Поэтому итоговый размер таблицы после insert-этапа обычно растёт как
+   `insert_operations_count * insert_rows_per_operation_limit` (если лимит задан).
+5. Перцентили insert считаются по одному общему массиву замеров всех повторов
+   (без усреднения “средних по итерациям”).
 
 <a id="layers"></a>
 ## Слои системы (человеческим языком)
@@ -179,7 +201,7 @@ JSON-секции или `benchmark.project.json`.
 Что приходит:
 `TableBenchmarkPlan`, варианты DDL, query-настройки.
 Что уходит:
-`VariantJob` с SQL-запросами, именем variant-таблицы, `variant_database` и итоговым `insert_rows_limit`.
+`VariantJob` с SQL-запросами, именем variant-таблицы, `variant_database` и итоговым `insert_rows_per_operation_limit`.
 
 8. Оркестрация выполнения (`BenchmarkRunner` + `TableExecutionStrategy`).
 Что это:
@@ -210,7 +232,7 @@ Runner не пишет результаты в store. Сохранение вы�
 Что приходит:
 `SourceBenchmarkJob` (для baseline исходного DDL) и `VariantJob` (для вариантов).
 Что уходит:
-`SourceBenchmarkResult` и `BenchmarkVariantResult` (score и typed-поля метрик).
+`SourceBenchmarkResult` и `BenchmarkVariantResult` (score, `score_calculation_json` и typed-поля метрик).
 
 10. Хранилище результатов (`BenchmarkResultStore`).
 Что это:
@@ -231,7 +253,8 @@ Runner не пишет результаты в store. Сохранение вы�
   `tested_table_select_metrics_by_query_json`,
   `source_table_select_metrics_by_query_json`,
   `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json`;
-- итог: `score`; для top-N DDL берется из `tested_table_ddl`.
+- итог: `score` и рядом `score_calculation_json` (как рассчитан score, с входными параметрами и финальным значением);
+  для top-N DDL берется из `tested_table_ddl`.
 
 11. Управление run-id (`BenchmarkRunIdProvider`).
 Что это:
@@ -257,6 +280,7 @@ Runner не пишет результаты в store. Сохранение вы�
 3. Если используете `rule_bank`, он реально существует в `rule_banks.json`.
 4. Если `queries.mode = "manual"`, в `test_queries` есть хотя бы один запрос.
 5. Конфиги проходят валидацию через `validate_json_config.py`.
+6. Если запускаешь ClickHouse+Celery runtime, worker стартует с `-E` (`--events`).
 
 <a id="quick-start"></a>
 ## Быстрый старт
@@ -349,10 +373,18 @@ Runner не пишет результаты в store. Сохранение вы�
       "databases": ["analytics"],
       "tables": ["events"],
       "test_database": "benchmark_tmp",
-      "max_iterations": 20,
-      "sequential_top_n": 2,
-      "insert_rows_limit": 1000000,
-      "insert_rows_limits": {
+      "insert_operations_count": 20,
+      "sequential_types_top_n_for_indexes": 2,
+      "max_benchmarks_limits": {
+        "types": 40,
+        "indexes": 60,
+        "sequential": 50
+      },
+      "insert_rows_per_operation_limit": 1000000,
+      "source_insert_rows_per_operation_limits": {
+        "sequential": 600000
+      },
+      "insert_rows_per_operation_limits": {
         "types": 800000,
         "indexes": 300000,
         "sequential": 500000
@@ -472,7 +504,8 @@ config = load_config("configs/benchmark.project.local.json")
 Есть встроенный runtime для ClickHouse + Celery:
 1. `CeleryClickHouseExecutionAdapter` — отправляет benchmark jobs в Celery.
 2. `ClickHouseBenchmarkResultStore` — читает/пишет результаты в ClickHouse (нужен top-N для sequential).
-3. `TaskMonitorCelery` — progress bar по Celery events (используется адаптером автоматически).
+3. `TaskMonitorCelery` — progress bar по Celery events (используется адаптером автоматически; worker должен быть запущен с `-E`).
+   Для стабильного вывода в логах используется `tqdm_loggable` (как в legacy).
 
 Что важно:
 1. Baseline исходного DDL (`execute_source_benchmark`) тоже выполняется в Celery.
@@ -486,6 +519,9 @@ config = load_config("configs/benchmark.project.local.json")
 6. Для индексных вариантов insert-замеры выполняются с фильтром по индексируемым колонкам
    (legacy-совместимое поведение `tested_cols`).
 7. Ошибочные замеры помечаются значениями `< 0` (обычно `-1`), чтобы их можно было легко фильтровать.
+8. Для корректного progress/ожидания batch Celery worker обязательно запускай с `-E` (`--events`).
+9. Insert-замеры собираются в единые массивы по всем `insert_operations_count` повторов,
+   и перцентили считаются по этим единым массивам.
 
 #### 1) Запусти Celery worker
 
@@ -505,7 +541,7 @@ export MAX_COPY_RETRY_SLEEP_SEC_INCREMENT='2'
 # export BENCH_CELERY_BROKER_URL='pyamqp://guest:guest@localhost:5672//'
 # export BENCH_CELERY_BACKEND_URL='rpc://guest:guest@localhost:5672//'
 
-./venv/bin/celery -A src.benchmark_runtime.implementations.clickhouse_celery.tasks worker --loglevel=INFO
+./venv/bin/celery -A src.benchmark_runtime.implementations.clickhouse_celery.tasks worker -E --loglevel=INFO
 ```
 
 #### 2) Launcher-код
@@ -593,6 +629,30 @@ print(run_id)
 - `0` — всё хорошо.
 - `1` — ошибка валидации/JSON/ссылок.
 
+### Проверить только scoring формулы
+
+Утилита: `validate_scoring_formula.py`.
+
+```bash
+./venv/bin/python validate_scoring_formula.py --type benchmarks --path configs/benchmarks.example.json
+./venv/bin/python validate_scoring_formula.py --type project --path configs/benchmark.project.example.json
+./venv/bin/python validate_scoring_formula.py --type root --path /path/to/root.config.json
+```
+
+Опционально можно ограничить проверку конкретными benchmark id:
+
+```bash
+./venv/bin/python validate_scoring_formula.py \
+  --type benchmarks \
+  --path configs/benchmarks.example.json \
+  --benchmark-id bench_a \
+  --benchmark-id bench_b
+```
+
+Коды завершения:
+- `0` — формулы валидны.
+- `1` — есть ошибки формул или невалидный JSON.
+
 <a id="json-reference"></a>
 ## Мини-справочник по полям JSON
 
@@ -638,18 +698,124 @@ print(run_id)
 - `databases`, `tables`
 - `test_database` (опционально: отдельная БД для временной baseline-таблицы и variant-таблиц)
 - `global_rules`, `table_rules`
-- `max_iterations`, `sequential_top_n`
-- `insert_rows_limit`, `insert_rows_limits`
+- `scoring`
+- `insert_operations_count`, `sequential_types_top_n_for_indexes`
+- `insert_rows_per_operation_limit`, `insert_rows_per_operation_limits`
+- `source_insert_rows_per_operation_limit`, `source_insert_rows_per_operation_limits`
+- `max_benchmarks_limits` (опциональные лимиты числа variant jobs по стадиям)
 - `queries`
 - `column_rules_mode`, `index_rules_mode`
+
+Коротко по новым полям:
+- `insert_operations_count`: сколько раз повторить insert/select замер.
+- `insert_rows_per_operation_limit`: лимит строк на одну insert-операцию.
+- `insert_rows_per_operation_limits`: такие же лимиты, но отдельно по mode (`types/indexes/...`).
+- `source_insert_rows_per_operation_limits`: baseline-лимит строк по mode (например, `sequential`).
+- `source_insert_rows_per_operation_limit`: legacy fallback baseline-лимита.
+- `sequential_types_top_n_for_indexes`: сколько лучших вариантов из stage `types` отдать в stage `indexes`.
+- `max_benchmarks_limits`: лимиты количества variant jobs по mode (`types/indexes/...`).
+
+Примечание: старые ключи (`max_iterations`, `sequential_top_n`, `insert_rows_limit`,
+`source_insert_rows_limit`, `insert_rows_limits`, `max_type_benchmarks`,
+`max_index_benchmarks`) пока поддерживаются как legacy-алиасы.
+
+### `scoring`: как настроить формулу score
+
+`scoring.mode`:
+- `builtin` — стандартная формула runtime.
+- `expression` — кастомное безопасное выражение на `simpleeval`.
+
+`scoring` поля:
+- `mode`
+- `expression` (обязательно при `mode=expression`)
+- `on_error_score` (опционально: если expression упало, будет это значение; иначе `score=None`)
+
+Для обратной совместимости `expression` можно передать также как
+`score_expression` или `sql_expression` (алиасы валидации).
+
+Примеры:
+
+```json
+{
+  "scoring": {
+    "mode": "builtin"
+  }
+}
+```
+
+```json
+{
+  "scoring": {
+    "mode": "expression",
+    "expression": "0.7 * safe_div(source_select_time_ms_by_percentile[100], tested_select_time_ms_by_percentile[100]) + 0.3 * coalesce(compression_overall_coef, 0)",
+    "on_error_score": -1
+  }
+}
+```
+
+Что доступно внутри `expression`:
+- `source` и `tested`:
+  - `source.select.time_ms_percentiles`, `tested.insert.time_ms_percentiles`
+  - `source.select.time_ms_by_percentile`, `tested.insert.time_ms_by_percentile`
+  - также `rows_per_second_*`, `bytes_per_second_*`, `memory_usage_*`
+- `speedup.insert.time_ms_percentiles`, `speedup.select.time_ms_percentiles`
+- `compression_overall_coef`
+- flat aliases:
+  - `source_select_time_ms_percentiles`, `tested_select_time_ms_percentiles`
+  - `source_select_time_ms_by_percentile`, `tested_select_time_ms_by_percentile`
+  - `source_insert_time_ms_percentiles`, `tested_insert_time_ms_percentiles`
+  - `source_insert_time_ms_by_percentile`, `tested_insert_time_ms_by_percentile`
+  - `insert_time_speedup_percentiles`, `select_time_speedup_percentiles`
+  - `insert_time_speedup_by_percentile`, `select_time_speedup_by_percentile`
+
+Как обращаться к перцентилям:
+- По индексу массива: `source.select.time_ms_percentiles[1]`
+  (индекс соответствует порядку `measured_percentiles`).
+- По ключу перцентиля: `source_select_time_ms_by_percentile[100]`
+  или `source_select_time_ms_by_percentile["p100"]`.
+
+Доступные функции expression:
+- `safe_div(a, b, default=0.0)`
+- `pct(values_by_percentile, percentile, default=None)`
+- `at(container, key, default=None)`
+- `coalesce(...)`
+- `clamp(value, low, high)`
+- `abs`, `min`, `max`, `round`, `sqrt`, `log`, `ln`, `pow`
+
+Разрешённые операторы expression:
+- арифметика: `+`, `-`, `*`, `/`, `%`, `**`
+- сравнения: `==`, `!=`, `>`, `>=`, `<`, `<=`
+- унарные: `+x`, `-x`, `not x`
+- группировка скобками: `( ... )`
+
+Ограничения безопасности:
+- произвольные вызовы/импорты (`__import__`, `eval`, `os.system` и т.п.) запрещены;
+- доступны только whitelisted функции из списка выше;
+- доступ к атрибутам вида `_...`/`__...` блокируется самим `simpleeval`.
+
+Предзапусковая валидация:
+- перед `runner.run()` выполняется проверка всех `scoring.expression` выбранных benchmark/table_rules;
+- при ошибке печатается `WARNING` в лог;
+- запуск бенчмарка останавливается до dispatch jobs.
+
+Что пишется в колонку `score_calculation_json`:
+- `mode` (`builtin`/`expression`);
+- формула (`expression` или builtin-формула);
+- входные параметры (контекст значений, из которых считался score);
+- статус:
+  `ok`, `empty`, `error`, `fallback_on_error`, `non_finite`, `fallback_non_finite`, `skipped`;
+- итоговый `final_score`.
 
 `table_rules[]` может локально переопределить:
 - `test_database`
 - `strategy`
 - `rules`
 - `queries`
-- `max_iterations`, `sequential_top_n`
-- `insert_rows_limit`, `insert_rows_limits`
+- `scoring`
+- `insert_operations_count`, `sequential_types_top_n_for_indexes`
+- `insert_rows_per_operation_limit`, `insert_rows_per_operation_limits`
+- `source_insert_rows_per_operation_limit`, `source_insert_rows_per_operation_limits`
+- `max_benchmarks_limits`
 
 `strategy`:
 - `types_strategy`
@@ -687,10 +853,14 @@ print(run_id)
 Обычно это лишняя запятая или комментарий в JSON.
 
 5. В `sequential` нет этапа индексов.
-Проверь, что есть `index_rules`, `sequential_top_n > 0`, и адаптер возвращает `score`.
+Проверь, что есть `index_rules`, `sequential_types_top_n_for_indexes > 0`, и адаптер возвращает `score`.
 
 6. Включён `global_bank_only`, но нет доступного bank.
 Либо укажи `global_rules.rule_bank`, либо настрой `default_rule_banks` для своего DBMS.
+
+7. Почему в таблице получилось больше строк, чем `insert_rows_per_operation_limit`.
+Это ожидаемо: лимит применяется к одной insert-операции, а операций выполняется
+`insert_operations_count`.
 
 <a id="dev"></a>
 ## Для разработчиков (технические детали)
@@ -741,19 +911,24 @@ print(run_id)
 3. Готовая production-ориентированная реализация уже есть: `src/benchmark_runtime/implementations/clickhouse_celery/execution.py`.
 3. Внутри `execute_source_benchmark(job)` обычно делаются:
    - создание временной baseline-таблицы (в `job.test_database`, иначе в `${source_database}__benchmark_tmp`);
-   - построение DDL baseline-копии: сначала через `TableDDL`, при ошибке парсинга — fallback с переписью имени таблицы в `CREATE TABLE`;
-   - baseline insert-прогон (source -> baseline copy) с метриками;
+   - построение DDL baseline-копии через `TableDDL` (DDL должен быть корректным);
+   - baseline insert-прогон (source -> baseline copy) с метриками и лимитом `job.insert_rows_limit`
+     (который берётся из `source_insert_rows_per_operation_limits[table_mode]`, затем из
+     legacy `source_insert_rows_per_operation_limit`, если он задан в конфиге);
    - baseline select-прогон по baseline-копии;
    - расчёт baseline-метрик/score;
+   - формирование `score_calculation_json` (с формулой, входными значениями и статусом);
    - очистка временной baseline-таблицы в `finally`;
    - возврат `SourceBenchmarkResult` (который потом попадёт в `VariantJob.source_benchmark`).
 4. Внутри `execute_variant(job)` обычно делаются:
    - создание variant-таблицы;
-   - `INSERT INTO ... SELECT ...` (с учётом `job.insert_rows_limit`);
+   - `INSERT INTO ... SELECT ...` (с учётом `job.insert_rows_limit`, который соответствует
+     `insert_rows_per_operation_limit` в конфиге);
    - warmup-запросы;
    - test-запросы;
    - расчёт как агрегированных select-метрик, так и per-query select-метрик;
    - расчёт итогового `score`;
+   - формирование `score_calculation_json` (детальный трейc расчёта score);
    - сохранение результата в `BenchmarkResultStore` (обычно из Celery-воркера);
    - очистка временных таблиц.
 
@@ -781,17 +956,19 @@ print(run_id)
 6. `src/benchmark_runtime/implementations/noop/` — `NoopExecutionAdapter`.
 7. `src/benchmark_runtime/implementations/fetcher/` — `FetcherMetadataProvider`.
 8. `src/benchmark_runtime/implementations/clickhouse_celery/` — готовые ClickHouse+Celery реализации (`execution`, `result_store`, `tasks`, `progress`).
-9. `src/benchmark_runtime/implementations/run_id/` — `MaxIdBenchmarkRunIdProvider`.
-10. `src/benchmark_runtime/implementations/table_strategy/` — built-in стратегии выполнения.
-11. `src/benchmark_runtime/types.py` — runtime DTO для planner/engine/runner.
-12. `src/variant_generation/contracts/` — контракт генерации вариантов.
-13. `src/variant_generation/implementations/` — built-in стратегии генерации (`types/indexes/combined/sequential`).
-14. `src/variant_generation/registry.py` — реестр стратегий генерации.
-15. `src/combiner.py` — backward-compatible фасад над `variant_generation`.
-16. `src/fetcher.py` — ClickHouse-fetcher.
-17. `validate_json_config.py` — CLI-валидатор JSON по пути.
-18. `configs/*.example.json` — примеры конфигов.
-19. `LLM_CONTEXT.md` — подробный технический контекст для LLM-агентов.
+9. `src/benchmark_runtime/implementations/clickhouse_celery/scoring.py` — безопасный evaluator для `scoring.expression`.
+10. `src/benchmark_runtime/implementations/run_id/` — `MaxIdBenchmarkRunIdProvider`.
+11. `src/benchmark_runtime/implementations/table_strategy/` — built-in стратегии выполнения.
+12. `src/benchmark_runtime/types.py` — runtime DTO для planner/engine/runner.
+13. `src/variant_generation/contracts/` — контракт генерации вариантов.
+14. `src/variant_generation/implementations/` — built-in стратегии генерации (`types/indexes/combined/sequential`).
+15. `src/variant_generation/registry.py` — реестр стратегий генерации.
+16. `src/combiner.py` — backward-compatible фасад над `variant_generation`.
+17. `src/fetcher.py` — ClickHouse-fetcher.
+18. `validate_json_config.py` — CLI-валидатор JSON по пути.
+19. `validate_scoring_formula.py` — CLI-валидатор только scoring-формул.
+20. `configs/*.example.json` — примеры конфигов.
+21. `LLM_CONTEXT.md` — подробный технический контекст для LLM-агентов.
 
 ### Что проверить после изменений
 

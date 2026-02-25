@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import List
 from uuid import uuid4
 
@@ -15,6 +14,7 @@ from ...types import (
     StoredBenchmarkResult,
     TopTypeVariant,
     VariantJob,
+    build_legacy_index_params,
     build_variant_params,
 )
 
@@ -61,7 +61,7 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
         if index_params is None:
             index_choices = variant_params.get("index_choices")
             if index_choices is not None:
-                index_params = json.dumps(index_choices, ensure_ascii=False, default=str)
+                index_params = build_legacy_index_params(index_choices)
 
         self._records.append(
             StoredBenchmarkResult(
@@ -225,6 +225,7 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
                 variant_table=job.variant_table,
                 variant_mode=variant_mode,
                 variant_params=variant_params,
+                score_calculation_json=result.score_calculation_json,
                 score=result.score,
             )
         )
