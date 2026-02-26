@@ -124,6 +124,8 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
                 source_table_insert_bytes_per_second_measurements_percentiles_readable=list(
                     result.source_table_insert_bytes_per_second_measurements_percentiles_readable
                 ),
+                tested_table_insert_metrics_json=result.tested_table_insert_metrics_json,
+                source_table_insert_metrics_json=result.source_table_insert_metrics_json,
                 tested_table_select_test_query=result.tested_table_select_test_query,
                 source_table_select_test_query=result.source_table_select_test_query,
                 tested_table_select_time_ms_measurements=list(

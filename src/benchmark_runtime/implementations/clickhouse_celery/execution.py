@@ -79,7 +79,8 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
         self._variant_task_name = variant_task_name
         self._source_result_timeout_sec = source_result_timeout_sec
         self._progress_monitor_enabled = progress_monitor_enabled
-        self._progress_monitor: Optional[TaskMonitorCelery] = None
+        self._stage_progress_monitor: Optional[TaskMonitorCelery] = None
+        self._global_progress_monitor: Optional[TaskMonitorCelery] = None
         self._measured_percentiles = (
             list(measured_percentiles)
             if measured_percentiles is not None
@@ -138,8 +139,7 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
             task_id=task_id,
             ignore_result=True,
         )
-        if self._progress_monitor is not None:
-            self._progress_monitor.register_task(task_id)
+        self._register_dispatched_task(task_id=task_id)
 
         return BenchmarkVariantResult(
             benchmark_run_id=job.benchmark_run_id,
@@ -157,10 +157,34 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
         """Открывает новый progress-monitor для batch отправки задач."""
         if not self._progress_monitor_enabled:
             return
-        if self._progress_monitor is not None:
+        if self._stage_progress_monitor is not None:
             self.finalize_progress_scope(wait=False)
-        self._progress_monitor = TaskMonitorCelery(self._celery_app, benchmark_name=scope_name)
-        self._progress_monitor.start_event_listener()
+        self._stage_progress_monitor = TaskMonitorCelery(
+            self._celery_app,
+            benchmark_name=scope_name,
+            progress_position=1,
+            progress_leave=False,
+        )
+        self._stage_progress_monitor.start_event_listener()
+
+    def open_global_progress_scope(
+        self,
+        scope_name: str,
+        total_tasks: Optional[int] = None,
+    ) -> None:
+        """Открывает глобальный progress-monitor на весь lifecycle текущего runner.run()."""
+        if not self._progress_monitor_enabled:
+            return
+        if self._global_progress_monitor is not None:
+            self.finalize_global_progress_scope(wait=False)
+        self._global_progress_monitor = TaskMonitorCelery(
+            self._celery_app,
+            benchmark_name=scope_name,
+            progress_position=0,
+            progress_leave=False,
+            fixed_total=total_tasks,
+        )
+        self._global_progress_monitor.start_event_listener()
 
     def wait_for_dispatched_tasks(
         self,
@@ -168,7 +192,7 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
         timeout: Optional[float] = None,
     ) -> bool:
         """Ожидает завершения зарегистрированных задач текущего progress-scope."""
-        monitor = self._progress_monitor
+        monitor = self._stage_progress_monitor
         if monitor is None:
             return True
 
@@ -176,7 +200,7 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
         monitor.make_all_sent()
         completed = monitor.wait_for_completion(timeout=timeout)
         monitor.close()
-        self._progress_monitor = None
+        self._stage_progress_monitor = None
 
         if not completed:
             raise TimeoutError(f"Не дождались завершения Celery batch (stage={stage_label})")
@@ -184,7 +208,7 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
 
     def finalize_progress_scope(self, wait: bool = False, timeout: Optional[float] = None) -> None:
         """Закрывает текущий progress-scope (с ожиданием или без)."""
-        monitor = self._progress_monitor
+        monitor = self._stage_progress_monitor
         if monitor is None:
             return
 
@@ -192,7 +216,23 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
             monitor.make_all_sent()
             monitor.wait_for_completion(timeout=timeout)
         monitor.close()
-        self._progress_monitor = None
+        self._stage_progress_monitor = None
+
+    def finalize_global_progress_scope(
+        self,
+        wait: bool = False,
+        timeout: Optional[float] = None,
+    ) -> None:
+        """Закрывает глобальный progress-scope (с ожиданием или без)."""
+        monitor = self._global_progress_monitor
+        if monitor is None:
+            return
+
+        if wait:
+            monitor.make_all_sent()
+            monitor.wait_for_completion(timeout=timeout)
+        monitor.close()
+        self._global_progress_monitor = None
 
     def _build_source_payload(self, job: SourceBenchmarkJob) -> SourceBenchmarkTaskPayload:
         connection = self._resolve_connection(job.connection_id)
@@ -289,18 +329,31 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
         )
 
     def _next_task_id(self, job: VariantJob) -> str:
-        monitor = self._ensure_progress_monitor(job)
+        monitor = self._global_progress_monitor or self._ensure_stage_progress_monitor(job)
         if monitor is not None:
             return monitor.new_task_id()
         return f"variant-{uuid.uuid4().hex}"
 
-    def _ensure_progress_monitor(self, job: VariantJob) -> Optional[TaskMonitorCelery]:
+    def _register_dispatched_task(self, *, task_id: str) -> None:
+        """Регистрирует dispatched task во всех активных progress-мониторах."""
+        monitors: list[TaskMonitorCelery] = []
+        if self._stage_progress_monitor is not None:
+            monitors.append(self._stage_progress_monitor)
+        if self._global_progress_monitor is not None and self._global_progress_monitor is not self._stage_progress_monitor:
+            monitors.append(self._global_progress_monitor)
+
+        for monitor in monitors:
+            monitor.register_task(task_id)
+
+    def _ensure_stage_progress_monitor(self, job: VariantJob) -> Optional[TaskMonitorCelery]:
         if not self._progress_monitor_enabled:
             return None
-        if self._progress_monitor is None:
-            self._progress_monitor = TaskMonitorCelery(
+        if self._stage_progress_monitor is None:
+            self._stage_progress_monitor = TaskMonitorCelery(
                 self._celery_app,
                 benchmark_name=f"{job.benchmark_id}:{job.source_database}.{job.source_table}",
+                progress_position=1,
+                progress_leave=False,
             )
-            self._progress_monitor.start_event_listener()
-        return self._progress_monitor
+            self._stage_progress_monitor.start_event_listener()
+        return self._stage_progress_monitor

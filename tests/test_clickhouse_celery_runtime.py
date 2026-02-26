@@ -94,7 +94,9 @@ class _SequentialAdapterWithProgressHooks:
         self.executed_jobs: list[VariantJob] = []
         self.wait_calls: list[str] = []
         self.open_calls: list[str] = []
+        self.open_global_calls: list[dict[str, Any]] = []
         self.finalize_calls = 0
+        self.finalize_global_calls = 0
 
     def bind_result_store(self, result_store):
         self._store = result_store
@@ -134,6 +136,15 @@ class _SequentialAdapterWithProgressHooks:
     def open_progress_scope(self, scope_name: str) -> None:
         self.open_calls.append(scope_name)
 
+    def open_global_progress_scope(
+        self,
+        scope_name: str,
+        total_tasks: int | None = None,
+    ) -> None:
+        self.open_global_calls.append(
+            {"scope_name": scope_name, "total_tasks": total_tasks}
+        )
+
     def wait_for_dispatched_tasks(self, stage_label: str, timeout: float | None = None) -> bool:
         del timeout
         self.wait_calls.append(stage_label)
@@ -142,6 +153,10 @@ class _SequentialAdapterWithProgressHooks:
     def finalize_progress_scope(self, wait: bool = False, timeout: float | None = None) -> None:
         del wait, timeout
         self.finalize_calls += 1
+
+    def finalize_global_progress_scope(self, wait: bool = False, timeout: float | None = None) -> None:
+        del wait, timeout
+        self.finalize_global_calls += 1
 
 
 class _FakeClickHouseResultStore(ClickHouseBenchmarkResultStore):
@@ -341,6 +356,10 @@ class ClickHouseCeleryRuntimeTests(unittest.TestCase):
 
         run_id = runner.run()
         self.assertEqual(run_id, 1)
+        self.assertEqual(len(adapter.open_global_calls), 1)
+        self.assertIsNotNone(adapter.open_global_calls[0]["total_tasks"])
+        self.assertGreater(adapter.open_global_calls[0]["total_tasks"], 0)
+        self.assertEqual(adapter.finalize_global_calls, 1)
         self.assertGreaterEqual(len(adapter.open_calls), 2)
         self.assertGreaterEqual(len(adapter.wait_calls), 2)
         self.assertGreaterEqual(adapter.finalize_calls, 1)

@@ -149,7 +149,7 @@ ORDER BY y
 """
 
 PROD_LOGS_ADQM_DDL = """
-CREATE TABLE dm_core_1m.logs_adqm
+CREATE TABLE dm_core_lm.logs_adqm
 (
     `timestamp` DateTime64(6, 'Europe/Moscow') COMMENT 'Datetime записи в текстовом файле',
     `message` String COMMENT 'Текст лога',
@@ -170,7 +170,7 @@ SETTINGS index_granularity = 8192
 """
 
 PROD_LOGS_DBT_DDL = """
-CREATE TABLE dm_core_1m.logs_dbt
+CREATE TABLE dm_core_lm.logs_dbt
 (
     `timestamp` DateTime64(6, 'UTC') COMMENT 'Время записи лога в файл',
     `dag` LowCardinality(String) COMMENT 'Имя дага',
@@ -196,7 +196,7 @@ SETTINGS index_granularity = 8192
 """
 
 PROD_LOGS_AIRFLOW_DDL = """
-CREATE TABLE dm_core_1m.logs_airflow
+CREATE TABLE dm_core_lm.logs_airflow
 (
     `timestamp` DateTime64(6) COMMENT 'Дата-время попадания записи в Fluentbit',
     `dag` LowCardinality(String) COMMENT 'Имя дага',
@@ -217,7 +217,7 @@ SETTINGS index_granularity = 8192
 """
 
 PROD_FLEX_LOADERS_DDL = """
-CREATE TABLE raw_1m.log_flexloader_core_loaders
+CREATE TABLE raw_lm.log_flexloader_core_loaders
 (
     `timestamp` DateTime64(6) COMMENT 'Datetime попадания лога в filebeat',
     `operation_type` LowCardinality(String) COMMENT 'ext или apl',
@@ -236,7 +236,7 @@ SETTINGS index_granularity = 8192
 """
 
 PROD_FLEX_SPARK_DDL = """
-CREATE TABLE raw_1m.log_flexloader_core_spark
+CREATE TABLE raw_lm.log_flexloader_core_spark
 (
     `timestamp` DateTime64(6) COMMENT 'Datetime попадания лога в filebeat',
     `source_system` LowCardinality(String) COMMENT 'Система-источник',
@@ -253,7 +253,7 @@ SETTINGS index_granularity = 8192
 """
 
 PROD_K8S_AUDIT_DDL = """
-CREATE TABLE raw_1m.log_k8s_audit
+CREATE TABLE raw_lm.log_k8s_audit
 (
     `timestamp` DateTime64(6),
     `apiVersion` String,
@@ -285,7 +285,7 @@ SETTINGS index_granularity = 8192
 """
 
 PROD_K8S_EVENTS_DDL = """
-CREATE TABLE raw_1m.log_k8s_events
+CREATE TABLE raw_lm.log_k8s_events
 (
     `timestamp` DateTime64(6) COMMENT 'Временная метка',
     `message` String COMMENT 'Сообщение лога',
@@ -305,7 +305,7 @@ SETTINGS index_granularity = 8192
 """
 
 PROD_K8S_NOVA_DDL = """
-CREATE TABLE raw_1m.log_k8s_nova_via_filebeat
+CREATE TABLE raw_lm.log_k8s_nova_via_filebeat
 (
     `timestamp` DateTime64(6) COMMENT 'Datetime попадания лога в filebeat',
     `message` String COMMENT 'Сообщение лога',
@@ -574,7 +574,7 @@ class ClickHouseDDLTests(unittest.TestCase):
         """Проверяет парсинг прод-схем с COMMENT, запятыми и сложными типами."""
         schemas = [
             (
-                "dm_core_1m.logs_adqm",
+                "dm_core_lm.logs_adqm",
                 PROD_LOGS_ADQM_DDL,
                 [
                     "timestamp",
@@ -591,7 +591,7 @@ class ClickHouseDDLTests(unittest.TestCase):
                 ],
             ),
             (
-                "dm_core_1m.logs_dbt",
+                "dm_core_lm.logs_dbt",
                 PROD_LOGS_DBT_DDL,
                 [
                     "timestamp",
@@ -613,7 +613,7 @@ class ClickHouseDDLTests(unittest.TestCase):
                 ],
             ),
             (
-                "dm_core_1m.logs_airflow",
+                "dm_core_lm.logs_airflow",
                 PROD_LOGS_AIRFLOW_DDL,
                 [
                     "timestamp",
@@ -630,7 +630,7 @@ class ClickHouseDDLTests(unittest.TestCase):
                 ],
             ),
             (
-                "raw_1m.log_flexloader_core_loaders",
+                "raw_lm.log_flexloader_core_loaders",
                 PROD_FLEX_LOADERS_DDL,
                 [
                     "timestamp",
@@ -645,7 +645,7 @@ class ClickHouseDDLTests(unittest.TestCase):
                 ],
             ),
             (
-                "raw_1m.log_flexloader_core_spark",
+                "raw_lm.log_flexloader_core_spark",
                 PROD_FLEX_SPARK_DDL,
                 [
                     "timestamp",
@@ -658,7 +658,7 @@ class ClickHouseDDLTests(unittest.TestCase):
                 ],
             ),
             (
-                "raw_1m.log_k8s_audit",
+                "raw_lm.log_k8s_audit",
                 PROD_K8S_AUDIT_DDL,
                 [
                     "timestamp",
@@ -686,7 +686,7 @@ class ClickHouseDDLTests(unittest.TestCase):
                 ],
             ),
             (
-                "raw_1m.log_k8s_events",
+                "raw_lm.log_k8s_events",
                 PROD_K8S_EVENTS_DDL,
                 [
                     "timestamp",
@@ -702,7 +702,7 @@ class ClickHouseDDLTests(unittest.TestCase):
                 ],
             ),
             (
-                "raw_1m.log_k8s_nova_via_filebeat",
+                "raw_lm.log_k8s_nova_via_filebeat",
                 PROD_K8S_NOVA_DDL,
                 [
                     "timestamp",

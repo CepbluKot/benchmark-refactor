@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import heapq
 import logging
 import os
 from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
@@ -1030,62 +1031,93 @@ class BenchmarkRunner:
             run_started_at.isoformat(),
             list(benchmark_ids) if benchmark_ids else "all",
         )
-
-        for table_plan in self._engine.iter_table_plans(benchmark_ids=benchmark_ids):
-            strategy_key = self._canonical_strategy_key(table_plan.strategy)
-            strategy = self._table_execution_strategies.get(
-                strategy_key,
-                self._default_table_execution_strategy,
-            )
-            logger.info(
-                "BenchmarkRunner: старт table plan "
-                "(run_id=%d, benchmark=%s, table=%s.%s, strategy=%s)",
-                run_id,
-                table_plan.benchmark_id,
-                table_plan.database,
-                table_plan.table,
-                strategy_key,
-            )
-            self._active_source_benchmark = self._execute_source_benchmark(
-                table_plan=table_plan,
-                benchmark_run_id=run_id,
-                benchmark_started_at=run_started_at,
+        global_progress_total = self._estimate_global_progress_target(
+            benchmark_ids=benchmark_ids
+        )
+        open_global_progress_hook = getattr(
+            self._execution_adapter,
+            "open_global_progress_scope",
+            None,
+        )
+        if callable(open_global_progress_hook):
+            scope_name = (
+                f"GLOBAL run {run_id}: "
+                f"{','.join(benchmark_ids) if benchmark_ids else 'all'}"
             )
             try:
-                if self._is_source_benchmark_skipped(self._active_source_benchmark):
-                    logger.warning(
-                        "BenchmarkRunner: table plan пропущен, baseline сообщил skip "
-                        "(run_id=%d, benchmark=%s, table=%s.%s, reason=%s)",
-                        run_id,
-                        table_plan.benchmark_id,
-                        table_plan.database,
-                        table_plan.table,
-                        self._active_source_benchmark.metrics.get("skip_reason", "unknown"),
-                    )
-                    continue
-                strategy.execute_table(
-                    runner=self,
-                    table_plan=table_plan,
-                    benchmark_run_id=run_id,
-                    benchmark_started_at=run_started_at,
+                open_global_progress_hook(
+                    scope_name=scope_name,
+                    total_tasks=global_progress_total,
+                )
+            except TypeError as exc:
+                if "total_tasks" not in str(exc):
+                    raise
+                open_global_progress_hook(scope_name=scope_name)
+
+        try:
+            for table_plan in self._engine.iter_table_plans(benchmark_ids=benchmark_ids):
+                strategy_key = self._canonical_strategy_key(table_plan.strategy)
+                strategy = self._table_execution_strategies.get(
+                    strategy_key,
+                    self._default_table_execution_strategy,
                 )
                 logger.info(
-                    "BenchmarkRunner: завершён table plan "
-                    "(run_id=%d, benchmark=%s, table=%s.%s)",
+                    "BenchmarkRunner: старт table plan "
+                    "(run_id=%d, benchmark=%s, table=%s.%s, strategy=%s)",
                     run_id,
                     table_plan.benchmark_id,
                     table_plan.database,
                     table_plan.table,
+                    strategy_key,
                 )
-            finally:
-                finalize_progress_hook = getattr(
-                    self._execution_adapter,
-                    "finalize_progress_scope",
-                    None,
+                self._active_source_benchmark = self._execute_source_benchmark(
+                    table_plan=table_plan,
+                    benchmark_run_id=run_id,
+                    benchmark_started_at=run_started_at,
                 )
-                if callable(finalize_progress_hook):
-                    finalize_progress_hook(wait=False)
-                self._active_source_benchmark = None
+                try:
+                    if self._is_source_benchmark_skipped(self._active_source_benchmark):
+                        logger.warning(
+                            "BenchmarkRunner: table plan пропущен, baseline сообщил skip "
+                            "(run_id=%d, benchmark=%s, table=%s.%s, reason=%s)",
+                            run_id,
+                            table_plan.benchmark_id,
+                            table_plan.database,
+                            table_plan.table,
+                            self._active_source_benchmark.metrics.get("skip_reason", "unknown"),
+                        )
+                        continue
+                    strategy.execute_table(
+                        runner=self,
+                        table_plan=table_plan,
+                        benchmark_run_id=run_id,
+                        benchmark_started_at=run_started_at,
+                    )
+                    logger.info(
+                        "BenchmarkRunner: завершён table plan "
+                        "(run_id=%d, benchmark=%s, table=%s.%s)",
+                        run_id,
+                        table_plan.benchmark_id,
+                        table_plan.database,
+                        table_plan.table,
+                    )
+                finally:
+                    finalize_progress_hook = getattr(
+                        self._execution_adapter,
+                        "finalize_progress_scope",
+                        None,
+                    )
+                    if callable(finalize_progress_hook):
+                        finalize_progress_hook(wait=False)
+                    self._active_source_benchmark = None
+        finally:
+            finalize_global_progress_hook = getattr(
+                self._execution_adapter,
+                "finalize_global_progress_scope",
+                None,
+            )
+            if callable(finalize_global_progress_hook):
+                finalize_global_progress_hook(wait=False)
         logger.info("BenchmarkRunner: run завершён (run_id=%d)", run_id)
         return run_id
 
@@ -1234,6 +1266,123 @@ class BenchmarkRunner:
         if started_at.tzinfo is None:
             return started_at.replace(tzinfo=timezone.utc)
         return started_at.astimezone(timezone.utc)
+
+    def _estimate_global_progress_target(
+        self,
+        benchmark_ids: Optional[Sequence[str]],
+    ) -> int:
+        """
+        Предварительно считает фиксированный максимум задач для global progress-bar.
+
+        Важно: значение не меняется по ходу run. Для sequential top-N считается
+        верхняя оценка stage2 (сумма крупнейших индексных веток для top-N).
+        """
+        total_jobs = 0
+        for table_plan in self._engine.iter_table_plans(benchmark_ids=benchmark_ids):
+            table_jobs = self._estimate_table_jobs_upper_bound(table_plan)
+            total_jobs += max(0, table_jobs)
+        logger.info(
+            "BenchmarkRunner: предрасчёт global progress target (tasks=%d)",
+            total_jobs,
+        )
+        return total_jobs
+
+    def _estimate_table_jobs_upper_bound(self, table_plan: TableBenchmarkPlan) -> int:
+        """Считает верхнюю оценку числа variant jobs для одного table-plan."""
+        source_ddl, _ = self._engine.prepare_table_context(table_plan)
+        effective_column_order = self._engine.resolve_column_order(
+            table_plan=table_plan,
+            source_ddl=source_ddl,
+        )
+        strategy_key = self._canonical_strategy_key(table_plan.strategy)
+        if strategy_key == "sequential_topn_strategy":
+            return self._estimate_sequential_topn_jobs_upper_bound(
+                table_plan=table_plan,
+                source_ddl=source_ddl,
+                effective_column_order=effective_column_order,
+            )
+
+        variant_mode: BenchmarkMode = (
+            "types" if table_plan.mode == "sequential" else table_plan.mode
+        )
+        variant_generation_limit = self._engine.resolve_variant_generation_limit(
+            table_plan=table_plan,
+            variant_mode=variant_mode,
+        )
+        return total_variants(
+            table=source_ddl,
+            mode=variant_mode,
+            column_rules=table_plan.rules.column_rules,
+            index_rules=table_plan.rules.index_rules,
+            column_order=effective_column_order,
+            table_index_granularity_values=table_plan.index_granularity_values,
+            max_iterations=variant_generation_limit,
+        )
+
+    def _estimate_sequential_topn_jobs_upper_bound(
+        self,
+        *,
+        table_plan: TableBenchmarkPlan,
+        source_ddl: TableDDL,
+        effective_column_order: Dict[str, int],
+    ) -> int:
+        """
+        Считает fixed upper bound для `sequential_topn_strategy`.
+
+        Стадия `types` считается точно.
+        Для стадии `indexes` берётся сумма N крупнейших веток индексов среди
+        всех type-вариантов (верхняя оценка относительно реального top-N по score).
+        """
+        type_generation_limit = self._engine.resolve_variant_generation_limit(
+            table_plan=table_plan,
+            variant_mode="types",
+            job_mode="sequential",
+        )
+        type_total = total_variants(
+            table=source_ddl,
+            mode="types",
+            column_rules=table_plan.rules.column_rules,
+            index_rules=table_plan.rules.index_rules,
+            column_order=effective_column_order,
+            max_iterations=type_generation_limit,
+        )
+        if type_total <= 0:
+            return 0
+
+        top_n = min(table_plan.sequential_top_n, type_total)
+        if top_n <= 0:
+            return type_total
+
+        index_generation_limit = self._engine.resolve_variant_generation_limit(
+            table_plan=table_plan,
+            variant_mode="indexes",
+            job_mode="sequential",
+        )
+
+        largest_index_counts: list[int] = []
+        for type_variant_ddl, _ in iter_variants(
+            table=source_ddl,
+            mode="types",
+            column_rules=table_plan.rules.column_rules,
+            index_rules=table_plan.rules.index_rules,
+            column_order=effective_column_order,
+            max_iterations=type_generation_limit,
+        ):
+            index_total = total_variants(
+                table=type_variant_ddl,
+                mode="indexes",
+                column_rules=table_plan.rules.column_rules,
+                index_rules=table_plan.rules.index_rules,
+                column_order=effective_column_order,
+                table_index_granularity_values=table_plan.index_granularity_values,
+                max_iterations=index_generation_limit,
+            )
+            if len(largest_index_counts) < top_n:
+                heapq.heappush(largest_index_counts, index_total)
+            elif index_total > largest_index_counts[0]:
+                heapq.heapreplace(largest_index_counts, index_total)
+
+        return type_total + sum(largest_index_counts)
 
     def _validate_scoring_formulas_before_run(
         self,

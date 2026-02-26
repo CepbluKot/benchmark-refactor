@@ -1,50 +1,41 @@
 {
   "benchmarks": [
     {
-      "id": "bench_dm_core_logs_adqm_sequential_topn",
+      "id": "bench_hits_postgres_sequential_topn",
       "connection_id": "local_ch_hits",
       "strategy": "sequential_topn_strategy",
       "column_rules_mode": "inline_only",
       "index_rules_mode": "inline_only",
       "column_order_mode": "compressed_size_desc",
       "databases": [
-        "dm_core_1m",
-        "raw_1m"
+        "default"
       ],
       "tables": {
-        "dm_core_1m": [
-          "logs_adqm",
-          "logs_airflow",
-          "logs_dbt"
-        ],
-        "raw_1m": [
-          "log_flexloader_core_loaders",
-          "log_flexloader_core_spark",
-          "log_k8s_audit",
-          "log_k8s_events",
-          "log_k8s_nova_via_filebeat"
+        "default": [
+          "hits_postgres",
+          "messages"
         ]
       },
       "test_database": "benchmark_tmp",
-      "insert_operations_count": 1,
-      "sequential_types_top_n_for_indexes": 2,
+      "insert_operations_count": 10,
+      "sequential_types_top_n_for_indexes": 3,
       "scoring": {
         "mode": "expression",
         "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)",
         "on_error_score": -1.0
       },
       "max_benchmarks_limits": {
-        "types": 6,
-        "indexes": 6,
-        "sequential": 3
+        "types": 30,
+        "indexes": 30,
+        "sequential": 30
       },
       "source_insert_rows_per_operation_limits": {
-        "sequential": 50000
+        "sequential": 300000
       },
       "insert_rows_per_operation_limits": {
-        "types": 50000,
-        "indexes": 50000,
-        "sequential": 50000
+        "types": 100000,
+        "indexes": 100000,
+        "sequential": 100000
       },
       "global_rules": {
         "column_rules": [
@@ -56,38 +47,46 @@
               "String",
               "LowCardinality(String)"
             ]
-          },
-          {
-            "by_type": "LowCardinality(String)",
-            "auto_generate_alternatives": true,
-            "auto_compressions_datatype": "String",
-            "types": [
-              "LowCardinality(String)",
-              "String"
-            ]
           }
         ],
         "index_rules": [
           {
-            "by_type": "String",
+            "by_name": "user_id",
+            "by_type": "Int32",
+            "auto_generate_indexes": true,
             "indexes": [
               {
-                "type": "ngrambf_v1(3, 32768, 2, 0)",
-                "granularity": [
-                  1,
-                  2
-                ],
+                "type": "set(512)",
+                "granularity": 2,
                 "index_granularity_values": [
                   8192,
                   16384
                 ]
               },
               {
-                "type": "tokenbf_v1(32768, 2, 0)",
-                "granularity": [
-                  1,
-                  2
-                ],
+                "type": "bloom_filter(0.01)",
+                "granularity": 2,
+                "index_granularity_values": [
+                  8192
+                ]
+              }
+            ]
+          },
+          {
+            "by_name": "country",
+            "by_type": "String",
+            "auto_generate_indexes": true,
+            "indexes": [
+              {
+                "type": "set(128)",
+                "granularity": 2,
+                "index_granularity_values": [
+                  16384
+                ]
+              },
+              {
+                "type": "bloom_filter(0.01)",
+                "granularity": 2,
                 "index_granularity_values": [
                   8192,
                   16384
@@ -96,28 +95,15 @@
             ]
           },
           {
-            "by_type": "LowCardinality(String)",
+            "by_name": "device_type",
+            "by_type": "String",
+            "auto_generate_indexes": true,
             "indexes": [
               {
-                "type": "ngrambf_v1(3, 32768, 2, 0)",
-                "granularity": [
-                  1,
-                  2
-                ],
+                "type": "ngrambf_v1(3, 256, 2, 0)",
+                "granularity": 2,
                 "index_granularity_values": [
-                  8192,
-                  16384
-                ]
-              },
-              {
-                "type": "tokenbf_v1(32768, 2, 0)",
-                "granularity": [
-                  1,
-                  2
-                ],
-                "index_granularity_values": [
-                  8192,
-                  16384
+                  8192
                 ]
               }
             ]
@@ -126,408 +112,45 @@
       },
       "table_rules": [
         {
-          "database": "dm_core_1m",
-          "table": "logs_adqm",
-          "queries": {
-            "mode": "manual",
-            "test_queries": [
+          "database": "default",
+          "table": "messages",
+          "rules": {
+            "index_rules": [
               {
-                "query_id": "q_logs_count_all",
-                "query": "SELECT count() FROM {table}",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT count() FROM {table}"
+                "by_name": "msg",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 256, 2, 0)",
+                    "granularity": 2,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  }
                 ]
-              },
-              {
-                "query_id": "q_logs_errors_count",
-                "query": "SELECT count() FROM {table} WHERE log_level = 'ERROR'",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT count() FROM {table} WHERE log_level = 'ERROR'"
-                ]
-              },
-              {
-                "query_id": "q_logs_top_logger",
-                "query": "SELECT logger, count() AS c FROM {table} GROUP BY logger ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT logger, count() AS c FROM {table} GROUP BY logger ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_logs_top_host",
-                "query": "SELECT host_name, count() AS c FROM {table} GROUP BY host_name ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT host_name, count() AS c FROM {table} GROUP BY host_name ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_logs_path_pattern",
-                "query": "SELECT count() FROM {table} WHERE log_file_path LIKE '%adqm%'",
-                "cache_mode": "cold",
-                "select_operations_count": 1,
-                "warmup_queries": []
               }
             ]
-          }
-        },
-        {
-          "database": "dm_core_1m",
-          "table": "logs_airflow",
+          },
           "queries": {
             "mode": "manual",
             "test_queries": [
               {
-                "query_id": "q_airflow_count_all",
-                "query": "SELECT count() FROM {table}",
+                "query_id": "q_msg_count_all",
+                "query": "SELECT count() FROM {table} /* benchmark={benchmark_id} */",
                 "cache_mode": "warm",
-                "select_operations_count": 1,
+                "select_operations_count": 3,
                 "warmup_queries": [
                   "SELECT count() FROM {table}"
                 ]
               },
               {
-                "query_id": "q_airflow_by_dag",
-                "query": "SELECT dag, count() AS c FROM {table} GROUP BY dag ORDER BY c DESC LIMIT 100",
+                "query_id": "q_msg_prefix_top100",
+                "query": "SELECT msg, count() FROM {table} WHERE msg LIKE 'a%' GROUP BY msg ORDER BY count() DESC LIMIT 100",
                 "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT dag, count() AS c FROM {table} GROUP BY dag ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_airflow_by_task",
-                "query": "SELECT task, count() AS c FROM {table} GROUP BY task ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT task, count() AS c FROM {table} GROUP BY task ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_airflow_by_log_level",
-                "query": "SELECT airflow_log_level, count() AS c FROM {table} GROUP BY airflow_log_level ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT airflow_log_level, count() AS c FROM {table} GROUP BY airflow_log_level ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_airflow_message_pattern",
-                "query": "SELECT count() FROM {table} WHERE airflow_message LIKE '%error%'",
-                "cache_mode": "cold",
-                "select_operations_count": 1,
-                "warmup_queries": []
-              }
-            ]
-          }
-        },
-        {
-          "database": "dm_core_1m",
-          "table": "logs_dbt",
-          "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_dbt_count_all",
-                "query": "SELECT count() FROM {table}",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
+                "select_operations_count": 3,
                 "warmup_queries": [
                   "SELECT count() FROM {table}"
                 ]
-              },
-              {
-                "query_id": "q_dbt_by_dag",
-                "query": "SELECT dag, count() AS c FROM {table} GROUP BY dag ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT dag, count() AS c FROM {table} GROUP BY dag ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_dbt_by_task",
-                "query": "SELECT task, count() AS c FROM {table} GROUP BY task ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT task, count() AS c FROM {table} GROUP BY task ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_dbt_by_log_level",
-                "query": "SELECT log_level, count() AS c FROM {table} GROUP BY log_level ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT log_level, count() AS c FROM {table} GROUP BY log_level ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_dbt_message_pattern",
-                "query": "SELECT count() FROM {table} WHERE msg LIKE '%error%'",
-                "cache_mode": "cold",
-                "select_operations_count": 1,
-                "warmup_queries": []
-              }
-            ]
-          }
-        },
-        {
-          "database": "raw_1m",
-          "table": "log_flexloader_core_loaders",
-          "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_flex_count_all",
-                "query": "SELECT count() FROM {table}",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT count() FROM {table}"
-                ]
-              },
-              {
-                "query_id": "q_flex_by_operation",
-                "query": "SELECT operation_type, count() AS c FROM {table} GROUP BY operation_type ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT operation_type, count() AS c FROM {table} GROUP BY operation_type ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_flex_by_table_name",
-                "query": "SELECT table_name, count() AS c FROM {table} GROUP BY table_name ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT table_name, count() AS c FROM {table} GROUP BY table_name ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_flex_path_pattern",
-                "query": "SELECT count() FROM {table} WHERE log_file_path LIKE '%core_loader%'",
-                "cache_mode": "cold",
-                "select_operations_count": 1,
-                "warmup_queries": []
-              }
-            ]
-          }
-        },
-        {
-          "database": "raw_1m",
-          "table": "log_flexloader_core_spark",
-          "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_flex_spark_count_all",
-                "query": "SELECT count() FROM {table}",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT count() FROM {table}"
-                ]
-              },
-              {
-                "query_id": "q_flex_spark_by_source_system",
-                "query": "SELECT source_system, count() AS c FROM {table} GROUP BY source_system ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT source_system, count() AS c FROM {table} GROUP BY source_system ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_flex_spark_by_table_name",
-                "query": "SELECT table_name, count() AS c FROM {table} GROUP BY table_name ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT table_name, count() AS c FROM {table} GROUP BY table_name ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_flex_spark_by_log_level",
-                "query": "SELECT flex_log_level, count() AS c FROM {table} GROUP BY flex_log_level ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT flex_log_level, count() AS c FROM {table} GROUP BY flex_log_level ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_flex_spark_path_pattern",
-                "query": "SELECT count() FROM {table} WHERE log_file_path LIKE '%spark%'",
-                "cache_mode": "cold",
-                "select_operations_count": 1,
-                "warmup_queries": []
-              }
-            ]
-          }
-        },
-        {
-          "database": "raw_1m",
-          "table": "log_k8s_audit",
-          "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_k8s_count_all",
-                "query": "SELECT count() FROM {table}",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT count() FROM {table}"
-                ]
-              },
-              {
-                "query_id": "q_k8s_by_verb",
-                "query": "SELECT verb, count() AS c FROM {table} GROUP BY verb ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT verb, count() AS c FROM {table} GROUP BY verb ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_k8s_by_resource",
-                "query": "SELECT objectRef_resource, count() AS c FROM {table} GROUP BY objectRef_resource ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT objectRef_resource, count() AS c FROM {table} GROUP BY objectRef_resource ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_k8s_by_username",
-                "query": "SELECT user_username, count() AS c FROM {table} GROUP BY user_username ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT user_username, count() AS c FROM {table} GROUP BY user_username ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_k8s_request_uri_pattern",
-                "query": "SELECT count() FROM {table} WHERE requestURI LIKE '%/api/%'",
-                "cache_mode": "cold",
-                "select_operations_count": 1,
-                "warmup_queries": []
-              }
-            ]
-          }
-        },
-        {
-          "database": "raw_1m",
-          "table": "log_k8s_events",
-          "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_k8s_events_count_all",
-                "query": "SELECT count() FROM {table}",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT count() FROM {table}"
-                ]
-              },
-              {
-                "query_id": "q_k8s_events_by_source_type",
-                "query": "SELECT source_type, count() AS c FROM {table} GROUP BY source_type ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT source_type, count() AS c FROM {table} GROUP BY source_type ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_k8s_events_by_event_type",
-                "query": "SELECT ext_ClusterEventType, count() AS c FROM {table} GROUP BY ext_ClusterEventType ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT ext_ClusterEventType, count() AS c FROM {table} GROUP BY ext_ClusterEventType ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_k8s_events_by_namespace",
-                "query": "SELECT involvedObject_namespace, count() AS c FROM {table} GROUP BY involvedObject_namespace ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT involvedObject_namespace, count() AS c FROM {table} GROUP BY involvedObject_namespace ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_k8s_events_message_pattern",
-                "query": "SELECT count() FROM {table} WHERE message LIKE '%error%'",
-                "cache_mode": "cold",
-                "select_operations_count": 1,
-                "warmup_queries": []
-              }
-            ]
-          }
-        },
-        {
-          "database": "raw_1m",
-          "table": "log_k8s_nova_via_filebeat",
-          "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_k8s_nova_count_all",
-                "query": "SELECT count() FROM {table}",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT count() FROM {table}"
-                ]
-              },
-              {
-                "query_id": "q_k8s_nova_by_container_name",
-                "query": "SELECT container_name, count() AS c FROM {table} GROUP BY container_name ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT container_name, count() AS c FROM {table} GROUP BY container_name ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_k8s_nova_by_namespace",
-                "query": "SELECT namespace, count() AS c FROM {table} GROUP BY namespace ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT namespace, count() AS c FROM {table} GROUP BY namespace ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_k8s_nova_by_workspace",
-                "query": "SELECT workspace, count() AS c FROM {table} GROUP BY workspace ORDER BY c DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 1,
-                "warmup_queries": [
-                  "SELECT workspace, count() AS c FROM {table} GROUP BY workspace ORDER BY c DESC LIMIT 100"
-                ]
-              },
-              {
-                "query_id": "q_k8s_nova_message_pattern",
-                "query": "SELECT count() FROM {table} WHERE message LIKE '%error%'",
-                "cache_mode": "cold",
-                "select_operations_count": 1,
-                "warmup_queries": []
               }
             ]
           }
@@ -537,10 +160,37 @@
         "mode": "manual",
         "test_queries": [
           {
-            "query_id": "q_fallback_count_all",
-            "query": "SELECT count() FROM {table}",
+            "query_id": "q_count_all",
+            "query": "SELECT count() FROM {table} /* benchmark={benchmark_id} */",
             "cache_mode": "warm",
-            "select_operations_count": 1,
+            "select_operations_count": 3,
+            "warmup_queries": [
+              "SELECT count() FROM {table}"
+            ]
+          },
+          {
+            "query_id": "q_country_top100",
+            "query": "SELECT country, count() FROM {table} GROUP BY country ORDER BY count() DESC LIMIT 100",
+            "cache_mode": "warm",
+            "select_operations_count": 3,
+            "warmup_queries": [
+              "SELECT count() FROM {table}"
+            ]
+          },
+          {
+            "query_id": "q_mobile_revenue_sum",
+            "query": "SELECT sum(revenue) FROM {table} WHERE device_type = 'mobile'",
+            "cache_mode": "warm",
+            "select_operations_count": 3,
+            "warmup_queries": [
+              "SELECT count() FROM {table}"
+            ]
+          },
+          {
+            "query_id": "q_user_revenue_top100",
+            "query": "SELECT user_id, sum(revenue) FROM {table} GROUP BY user_id ORDER BY sum(revenue) DESC LIMIT 100",
+            "cache_mode": "warm",
+            "select_operations_count": 3,
             "warmup_queries": [
               "SELECT count() FROM {table}"
             ]

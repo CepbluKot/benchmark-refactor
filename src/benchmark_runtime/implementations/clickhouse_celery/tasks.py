@@ -436,7 +436,6 @@ def _error_query_metrics() -> Dict[str, float]:
         "read_bytes": -1.0,
         "written_rows": -1.0,
         "written_bytes": -1.0,
-        "memory_usage": -1.0,
     }
 
 
@@ -454,6 +453,39 @@ def _sum_column_compressed_size_bytes(column_sizes: Any) -> float:
             continue
         if value > 0 and math.isfinite(value):
             total += value
+    return total
+
+
+def _normalize_total_size_bytes(
+    total_size_bytes: float,
+    *,
+    column_sizes: Dict[str, Dict[str, Any]],
+    context: str,
+) -> float:
+    """
+    Нормализует общий размер таблицы, защищая от недооценки в system.parts.
+
+    В некоторых версиях/моментах `system.parts.data_compressed_bytes` может
+    отставать и быть заметно меньше, чем сумма `size_compressed_bytes` по
+    колонкам. В этом случае берём сумму по колонкам как более консервативное
+    (и практично более стабильное) значение.
+    """
+    total = float(total_size_bytes or 0.0)
+    by_columns = _sum_column_compressed_size_bytes(column_sizes)
+
+    if total <= 0 and by_columns > 0:
+        return by_columns
+
+    if by_columns > total > 0:
+        logger.warning(
+            "%s: общий compressed size из system.parts (%.0f B) меньше суммы по колонкам "
+            "(%.0f B). Используем сумму по колонкам.",
+            context,
+            total,
+            by_columns,
+        )
+        return by_columns
+
     return total
 
 
@@ -560,18 +592,6 @@ def _filter_positive_finite_measurements(
     return cleaned
 
 
-def _to_readable_memory_measurements(values: Sequence[float]) -> List[str]:
-    """Преобразует байтовые memory-замеры в человекочитаемый формат."""
-    readable: list[str] = []
-    for value in values:
-        try:
-            numeric = float(value)
-        except Exception:
-            continue
-        readable.append(make_readable_bytes(numeric))
-    return readable
-
-
 def _to_pretty_score_calculation_json(value: Dict[str, Any]) -> str:
     """Сериализует детали расчёта score в человекочитаемый JSON."""
     def _normalize_jsonable(payload: Any) -> Any:
@@ -601,7 +621,6 @@ def _build_metric_bucket(
     time_ms_percentiles: Sequence[float],
     rows_per_second_percentiles: Sequence[float],
     bytes_per_second_percentiles: Sequence[float],
-    memory_usage_percentiles: Sequence[float],
 ) -> Dict[str, Any]:
     """Строит унифицированный контейнер метрик + lookup по перцентилям."""
     return {
@@ -619,11 +638,6 @@ def _build_metric_bucket(
         "bytes_per_second_by_percentile": build_percentile_lookup(
             measured_percentiles,
             bytes_per_second_percentiles,
-        ),
-        "memory_usage_percentiles": list(memory_usage_percentiles),
-        "memory_usage_by_percentile": build_percentile_lookup(
-            measured_percentiles,
-            memory_usage_percentiles,
         ),
     }
 
@@ -1636,7 +1650,6 @@ class _ClickHouseRuntimeClient:
                 "read_bytes",
                 "written_rows",
                 "written_bytes",
-                "memory_usage",
             )
         ):
             return None
@@ -1646,7 +1659,6 @@ class _ClickHouseRuntimeClient:
             "read_bytes": _to_metric_or_error(summary.get("read_bytes")),
             "written_rows": _to_metric_or_error(summary.get("written_rows")),
             "written_bytes": _to_metric_or_error(summary.get("written_bytes")),
-            "memory_usage": _to_metric_or_error(summary.get("memory_usage")),
         }
 
     @staticmethod
@@ -1795,7 +1807,6 @@ def _measure_insert(
     elapsed_ns_entries: list[float] = []
     written_rows_per_second_entries: list[float] = []
     read_bytes_per_second_entries: list[float] = []
-    memory_usage_entries: list[float] = []
     written_rows_entries: list[float] = []
     max_retries, initial_sleep_sec, retry_sleep_increment = client.get_retry_policy()
 
@@ -1847,12 +1858,9 @@ def _measure_insert(
         elapsed_ns = float(query_metrics["elapsed_ns"])
         read_bytes = float(query_metrics["read_bytes"])
         written_rows = float(query_metrics["written_rows"])
-        memory_usage = float(query_metrics.get("memory_usage", -1.0))
-
         elapsed_ns_entries.append(elapsed_ns)
         written_rows_per_second_entries.append(_rows_per_second(written_rows, elapsed_ns))
         read_bytes_per_second_entries.append(_bytes_per_second(read_bytes, elapsed_ns))
-        memory_usage_entries.append(memory_usage)
         written_rows_entries.append(written_rows)
 
     context = f"insert metrics {target_database}.{target_table}"
@@ -1870,11 +1878,6 @@ def _measure_insert(
         "bytes_per_second": _filter_positive_finite_measurements(
             read_bytes_per_second_entries,
             metric_name="bytes_per_second",
-            context=context,
-        ),
-        "memory_usage": _filter_positive_finite_measurements(
-            memory_usage_entries,
-            metric_name="memory_usage",
             context=context,
         ),
         "written_rows": _filter_positive_finite_measurements(
@@ -1916,7 +1919,6 @@ def _measure_select_queries(
     elapsed_ns_entries: list[float] = []
     read_rows_per_second_entries: list[float] = []
     read_bytes_per_second_entries: list[float] = []
-    memory_usage_entries: list[float] = []
     per_query_entries: list[dict[str, Any]] = []
     max_retries, initial_sleep_sec, retry_sleep_increment = client.get_retry_policy()
 
@@ -1925,7 +1927,6 @@ def _measure_select_queries(
             "elapsed_ns": elapsed_ns_entries,
             "rows_per_second": read_rows_per_second_entries,
             "bytes_per_second": read_bytes_per_second_entries,
-            "memory_usage": memory_usage_entries,
             "per_query": per_query_entries,
         }
 
@@ -1943,7 +1944,6 @@ def _measure_select_queries(
         query_elapsed_ns_entries: list[float] = []
         query_rows_per_second_entries: list[float] = []
         query_bytes_per_second_entries: list[float] = []
-        query_memory_usage_entries: list[float] = []
         cold_settings_assignments: Optional[List[str]] = None
 
         if query_cache_mode == "cold":
@@ -1997,14 +1997,12 @@ def _measure_select_queries(
             elapsed_ns = float(query_metrics["elapsed_ns"])
             read_rows = float(query_metrics["read_rows"])
             read_bytes = float(query_metrics["read_bytes"])
-            memory_usage = float(query_metrics.get("memory_usage", -1.0))
             query_rows_per_second = _rows_per_second(read_rows, elapsed_ns)
             query_bytes_per_second = _bytes_per_second(read_bytes, elapsed_ns)
 
             query_elapsed_ns_entries.append(elapsed_ns)
             query_rows_per_second_entries.append(query_rows_per_second)
             query_bytes_per_second_entries.append(query_bytes_per_second)
-            query_memory_usage_entries.append(memory_usage)
 
         query_context = f"select metrics query[{query_index}]"
         query_elapsed_ns_entries = _filter_positive_finite_measurements(
@@ -2022,16 +2020,9 @@ def _measure_select_queries(
             metric_name="bytes_per_second",
             context=query_context,
         )
-        query_memory_usage_entries = _filter_positive_finite_measurements(
-            query_memory_usage_entries,
-            metric_name="memory_usage",
-            context=query_context,
-        )
-
         elapsed_ns_entries.extend(query_elapsed_ns_entries)
         read_rows_per_second_entries.extend(query_rows_per_second_entries)
         read_bytes_per_second_entries.extend(query_bytes_per_second_entries)
-        memory_usage_entries.extend(query_memory_usage_entries)
 
         per_query_entries.append(
             {
@@ -2044,7 +2035,6 @@ def _measure_select_queries(
                 "elapsed_ns_measurements": query_elapsed_ns_entries,
                 "rows_per_second_measurements": query_rows_per_second_entries,
                 "bytes_per_second_measurements": query_bytes_per_second_entries,
-                "memory_usage_measurements": query_memory_usage_entries,
             }
         )
 
@@ -2052,7 +2042,6 @@ def _measure_select_queries(
         "elapsed_ns": elapsed_ns_entries,
         "rows_per_second": read_rows_per_second_entries,
         "bytes_per_second": read_bytes_per_second_entries,
-        "memory_usage": memory_usage_entries,
         "per_query": per_query_entries,
     }
 
@@ -2091,11 +2080,6 @@ def _build_select_per_query_metrics(
             metric_name="bytes_per_second",
             context=entry_context,
         )
-        memory_usage_measurements = _filter_positive_finite_measurements(
-            list(float(value) for value in (raw_entry.get("memory_usage_measurements", []) or [])),
-            metric_name="memory_usage",
-            context=entry_context,
-        )
 
         elapsed_ms_measurements = [
             value / 1_000_000.0 for value in elapsed_ns_measurements
@@ -2111,10 +2095,6 @@ def _build_select_per_query_metrics(
         )
         bytes_per_second_percentiles = compute_percentiles(
             bytes_per_second_measurements,
-            measured_percentiles,
-        )
-        memory_usage_percentiles = compute_percentiles(
-            memory_usage_measurements,
             measured_percentiles,
         )
 
@@ -2137,14 +2117,6 @@ def _build_select_per_query_metrics(
                 "rows_per_second_percentiles": rows_per_second_percentiles,
                 "bytes_per_second_measurements": bytes_per_second_measurements,
                 "bytes_per_second_percentiles": bytes_per_second_percentiles,
-                "memory_usage_measurements": memory_usage_measurements,
-                "memory_usage_measurements_readable": _to_readable_memory_measurements(
-                    memory_usage_measurements
-                ),
-                "memory_usage_percentiles": memory_usage_percentiles,
-                "memory_usage_percentiles_readable": _to_readable_memory_measurements(
-                    memory_usage_percentiles
-                ),
             }
         )
     return result
@@ -2163,17 +2135,6 @@ def _extract_source_select_per_query_metrics(
     """
     direct_value = source_metrics.get("source_table_select_metrics_by_query")
     if isinstance(direct_value, list):
-        def _coerce_float_list(values: Any) -> list[float]:
-            numeric_values: list[float] = []
-            if not isinstance(values, list):
-                return numeric_values
-            for value in values:
-                try:
-                    numeric_values.append(float(value))
-                except Exception:
-                    continue
-            return numeric_values
-
         normalized_entries: list[dict[str, Any]] = []
         for fallback_index, entry in enumerate(direct_value):
             if not isinstance(entry, dict):
@@ -2182,20 +2143,6 @@ def _extract_source_select_per_query_metrics(
             query_index = int(normalized_entry.get("query_index", fallback_index))
             normalized_entry.setdefault("query_index", query_index)
             normalized_entry.setdefault("query_id", f"query_{query_index}")
-            measurements = normalized_entry.get("memory_usage_measurements")
-            measurements_values = _coerce_float_list(measurements)
-            if measurements_values:
-                normalized_entry.setdefault(
-                    "memory_usage_measurements_readable",
-                    _to_readable_memory_measurements(measurements_values),
-                )
-            percentiles = normalized_entry.get("memory_usage_percentiles")
-            percentiles_values = _coerce_float_list(percentiles)
-            if percentiles_values:
-                normalized_entry.setdefault(
-                    "memory_usage_percentiles_readable",
-                    _to_readable_memory_measurements(percentiles_values),
-                )
             normalized_entries.append(normalized_entry)
         return normalized_entries
 
@@ -2218,19 +2165,6 @@ def _extract_source_select_per_query_metrics(
     legacy_bytes_per_second_percentiles = list(
         source_metrics.get("source_table_select_bytes_per_second_measurements_percentiles", []) or []
     )
-    legacy_memory_usage_measurements = list(
-        source_metrics.get("source_table_select_memory_usage_measurements", []) or []
-    )
-    legacy_memory_usage_measurements_readable = list(
-        source_metrics.get("source_table_select_memory_usage_measurements_readable", []) or []
-    )
-    legacy_memory_usage_percentiles = list(
-        source_metrics.get("source_table_select_memory_usage_measurements_percentiles", []) or []
-    )
-    legacy_memory_usage_percentiles_readable = list(
-        source_metrics.get("source_table_select_memory_usage_measurements_percentiles_readable", [])
-        or []
-    )
     if (
         not legacy_query
         and not legacy_elapsed_ms_measurements
@@ -2239,10 +2173,6 @@ def _extract_source_select_per_query_metrics(
         and not legacy_rows_per_second_percentiles
         and not legacy_bytes_per_second_measurements
         and not legacy_bytes_per_second_percentiles
-        and not legacy_memory_usage_measurements
-        and not legacy_memory_usage_measurements_readable
-        and not legacy_memory_usage_percentiles
-        and not legacy_memory_usage_percentiles_readable
     ):
         return []
 
@@ -2260,22 +2190,6 @@ def _extract_source_select_per_query_metrics(
             "rows_per_second_percentiles": [float(v) for v in legacy_rows_per_second_percentiles],
             "bytes_per_second_measurements": [float(v) for v in legacy_bytes_per_second_measurements],
             "bytes_per_second_percentiles": [float(v) for v in legacy_bytes_per_second_percentiles],
-            "memory_usage_measurements": [float(v) for v in legacy_memory_usage_measurements],
-            "memory_usage_measurements_readable": (
-                [str(v) for v in legacy_memory_usage_measurements_readable]
-                if legacy_memory_usage_measurements_readable
-                else _to_readable_memory_measurements(
-                    [float(v) for v in legacy_memory_usage_measurements]
-                )
-            ),
-            "memory_usage_percentiles": [float(v) for v in legacy_memory_usage_percentiles],
-            "memory_usage_percentiles_readable": (
-                [str(v) for v in legacy_memory_usage_percentiles_readable]
-                if legacy_memory_usage_percentiles_readable
-                else _to_readable_memory_measurements(
-                    [float(v) for v in legacy_memory_usage_percentiles]
-                )
-            ),
         }
     ]
 
@@ -2524,30 +2438,6 @@ def _build_baseline_variant_result(
         metrics.get("source_table_insert_bytes_per_second_measurements_percentiles_readable", [])
         or []
     )
-    source_insert_memory_usage = list(
-        metrics.get("source_table_insert_memory_usage_measurements", []) or []
-    )
-    source_insert_memory_usage_readable = list(
-        metrics.get("source_table_insert_memory_usage_measurements_readable", []) or []
-    )
-    if not source_insert_memory_usage_readable and source_insert_memory_usage:
-        source_insert_memory_usage_readable = [
-            make_readable_bytes(value) for value in source_insert_memory_usage
-        ]
-    source_insert_memory_usage_percentiles = list(
-        metrics.get("source_table_insert_memory_usage_measurements_percentiles", []) or []
-    )
-    source_insert_memory_usage_percentiles_readable = list(
-        metrics.get("source_table_insert_memory_usage_measurements_percentiles_readable", [])
-        or []
-    )
-    if (
-        not source_insert_memory_usage_percentiles_readable
-        and source_insert_memory_usage_percentiles
-    ):
-        source_insert_memory_usage_percentiles_readable = [
-            make_readable_bytes(value) for value in source_insert_memory_usage_percentiles
-        ]
 
     source_select_ms = list(metrics.get("source_table_select_time_ms_measurements", []) or [])
     source_select_ms_percentiles = list(
@@ -2572,30 +2462,6 @@ def _build_baseline_variant_result(
         metrics.get("source_table_select_bytes_per_second_measurements_percentiles_readable", [])
         or []
     )
-    source_select_memory_usage = list(
-        metrics.get("source_table_select_memory_usage_measurements", []) or []
-    )
-    source_select_memory_usage_readable = list(
-        metrics.get("source_table_select_memory_usage_measurements_readable", []) or []
-    )
-    if not source_select_memory_usage_readable and source_select_memory_usage:
-        source_select_memory_usage_readable = [
-            make_readable_bytes(value) for value in source_select_memory_usage
-        ]
-    source_select_memory_usage_percentiles = list(
-        metrics.get("source_table_select_memory_usage_measurements_percentiles", []) or []
-    )
-    source_select_memory_usage_percentiles_readable = list(
-        metrics.get("source_table_select_memory_usage_measurements_percentiles_readable", [])
-        or []
-    )
-    if (
-        not source_select_memory_usage_percentiles_readable
-        and source_select_memory_usage_percentiles
-    ):
-        source_select_memory_usage_percentiles_readable = [
-            make_readable_bytes(value) for value in source_select_memory_usage_percentiles
-        ]
 
     source_total_size_bytes = float(
         metrics.get("source_table_consumed_compressed_size_bytes_overall", 0.0) or 0.0
@@ -2674,26 +2540,6 @@ def _build_baseline_variant_result(
         source_table_insert_bytes_per_second_measurements_percentiles_readable=(
             source_insert_bytes_per_sec_percentiles_readable
         ),
-        tested_table_insert_memory_usage_measurements=source_insert_memory_usage,
-        tested_table_insert_memory_usage_measurements_readable=(
-            source_insert_memory_usage_readable
-        ),
-        source_table_insert_memory_usage_measurements=source_insert_memory_usage,
-        source_table_insert_memory_usage_measurements_readable=(
-            source_insert_memory_usage_readable
-        ),
-        tested_table_insert_memory_usage_measurements_percentiles=(
-            source_insert_memory_usage_percentiles
-        ),
-        tested_table_insert_memory_usage_measurements_percentiles_readable=(
-            source_insert_memory_usage_percentiles_readable
-        ),
-        source_table_insert_memory_usage_measurements_percentiles=(
-            source_insert_memory_usage_percentiles
-        ),
-        source_table_insert_memory_usage_measurements_percentiles_readable=(
-            source_insert_memory_usage_percentiles_readable
-        ),
         tested_table_select_test_query=metrics.get("source_table_select_test_query"),
         source_table_select_test_query=metrics.get("source_table_select_test_query"),
         tested_table_select_time_ms_measurements=source_select_ms,
@@ -2728,26 +2574,6 @@ def _build_baseline_variant_result(
         ),
         source_table_select_bytes_per_second_measurements_percentiles_readable=(
             source_select_bytes_per_sec_percentiles_readable
-        ),
-        tested_table_select_memory_usage_measurements=source_select_memory_usage,
-        tested_table_select_memory_usage_measurements_readable=(
-            source_select_memory_usage_readable
-        ),
-        source_table_select_memory_usage_measurements=source_select_memory_usage,
-        source_table_select_memory_usage_measurements_readable=(
-            source_select_memory_usage_readable
-        ),
-        tested_table_select_memory_usage_measurements_percentiles=(
-            source_select_memory_usage_percentiles
-        ),
-        tested_table_select_memory_usage_measurements_percentiles_readable=(
-            source_select_memory_usage_percentiles_readable
-        ),
-        source_table_select_memory_usage_measurements_percentiles=(
-            source_select_memory_usage_percentiles
-        ),
-        source_table_select_memory_usage_measurements_percentiles_readable=(
-            source_select_memory_usage_percentiles_readable
         ),
         tested_table_select_metrics_by_query_json=_to_legacy_pretty_json_or_none(
             metrics.get("source_table_select_metrics_by_query")
@@ -2934,10 +2760,6 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             insert_stats["bytes_per_second"],
             payload.measured_percentiles,
         )
-        insert_memory_usage_percentiles = compute_percentiles(
-            insert_stats["memory_usage"],
-            payload.measured_percentiles,
-        )
 
         select_stats = _measure_select_queries(
             client,
@@ -2964,10 +2786,6 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             select_stats["bytes_per_second"],
             payload.measured_percentiles,
         )
-        select_memory_usage_percentiles = compute_percentiles(
-            select_stats["memory_usage"],
-            payload.measured_percentiles,
-        )
 
         source_total_rows = client.count_rows(payload.source_database, payload.source_table)
         tested_total_rows = client.count_rows(baseline_database, baseline_table)
@@ -2987,8 +2805,11 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
                 total_size_bytes=source_total_size_bytes,
             )
         )
-        if source_total_size_bytes <= 0:
-            source_total_size_bytes = _sum_column_compressed_size_bytes(source_columns_sizes)
+        source_total_size_bytes = _normalize_total_size_bytes(
+            source_total_size_bytes,
+            column_sizes=source_columns_sizes,
+            context=f"run_source_benchmark source {payload.source_database}.{payload.source_table}",
+        )
 
         tested_columns_sizes = client.get_column_sizes(baseline_database, baseline_table)
         tested_indexes_sizes = client.get_index_sizes(baseline_database, baseline_table)
@@ -3006,8 +2827,11 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
                 total_size_bytes=tested_total_size_bytes,
             )
         )
-        if tested_total_size_bytes <= 0:
-            tested_total_size_bytes = _sum_column_compressed_size_bytes(tested_columns_sizes)
+        tested_total_size_bytes = _normalize_total_size_bytes(
+            tested_total_size_bytes,
+            column_sizes=tested_columns_sizes,
+            context=f"run_source_benchmark baseline {baseline_database}.{baseline_table}",
+        )
         source_total_index_size_bytes = float(
             sum(
                 float(index_stats.get("size_compressed_bytes", 0.0) or 0.0)
@@ -3046,16 +2870,6 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             "source_table_insert_bytes_per_second_measurements_percentiles_readable": [
                 make_readable_bytes(value) for value in insert_bytes_per_second_percentiles
             ],
-            "source_table_insert_memory_usage_measurements": insert_stats["memory_usage"],
-            "source_table_insert_memory_usage_measurements_readable": [
-                make_readable_bytes(value) for value in insert_stats["memory_usage"]
-            ],
-            "source_table_insert_memory_usage_measurements_percentiles": (
-                insert_memory_usage_percentiles
-            ),
-            "source_table_insert_memory_usage_measurements_percentiles_readable": [
-                make_readable_bytes(value) for value in insert_memory_usage_percentiles
-            ],
             "source_table_select_test_query": (
                 baseline_test_queries[0].query if baseline_test_queries else ""
             ),
@@ -3074,16 +2888,6 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             ],
             "source_table_select_bytes_per_second_measurements_percentiles_readable": [
                 make_readable_bytes(value) for value in select_bytes_per_second_percentiles
-            ],
-            "source_table_select_memory_usage_measurements": select_stats["memory_usage"],
-            "source_table_select_memory_usage_measurements_readable": [
-                make_readable_bytes(value) for value in select_stats["memory_usage"]
-            ],
-            "source_table_select_memory_usage_measurements_percentiles": (
-                select_memory_usage_percentiles
-            ),
-            "source_table_select_memory_usage_measurements_percentiles_readable": [
-                make_readable_bytes(value) for value in select_memory_usage_percentiles
             ],
             "source_table_select_metrics_by_query": source_select_per_query_metrics,
             "tested_table_consumed_compressed_size_bytes_by_each_column": tested_columns_sizes,
@@ -3131,14 +2935,12 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             time_ms_percentiles=select_time_ms_percentiles,
             rows_per_second_percentiles=select_rows_per_second_percentiles,
             bytes_per_second_percentiles=select_bytes_per_second_percentiles,
-            memory_usage_percentiles=select_memory_usage_percentiles,
         )
         insert_bucket = _build_metric_bucket(
             measured_percentiles=payload.measured_percentiles,
             time_ms_percentiles=insert_time_ms_percentiles,
             rows_per_second_percentiles=insert_rows_per_second_percentiles,
             bytes_per_second_percentiles=insert_bytes_per_second_percentiles,
-            memory_usage_percentiles=insert_memory_usage_percentiles,
         )
         baseline_select_time_speedup_by_query = _compute_select_time_speedup_by_query(
             source_select_per_query_metrics,
@@ -3349,10 +3151,6 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
             insert_stats["bytes_per_second"],
             measured_percentiles,
         )
-        tested_insert_memory_usage_percentiles = compute_percentiles(
-            insert_stats["memory_usage"],
-            measured_percentiles,
-        )
 
         select_stats = _measure_select_queries(
             client,
@@ -3379,10 +3177,6 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
             select_stats["bytes_per_second"],
             measured_percentiles,
         )
-        tested_select_memory_usage_percentiles = compute_percentiles(
-            select_stats["memory_usage"],
-            measured_percentiles,
-        )
 
         tested_rows_count = client.count_rows(payload.variant_database, payload.variant_table)
         source_rows_count = int(source_metrics.get("total_n_rows_in_source_table", 0) or 0)
@@ -3403,8 +3197,11 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
                 total_size_bytes=tested_total_size_bytes,
             )
         )
-        if tested_total_size_bytes <= 0:
-            tested_total_size_bytes = _sum_column_compressed_size_bytes(tested_columns_sizes)
+        tested_total_size_bytes = _normalize_total_size_bytes(
+            tested_total_size_bytes,
+            column_sizes=tested_columns_sizes,
+            context=f"run_variant_benchmark tested {payload.variant_database}.{payload.variant_table}",
+        )
         tested_total_index_size_bytes = float(
             sum(
                 float(index_stats.get("size_compressed_bytes", 0.0) or 0.0)
@@ -3415,10 +3212,14 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
         source_total_size_bytes = float(
             source_metrics.get("source_table_consumed_compressed_size_bytes_overall", 0.0) or 0.0
         )
-        if source_total_size_bytes <= 0:
-            source_total_size_bytes = _sum_column_compressed_size_bytes(
+        source_total_size_bytes = _normalize_total_size_bytes(
+            source_total_size_bytes,
+            column_sizes=(
                 source_metrics.get("source_table_consumed_compressed_size_bytes_by_each_column", {})
-            )
+                or {}
+            ),
+            context=f"run_variant_benchmark source-metrics {payload.source_database}.{payload.source_table}",
+        )
         if source_total_size_bytes <= 0:
             # Защита от редких baseline-анomalies: читаем live size source-таблицы.
             live_source_columns_sizes = client.get_column_sizes(
@@ -3445,10 +3246,14 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
                 index_sizes=live_source_index_sizes,
                 total_size_bytes=live_source_total_size_bytes,
             )
-            if live_source_total_size_bytes <= 0:
-                live_source_total_size_bytes = _sum_column_compressed_size_bytes(
-                    live_source_columns_sizes
-                )
+            live_source_total_size_bytes = _normalize_total_size_bytes(
+                live_source_total_size_bytes,
+                column_sizes=live_source_columns_sizes,
+                context=(
+                    f"run_variant_benchmark source-live "
+                    f"{payload.source_database}.{payload.source_table}"
+                ),
+            )
             if live_source_total_size_bytes > 0:
                 source_total_size_bytes = live_source_total_size_bytes
         source_total_size_bytes_with_indexes = float(
@@ -3477,67 +3282,6 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
         source_select_time_ms_percentiles = list(
             source_metrics.get("source_table_select_time_ms_measurements_percentiles", []) or []
         )
-        source_insert_memory_usage_percentiles = list(
-            source_metrics.get("source_table_insert_memory_usage_measurements_percentiles", []) or []
-        )
-        source_insert_memory_usage_measurements = list(
-            source_metrics.get("source_table_insert_memory_usage_measurements", []) or []
-        )
-        source_insert_memory_usage_measurements_readable = list(
-            source_metrics.get("source_table_insert_memory_usage_measurements_readable", []) or []
-        )
-        if (
-            not source_insert_memory_usage_measurements_readable
-            and source_insert_memory_usage_measurements
-        ):
-            source_insert_memory_usage_measurements_readable = [
-                make_readable_bytes(value) for value in source_insert_memory_usage_measurements
-            ]
-        source_insert_memory_usage_percentiles_readable = list(
-            source_metrics.get(
-                "source_table_insert_memory_usage_measurements_percentiles_readable",
-                [],
-            )
-            or []
-        )
-        if (
-            not source_insert_memory_usage_percentiles_readable
-            and source_insert_memory_usage_percentiles
-        ):
-            source_insert_memory_usage_percentiles_readable = [
-                make_readable_bytes(value) for value in source_insert_memory_usage_percentiles
-            ]
-        source_select_memory_usage_percentiles = list(
-            source_metrics.get("source_table_select_memory_usage_measurements_percentiles", []) or []
-        )
-        source_select_memory_usage_measurements = list(
-            source_metrics.get("source_table_select_memory_usage_measurements", []) or []
-        )
-        source_select_memory_usage_measurements_readable = list(
-            source_metrics.get("source_table_select_memory_usage_measurements_readable", []) or []
-        )
-        if (
-            not source_select_memory_usage_measurements_readable
-            and source_select_memory_usage_measurements
-        ):
-            source_select_memory_usage_measurements_readable = [
-                make_readable_bytes(value) for value in source_select_memory_usage_measurements
-            ]
-        source_select_memory_usage_percentiles_readable = list(
-            source_metrics.get(
-                "source_table_select_memory_usage_measurements_percentiles_readable",
-                [],
-            )
-            or []
-        )
-        if (
-            not source_select_memory_usage_percentiles_readable
-            and source_select_memory_usage_percentiles
-        ):
-            source_select_memory_usage_percentiles_readable = [
-                make_readable_bytes(value) for value in source_select_memory_usage_percentiles
-            ]
-
         tested_insert_time_speedup = compute_speedup_coefficients(
             source_insert_time_ms_percentiles,
             tested_insert_time_ms_percentiles,
@@ -3581,14 +3325,12 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
                 source_metrics.get("source_table_insert_bytes_per_second_measurements_percentiles", [])
                 or []
             ),
-            memory_usage_percentiles=source_insert_memory_usage_percentiles,
         )
         tested_insert_bucket = _build_metric_bucket(
             measured_percentiles=measured_percentiles,
             time_ms_percentiles=tested_insert_time_ms_percentiles,
             rows_per_second_percentiles=tested_insert_rows_per_second_percentiles,
             bytes_per_second_percentiles=tested_insert_bytes_per_second_percentiles,
-            memory_usage_percentiles=tested_insert_memory_usage_percentiles,
         )
         source_select_bucket = _build_metric_bucket(
             measured_percentiles=measured_percentiles,
@@ -3601,14 +3343,12 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
                 source_metrics.get("source_table_select_bytes_per_second_measurements_percentiles", [])
                 or []
             ),
-            memory_usage_percentiles=source_select_memory_usage_percentiles,
         )
         tested_select_bucket = _build_metric_bucket(
             measured_percentiles=measured_percentiles,
             time_ms_percentiles=tested_select_time_ms_percentiles,
             rows_per_second_percentiles=tested_select_rows_per_second_percentiles,
             bytes_per_second_percentiles=tested_select_bytes_per_second_percentiles,
-            memory_usage_percentiles=tested_select_memory_usage_percentiles,
         )
         insert_speedup_bucket = {
             "time_ms_percentiles": list(tested_insert_time_speedup),
@@ -3868,27 +3608,6 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
                 )
                 or []
             ),
-            tested_table_insert_memory_usage_measurements=insert_stats["memory_usage"],
-            tested_table_insert_memory_usage_measurements_readable=[
-                make_readable_bytes(value) for value in insert_stats["memory_usage"]
-            ],
-            source_table_insert_memory_usage_measurements=source_insert_memory_usage_measurements,
-            source_table_insert_memory_usage_measurements_readable=(
-                source_insert_memory_usage_measurements_readable
-            ),
-            tested_table_insert_memory_usage_measurements_percentiles=(
-                tested_insert_memory_usage_percentiles
-            ),
-            tested_table_insert_memory_usage_measurements_percentiles_readable=[
-                make_readable_bytes(value)
-                for value in tested_insert_memory_usage_percentiles
-            ],
-            source_table_insert_memory_usage_measurements_percentiles=(
-                source_insert_memory_usage_percentiles
-            ),
-            source_table_insert_memory_usage_measurements_percentiles_readable=(
-                source_insert_memory_usage_percentiles_readable
-            ),
             tested_table_select_test_query=(
                 payload.query_plan.test_queries[0].query
                 if payload.query_plan.test_queries
@@ -3944,27 +3663,6 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
                     [],
                 )
                 or []
-            ),
-            tested_table_select_memory_usage_measurements=select_stats["memory_usage"],
-            tested_table_select_memory_usage_measurements_readable=[
-                make_readable_bytes(value) for value in select_stats["memory_usage"]
-            ],
-            source_table_select_memory_usage_measurements=source_select_memory_usage_measurements,
-            source_table_select_memory_usage_measurements_readable=(
-                source_select_memory_usage_measurements_readable
-            ),
-            tested_table_select_memory_usage_measurements_percentiles=(
-                tested_select_memory_usage_percentiles
-            ),
-            tested_table_select_memory_usage_measurements_percentiles_readable=[
-                make_readable_bytes(value)
-                for value in tested_select_memory_usage_percentiles
-            ],
-            source_table_select_memory_usage_measurements_percentiles=(
-                source_select_memory_usage_percentiles
-            ),
-            source_table_select_memory_usage_measurements_percentiles_readable=(
-                source_select_memory_usage_percentiles_readable
             ),
             tested_table_select_metrics_by_query_json=(
                 json.dumps(

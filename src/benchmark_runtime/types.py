@@ -209,30 +209,8 @@ class BenchmarkVariantResult(_FrozenModel):
     source_table_insert_bytes_per_second_measurements_percentiles_readable: List[str] = (
         Field(default_factory=list)
     )
-    tested_table_insert_memory_usage_measurements: List[float] = Field(
-        default_factory=list
-    )
-    tested_table_insert_memory_usage_measurements_readable: List[str] = Field(
-        default_factory=list
-    )
-    source_table_insert_memory_usage_measurements: List[float] = Field(
-        default_factory=list
-    )
-    source_table_insert_memory_usage_measurements_readable: List[str] = Field(
-        default_factory=list
-    )
-    tested_table_insert_memory_usage_measurements_percentiles: List[float] = Field(
-        default_factory=list
-    )
-    tested_table_insert_memory_usage_measurements_percentiles_readable: List[str] = Field(
-        default_factory=list
-    )
-    source_table_insert_memory_usage_measurements_percentiles: List[float] = Field(
-        default_factory=list
-    )
-    source_table_insert_memory_usage_measurements_percentiles_readable: List[str] = Field(
-        default_factory=list
-    )
+    tested_table_insert_metrics_json: Optional[str] = None
+    source_table_insert_metrics_json: Optional[str] = None
     tested_table_select_test_query: Optional[str] = None
     source_table_select_test_query: Optional[str] = None
     tested_table_select_time_ms_measurements: List[float] = Field(default_factory=list)
@@ -281,30 +259,6 @@ class BenchmarkVariantResult(_FrozenModel):
     )
     source_table_select_bytes_per_second_measurements_percentiles_readable: List[str] = (
         Field(default_factory=list)
-    )
-    tested_table_select_memory_usage_measurements: List[float] = Field(
-        default_factory=list
-    )
-    tested_table_select_memory_usage_measurements_readable: List[str] = Field(
-        default_factory=list
-    )
-    source_table_select_memory_usage_measurements: List[float] = Field(
-        default_factory=list
-    )
-    source_table_select_memory_usage_measurements_readable: List[str] = Field(
-        default_factory=list
-    )
-    tested_table_select_memory_usage_measurements_percentiles: List[float] = Field(
-        default_factory=list
-    )
-    tested_table_select_memory_usage_measurements_percentiles_readable: List[str] = Field(
-        default_factory=list
-    )
-    source_table_select_memory_usage_measurements_percentiles: List[float] = Field(
-        default_factory=list
-    )
-    source_table_select_memory_usage_measurements_percentiles_readable: List[str] = Field(
-        default_factory=list
     )
     tested_table_select_metrics_by_query_json: Optional[str] = None
     source_table_select_metrics_by_query_json: Optional[str] = None
@@ -417,30 +371,8 @@ class StoredBenchmarkResult(_FrozenModel):
     source_table_insert_bytes_per_second_measurements_percentiles_readable: List[str] = (
         Field(default_factory=list)
     )
-    tested_table_insert_memory_usage_measurements: List[float] = Field(
-        default_factory=list
-    )
-    tested_table_insert_memory_usage_measurements_readable: List[str] = Field(
-        default_factory=list
-    )
-    source_table_insert_memory_usage_measurements: List[float] = Field(
-        default_factory=list
-    )
-    source_table_insert_memory_usage_measurements_readable: List[str] = Field(
-        default_factory=list
-    )
-    tested_table_insert_memory_usage_measurements_percentiles: List[float] = Field(
-        default_factory=list
-    )
-    tested_table_insert_memory_usage_measurements_percentiles_readable: List[str] = Field(
-        default_factory=list
-    )
-    source_table_insert_memory_usage_measurements_percentiles: List[float] = Field(
-        default_factory=list
-    )
-    source_table_insert_memory_usage_measurements_percentiles_readable: List[str] = Field(
-        default_factory=list
-    )
+    tested_table_insert_metrics_json: Optional[str] = None
+    source_table_insert_metrics_json: Optional[str] = None
 
     # ---------------------------  Select test results  ----------------------------
     tested_table_select_test_query: Optional[str] = None
@@ -491,30 +423,6 @@ class StoredBenchmarkResult(_FrozenModel):
     )
     source_table_select_bytes_per_second_measurements_percentiles_readable: List[str] = (
         Field(default_factory=list)
-    )
-    tested_table_select_memory_usage_measurements: List[float] = Field(
-        default_factory=list
-    )
-    tested_table_select_memory_usage_measurements_readable: List[str] = Field(
-        default_factory=list
-    )
-    source_table_select_memory_usage_measurements: List[float] = Field(
-        default_factory=list
-    )
-    source_table_select_memory_usage_measurements_readable: List[str] = Field(
-        default_factory=list
-    )
-    tested_table_select_memory_usage_measurements_percentiles: List[float] = Field(
-        default_factory=list
-    )
-    tested_table_select_memory_usage_measurements_percentiles_readable: List[str] = Field(
-        default_factory=list
-    )
-    source_table_select_memory_usage_measurements_percentiles: List[float] = Field(
-        default_factory=list
-    )
-    source_table_select_memory_usage_measurements_percentiles_readable: List[str] = Field(
-        default_factory=list
     )
     tested_table_select_metrics_by_query_json: Optional[str] = None
     source_table_select_metrics_by_query_json: Optional[str] = None

@@ -12,17 +12,30 @@ from pathlib import Path
 from typing import Any, Dict
 
 # Редактируй пути здесь:
+# CELERY_JSON_PATH: Path = Path(
+#     "configs/prod_bench/celery.prod.json"
+# )
+# CONNECTIONS_JSON_PATH: Path = Path(
+#     "configs/prod_bench/connections.prod.json"
+# )
+# RULE_BANKS_JSON_PATH: Path = Path(
+#     "configs/prod_bench/rule_banks.prod.json"
+# )
+# BENCHMARKS_JSON_PATH: Path = Path(
+#     "configs/prod_bench/benchmarks.prod.json"
+# )
+
 CELERY_JSON_PATH: Path = Path(
-    "configs/prod_bench/celery.prod.json"
+    "configs/hits_postgres/celery.hits_postgres.local.json"
 )
 CONNECTIONS_JSON_PATH: Path = Path(
-    "configs/prod_bench/connections.prod.json"
+    "configs/hits_postgres/connections.hits_postgres.local.json"
 )
 RULE_BANKS_JSON_PATH: Path = Path(
-    "configs/prod_bench/rule_banks.prod.json"
+    "configs/hits_postgres/rule_banks.hits_postgres.local.json"
 )
 BENCHMARKS_JSON_PATH: Path = Path(
-    "configs/prod_bench/benchmarks.prod.json"
+    "configs/hits_postgres/benchmarks.hits_postgres.sequential_topn.local.json"
 )
 
 

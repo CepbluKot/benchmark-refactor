@@ -12,6 +12,8 @@ metadata через fetcher, исполнение через Celery-задачи
 и удаляет эту таблицу в `finally`.
 Для `SELECT` также сохраняются отдельные per-query метрики (замеры/перцентили/speedup),
 чтобы анализировать каждый запрос отдельно, а не только агрегат по всем запросам.
+Legacy select-агрегаты в таблице результатов удалены: теперь хранение select-метрик
+идёт через JSON-поля `*_by_query_json`.
 
 ## Оглавление
 
@@ -262,6 +264,12 @@ Runner не пишет результаты в store. Сохранение вы�
   `source_table_select_metrics_by_query_json`,
   `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json`
   как map `query_id -> metrics`;
+- legacy колонки агрегированных select-метрик удалены из схемы ClickHouse
+  (например `tested_table_select_time_ms_measurements`,
+  `source_table_select_rows_per_second_measurements`,
+  `tested_table_select_bytes_per_second_measurements_percentiles`).
+  При старте runtime `ensure_schema()` автоматически выполняет `DROP COLUMN IF EXISTS`
+  для этих legacy-полей;
 - SQL-строки (`*_ddl`, `*_query`, query-поля внутри JSON-метрик) перед записью
   автоматически нормализуются в читабельный формат;
 - итог: `score` и рядом `score_calculation_json` (как рассчитан score, с входными параметрами и финальным значением);
@@ -830,7 +838,7 @@ print(run_id)
 - `source` и `tested`:
   - `source.select.time_ms_percentiles`, `tested.insert.time_ms_percentiles`
   - `source.select.time_ms_by_percentile`, `tested.insert.time_ms_by_percentile`
-  - также `rows_per_second_*`, `bytes_per_second_*`, `memory_usage_*`
+  - также `rows_per_second_*`, `bytes_per_second_*`
 - `speedup.insert.time_ms_percentiles`, `speedup.select.time_ms_percentiles`
 - `compression_overall_coef`
 - `medians`:
@@ -1018,7 +1026,10 @@ print(run_id)
      `insert_rows_per_operation_limit` в конфиге);
    - warmup-запросы;
    - test-запросы;
-   - расчёт как агрегированных select-метрик, так и per-query select-метрик;
+   - расчёт select-метрик и формирование per-query JSON-полей
+     (`tested_table_select_metrics_by_query_json`,
+     `source_table_select_metrics_by_query_json`,
+     `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json`);
    - расчёт итогового `score`;
    - формирование `score_calculation_json` (детальный трейc расчёта score);
    - сохранение результата в `BenchmarkResultStore` (обычно из Celery-воркера);

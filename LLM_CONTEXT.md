@@ -173,10 +173,30 @@
    `source_table_select_metrics_by_query_json`,
    `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json`
    в формате map `query_id -> metrics`.
-9. SQL-значения перед сохранением форматируются:
+9. legacy select-агрегаты удалены из ClickHouse-схемы результатов:
+   `tested_table_select_time_ms_measurements`,
+   `source_table_select_time_ms_measurements`,
+   `tested_table_select_time_ms_measurements_percentiles`,
+   `source_table_select_time_ms_measurements_percentiles`,
+   `tested_table_select_time_ms_measurements_percentiles_speed_up_coefs`,
+   `tested_table_select_rows_per_second_measurements`,
+   `source_table_select_rows_per_second_measurements`,
+   `tested_table_select_rows_per_second_measurements_percentiles`,
+   `source_table_select_rows_per_second_measurements_percentiles`,
+   `tested_table_select_bytes_per_second_measurements`,
+   `tested_table_select_bytes_per_second_measurements_readable`,
+   `source_table_select_bytes_per_second_measurements`,
+   `source_table_select_bytes_per_second_measurements_readable`,
+   `tested_table_select_bytes_per_second_measurements_percentiles`,
+   `tested_table_select_bytes_per_second_measurements_percentiles_readable`,
+   `source_table_select_bytes_per_second_measurements_percentiles`,
+   `source_table_select_bytes_per_second_measurements_percentiles_readable`.
+   `ClickHouseBenchmarkResultStore.ensure_schema()` делает `DROP COLUMN IF EXISTS`
+   для этих колонок на уже существующей таблице.
+10. SQL-значения перед сохранением форматируются:
    - scalar-поля `*_ddl`, `*_query`;
    - query-поля внутри JSON-метрик (`query`, `source_query`, `warmup_queries`).
-10. итог: `score` и `score_calculation_json` (детали формулы/контекста/статуса расчёта);
+11. итог: `score` и `score_calculation_json` (детали формулы/контекста/статуса расчёта);
    для top-N DDL восстанавливается из `tested_table_ddl`.
 
 В `src/benchmark_runtime/types.py` есть helper `build_variant_params(...)`,

@@ -339,47 +339,15 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             result.metrics["source_table_insert_time_ms_measurements_percentiles"],
             [150.0, 200.0],
         )
-        self.assertEqual(
-            result.metrics["source_table_insert_memory_usage_measurements"],
-            [1024.0, 2048.0],
-        )
-        self.assertEqual(
-            result.metrics["source_table_insert_memory_usage_measurements_readable"],
-            [make_readable_bytes(1024.0), make_readable_bytes(2048.0)],
-        )
-        self.assertEqual(
-            result.metrics["source_table_insert_memory_usage_measurements_percentiles_readable"],
-            [make_readable_bytes(1536.0), make_readable_bytes(2048.0)],
-        )
         self.assertEqual(result.metrics["source_table_select_time_ms_measurements"], [100.0, 200.0])
         self.assertEqual(
             result.metrics["source_table_select_time_ms_measurements_percentiles"],
             [150.0, 200.0],
         )
-        self.assertEqual(
-            result.metrics["source_table_select_memory_usage_measurements"],
-            [4096.0, 8192.0],
-        )
-        self.assertEqual(
-            result.metrics["source_table_select_memory_usage_measurements_readable"],
-            [make_readable_bytes(4096.0), make_readable_bytes(8192.0)],
-        )
-        self.assertEqual(
-            result.metrics["source_table_select_memory_usage_measurements_percentiles_readable"],
-            [make_readable_bytes(6144.0), make_readable_bytes(8192.0)],
-        )
         per_query_metrics = result.metrics["source_table_select_metrics_by_query"]
         self.assertEqual(len(per_query_metrics), 1)
         self.assertIn("SELECT count()", per_query_metrics[0]["query"])
         self.assertEqual(per_query_metrics[0]["elapsed_ms_percentiles"], [150.0, 200.0])
-        self.assertEqual(
-            per_query_metrics[0]["memory_usage_measurements_readable"],
-            [make_readable_bytes(4096.0), make_readable_bytes(8192.0)],
-        )
-        self.assertEqual(
-            per_query_metrics[0]["memory_usage_percentiles_readable"],
-            [make_readable_bytes(6144.0), make_readable_bytes(8192.0)],
-        )
         self.assertEqual(result.metrics["total_n_rows_in_source_table"], 321)
         self.assertEqual(
             result.metrics["tested_table_consumed_compressed_size_bytes_with_indexes"],
@@ -970,38 +938,6 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             result.tested_table_select_time_ms_measurements_percentiles_speed_up_coefs,
             [2.0, 2.0],
         )
-        self.assertEqual(
-            result.tested_table_insert_memory_usage_measurements_readable,
-            [make_readable_bytes(3072.0), make_readable_bytes(5120.0)],
-        )
-        self.assertEqual(
-            result.tested_table_insert_memory_usage_measurements_percentiles_readable,
-            [make_readable_bytes(4096.0), make_readable_bytes(5120.0)],
-        )
-        self.assertEqual(
-            result.source_table_insert_memory_usage_measurements_readable,
-            [make_readable_bytes(2048.0)],
-        )
-        self.assertEqual(
-            result.source_table_insert_memory_usage_measurements_percentiles_readable,
-            [make_readable_bytes(2048.0)],
-        )
-        self.assertEqual(
-            result.tested_table_select_memory_usage_measurements_readable,
-            [make_readable_bytes(4096.0), make_readable_bytes(6144.0)],
-        )
-        self.assertEqual(
-            result.tested_table_select_memory_usage_measurements_percentiles_readable,
-            [make_readable_bytes(5120.0), make_readable_bytes(6144.0)],
-        )
-        self.assertEqual(
-            result.source_table_select_memory_usage_measurements_readable,
-            [make_readable_bytes(1024.0)],
-        )
-        self.assertEqual(
-            result.source_table_select_memory_usage_measurements_percentiles_readable,
-            [make_readable_bytes(1024.0)],
-        )
         tested_select_per_query = json.loads(result.tested_table_select_metrics_by_query_json or "[]")
         source_select_per_query = json.loads(result.source_table_select_metrics_by_query_json or "[]")
         select_speedup_by_query = json.loads(
@@ -1010,8 +946,6 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
         self.assertEqual(len(tested_select_per_query), 1)
         self.assertEqual(len(source_select_per_query), 1)
         self.assertEqual(len(select_speedup_by_query), 1)
-        self.assertIn("memory_usage_measurements_readable", tested_select_per_query[0])
-        self.assertIn("memory_usage_percentiles_readable", tested_select_per_query[0])
         self.assertEqual(
             select_speedup_by_query[0]["elapsed_ms_percentiles_speed_up_coefs"],
             [2.0, 2.0],
@@ -1190,6 +1124,114 @@ ORDER BY msg
         self.assertEqual(result.tested_table_compression_overall_coef, 2.0)
         parsed_cols_sizes = json.loads(result.tested_table_cols_sizes or "{}")
         self.assertEqual(parsed_cols_sizes.get("msg", {}).get("size_compressed_bytes"), 200)
+
+    def test_run_variant_benchmark_uses_column_sum_when_total_size_is_smaller(self) -> None:
+        fake_client = _FakeRuntimeClient(
+            query_metrics_sequence=[
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 10_000.0,
+                },
+                {
+                    "elapsed_ns": 50_000_000.0,
+                    "read_rows": 500.0,
+                    "read_bytes": 5_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+            ],
+            count_rows_map={("bench_tmp", "messages__bench__bench_var__0002"): 200},
+            column_sizes_map={
+                ("bench_tmp", "messages__bench__bench_var__0002"): {
+                    "msg": {
+                        "name": "msg",
+                        "datatype": "LowCardinality(String)",
+                        "size_compressed_bytes": 200,
+                        "size_compressed_bytes_readable": "200 B",
+                    }
+                }
+            },
+            index_sizes_map={
+                ("bench_tmp", "messages__bench__bench_var__0002"): {
+                    "msg": {
+                        "size_compressed_bytes": 50,
+                        "size_compressed_bytes_readable": "50 B",
+                    }
+                }
+            },
+            # Имитация редкой аномалии: system.parts даёт слишком маленький total.
+            total_size_map={("bench_tmp", "messages__bench__bench_var__0002"): 10.0},
+        )
+        fake_store = _FakeResultStore()
+
+        payload = VariantBenchmarkTaskPayload(
+            connection=self._connection_payload(),
+            result_connection=self._connection_payload(),
+            result_database="benchmark_results",
+            result_table="combined_benchmark_results",
+            benchmark_run_id=2,
+            benchmark_started_at=datetime(2026, 2, 24, 13, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_var_small_total",
+            source_database="analytics",
+            source_table="messages",
+            variant_database="bench_tmp",
+            variant_table="messages__bench__bench_var__0002",
+            variant_mode="types",
+            variant_params={},
+            variant_ddl="""
+CREATE TABLE bench_tmp.messages__bench__bench_var__0002
+(
+    `msg` LowCardinality(String)
+)
+ENGINE = MergeTree
+ORDER BY msg
+""",
+            max_iterations=1,
+            insert_rows_limit=1000,
+            query_plan=QueryPlanPayload(
+                test_queries=["SELECT count() FROM `bench_tmp`.`messages__bench__bench_var__0002`"],
+            ),
+            source_benchmark={
+                "source_table_ddl": VALID_SOURCE_DDL,
+                "metrics": {
+                    "total_n_rows_in_source_table": 300,
+                    "source_table_insert_time_ms_measurements_percentiles": [100.0],
+                    "source_table_select_time_ms_measurements_percentiles": [50.0],
+                    "source_table_consumed_compressed_size_bytes_overall": 400.0,
+                    "source_table_consumed_compressed_size_bytes_by_each_column": {
+                        "msg": {
+                            "name": "msg",
+                            "datatype": "String",
+                            "size_compressed_bytes": 400,
+                            "size_compressed_bytes_readable": "400 B",
+                        }
+                    },
+                    "source_table_select_test_query": "SELECT count() FROM source_messages",
+                },
+            },
+            measured_percentiles=[100],
+        )
+
+        with patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks._ClickHouseRuntimeClient",
+            return_value=fake_client,
+        ), patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks.ClickHouseBenchmarkResultStore",
+            return_value=fake_store,
+        ):
+            result = run_variant_benchmark(payload)
+
+        # Берём сумму по колонкам (200), а не слишком маленький total из system.parts (10).
+        self.assertEqual(result.tested_table_consumed_compressed_size_bytes_overall, 200.0)
+        # С индексами: 200 + 50.
+        self.assertEqual(result.tested_table_consumed_compressed_size_bytes_with_indexes, 250.0)
+        self.assertEqual(
+            result.tested_table_consumed_compressed_size_bytes_with_indexes_readable,
+            make_readable_bytes(250.0),
+        )
 
     def test_run_variant_benchmark_forces_score_minus_one_when_compression_by_column_empty(self) -> None:
         fake_client = _FakeRuntimeClient(
@@ -2216,7 +2258,6 @@ ORDER BY msg
         self.assertEqual(error_metrics["read_bytes"], -1.0)
         self.assertEqual(error_metrics["written_rows"], -1.0)
         self.assertEqual(error_metrics["written_bytes"], -1.0)
-        self.assertEqual(error_metrics["memory_usage"], -1.0)
 
         self.assertEqual(_rows_per_second(-1.0, -1.0), -1.0)
         self.assertEqual(_bytes_per_second(-1.0, -1.0), -1.0)

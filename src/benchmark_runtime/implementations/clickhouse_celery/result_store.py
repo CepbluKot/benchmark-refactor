@@ -55,6 +55,50 @@ class ClickHouseConnectionParams(BaseModel):
 class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
     """Хранилище результатов в ClickHouse с поддержкой top-N для sequential stage2."""
 
+    _LEGACY_DUPLICATE_SIZE_COLUMNS: tuple[str, ...] = (
+        "tested_table_total_size_bytes_with_indexes",
+        "tested_table_total_size_bytes_with_indexes_readable",
+    )
+
+    _LEGACY_MEMORY_COLUMNS: tuple[str, ...] = (
+        "tested_table_insert_memory_usage_measurements",
+        "source_table_insert_memory_usage_measurements",
+        "tested_table_insert_memory_usage_measurements_percentiles",
+        "source_table_insert_memory_usage_measurements_percentiles",
+        "tested_table_select_memory_usage_measurements",
+        "source_table_select_memory_usage_measurements",
+        "tested_table_select_memory_usage_measurements_percentiles",
+        "source_table_select_memory_usage_measurements_percentiles",
+        "tested_table_insert_memory_usage_measurements_readable",
+        "source_table_insert_memory_usage_measurements_readable",
+        "tested_table_insert_memory_usage_measurements_percentiles_readable",
+        "source_table_insert_memory_usage_measurements_percentiles_readable",
+        "tested_table_select_memory_usage_measurements_readable",
+        "source_table_select_memory_usage_measurements_readable",
+        "tested_table_select_memory_usage_measurements_percentiles_readable",
+        "source_table_select_memory_usage_measurements_percentiles_readable",
+    )
+
+    _LEGACY_SELECT_AGGREGATE_COLUMNS: tuple[str, ...] = (
+        "tested_table_select_time_ms_measurements",
+        "source_table_select_time_ms_measurements",
+        "tested_table_select_time_ms_measurements_percentiles",
+        "source_table_select_time_ms_measurements_percentiles",
+        "tested_table_select_time_ms_measurements_percentiles_speed_up_coefs",
+        "tested_table_select_rows_per_second_measurements",
+        "source_table_select_rows_per_second_measurements",
+        "tested_table_select_rows_per_second_measurements_percentiles",
+        "source_table_select_rows_per_second_measurements_percentiles",
+        "tested_table_select_bytes_per_second_measurements",
+        "tested_table_select_bytes_per_second_measurements_readable",
+        "source_table_select_bytes_per_second_measurements",
+        "source_table_select_bytes_per_second_measurements_readable",
+        "tested_table_select_bytes_per_second_measurements_percentiles",
+        "tested_table_select_bytes_per_second_measurements_percentiles_readable",
+        "source_table_select_bytes_per_second_measurements_percentiles",
+        "source_table_select_bytes_per_second_measurements_percentiles_readable",
+    )
+
     _INSERT_COLUMNS: list[str] = [
         "benchmark_run_id",
         "benchmark_started_at",
@@ -87,41 +131,10 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_insert_bytes_per_second_measurements_percentiles_readable",
         "source_table_insert_bytes_per_second_measurements_percentiles",
         "source_table_insert_bytes_per_second_measurements_percentiles_readable",
-        "tested_table_insert_memory_usage_measurements",
-        "tested_table_insert_memory_usage_measurements_readable",
-        "source_table_insert_memory_usage_measurements",
-        "source_table_insert_memory_usage_measurements_readable",
-        "tested_table_insert_memory_usage_measurements_percentiles",
-        "tested_table_insert_memory_usage_measurements_percentiles_readable",
-        "source_table_insert_memory_usage_measurements_percentiles",
-        "source_table_insert_memory_usage_measurements_percentiles_readable",
+        "tested_table_insert_metrics_json",
+        "source_table_insert_metrics_json",
         "tested_table_select_test_query",
         "source_table_select_test_query",
-        "tested_table_select_time_ms_measurements",
-        "source_table_select_time_ms_measurements",
-        "tested_table_select_time_ms_measurements_percentiles",
-        "source_table_select_time_ms_measurements_percentiles",
-        "tested_table_select_time_ms_measurements_percentiles_speed_up_coefs",
-        "tested_table_select_rows_per_second_measurements",
-        "source_table_select_rows_per_second_measurements",
-        "tested_table_select_rows_per_second_measurements_percentiles",
-        "source_table_select_rows_per_second_measurements_percentiles",
-        "tested_table_select_bytes_per_second_measurements",
-        "tested_table_select_bytes_per_second_measurements_readable",
-        "source_table_select_bytes_per_second_measurements",
-        "source_table_select_bytes_per_second_measurements_readable",
-        "tested_table_select_bytes_per_second_measurements_percentiles",
-        "tested_table_select_bytes_per_second_measurements_percentiles_readable",
-        "source_table_select_bytes_per_second_measurements_percentiles",
-        "source_table_select_bytes_per_second_measurements_percentiles_readable",
-        "tested_table_select_memory_usage_measurements",
-        "tested_table_select_memory_usage_measurements_readable",
-        "source_table_select_memory_usage_measurements",
-        "source_table_select_memory_usage_measurements_readable",
-        "tested_table_select_memory_usage_measurements_percentiles",
-        "tested_table_select_memory_usage_measurements_percentiles_readable",
-        "source_table_select_memory_usage_measurements_percentiles",
-        "source_table_select_memory_usage_measurements_percentiles_readable",
         "tested_table_select_metrics_by_query_json",
         "source_table_select_metrics_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
@@ -152,6 +165,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_select_metrics_by_query_json",
         "source_table_select_metrics_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
+        "tested_table_insert_metrics_json",
+        "source_table_insert_metrics_json",
         "tested_table_consumed_compressed_size_bytes_by_each_column",
         "source_table_consumed_compressed_size_bytes_by_each_column",
         "tested_table_compression_by_each_column_coef",
@@ -247,41 +262,10 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `tested_table_insert_bytes_per_second_measurements_percentiles_readable` Array(String),
                 `source_table_insert_bytes_per_second_measurements_percentiles` Array(Float64),
                 `source_table_insert_bytes_per_second_measurements_percentiles_readable` Array(String),
-                `tested_table_insert_memory_usage_measurements` Array(Float64),
-                `tested_table_insert_memory_usage_measurements_readable` Array(String),
-                `source_table_insert_memory_usage_measurements` Array(Float64),
-                `source_table_insert_memory_usage_measurements_readable` Array(String),
-                `tested_table_insert_memory_usage_measurements_percentiles` Array(Float64),
-                `tested_table_insert_memory_usage_measurements_percentiles_readable` Array(String),
-                `source_table_insert_memory_usage_measurements_percentiles` Array(Float64),
-                `source_table_insert_memory_usage_measurements_percentiles_readable` Array(String),
+                `tested_table_insert_metrics_json` Nullable(String),
+                `source_table_insert_metrics_json` Nullable(String),
                 `tested_table_select_test_query` Nullable(String),
                 `source_table_select_test_query` Nullable(String),
-                `tested_table_select_time_ms_measurements` Array(Float64),
-                `source_table_select_time_ms_measurements` Array(Float64),
-                `tested_table_select_time_ms_measurements_percentiles` Array(Float64),
-                `source_table_select_time_ms_measurements_percentiles` Array(Float64),
-                `tested_table_select_time_ms_measurements_percentiles_speed_up_coefs` Array(Float64),
-                `tested_table_select_rows_per_second_measurements` Array(Float64),
-                `source_table_select_rows_per_second_measurements` Array(Float64),
-                `tested_table_select_rows_per_second_measurements_percentiles` Array(Float64),
-                `source_table_select_rows_per_second_measurements_percentiles` Array(Float64),
-                `tested_table_select_bytes_per_second_measurements` Array(Float64),
-                `tested_table_select_bytes_per_second_measurements_readable` Array(String),
-                `source_table_select_bytes_per_second_measurements` Array(Float64),
-                `source_table_select_bytes_per_second_measurements_readable` Array(String),
-                `tested_table_select_bytes_per_second_measurements_percentiles` Array(Float64),
-                `tested_table_select_bytes_per_second_measurements_percentiles_readable` Array(String),
-                `source_table_select_bytes_per_second_measurements_percentiles` Array(Float64),
-                `source_table_select_bytes_per_second_measurements_percentiles_readable` Array(String),
-                `tested_table_select_memory_usage_measurements` Array(Float64),
-                `tested_table_select_memory_usage_measurements_readable` Array(String),
-                `source_table_select_memory_usage_measurements` Array(Float64),
-                `source_table_select_memory_usage_measurements_readable` Array(String),
-                `tested_table_select_memory_usage_measurements_percentiles` Array(Float64),
-                `tested_table_select_memory_usage_measurements_percentiles_readable` Array(String),
-                `source_table_select_memory_usage_measurements_percentiles` Array(Float64),
-                `source_table_select_memory_usage_measurements_percentiles_readable` Array(String),
                 `tested_table_select_metrics_by_query_json` Nullable(String),
                 `source_table_select_metrics_by_query_json` Nullable(String),
                 `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json` Nullable(String),
@@ -319,27 +303,38 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `tested_table_select_metrics_by_query_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `source_table_select_metrics_by_query_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json` Nullable(String),
-                ADD COLUMN IF NOT EXISTS `tested_table_insert_memory_usage_measurements` Array(Float64),
-                ADD COLUMN IF NOT EXISTS `tested_table_insert_memory_usage_measurements_readable` Array(String),
-                ADD COLUMN IF NOT EXISTS `source_table_insert_memory_usage_measurements` Array(Float64),
-                ADD COLUMN IF NOT EXISTS `source_table_insert_memory_usage_measurements_readable` Array(String),
-                ADD COLUMN IF NOT EXISTS `tested_table_insert_memory_usage_measurements_percentiles` Array(Float64),
-                ADD COLUMN IF NOT EXISTS `tested_table_insert_memory_usage_measurements_percentiles_readable` Array(String),
-                ADD COLUMN IF NOT EXISTS `source_table_insert_memory_usage_measurements_percentiles` Array(Float64),
-                ADD COLUMN IF NOT EXISTS `source_table_insert_memory_usage_measurements_percentiles_readable` Array(String),
-                ADD COLUMN IF NOT EXISTS `tested_table_select_memory_usage_measurements` Array(Float64),
-                ADD COLUMN IF NOT EXISTS `tested_table_select_memory_usage_measurements_readable` Array(String),
-                ADD COLUMN IF NOT EXISTS `source_table_select_memory_usage_measurements` Array(Float64),
-                ADD COLUMN IF NOT EXISTS `source_table_select_memory_usage_measurements_readable` Array(String),
-                ADD COLUMN IF NOT EXISTS `tested_table_select_memory_usage_measurements_percentiles` Array(Float64),
-                ADD COLUMN IF NOT EXISTS `tested_table_select_memory_usage_measurements_percentiles_readable` Array(String),
-                ADD COLUMN IF NOT EXISTS `source_table_select_memory_usage_measurements_percentiles` Array(Float64),
-                ADD COLUMN IF NOT EXISTS `source_table_select_memory_usage_measurements_percentiles_readable` Array(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_insert_metrics_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `source_table_insert_metrics_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes` Nullable(Float64),
                 ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes_readable` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `score_calculation_json` Nullable(String)
             """
         )
+        # Удаляем дублирующие legacy-поля размеров (дублируют consumed_compressed_*_with_indexes).
+        for column_name in self._LEGACY_DUPLICATE_SIZE_COLUMNS:
+            self._execute(
+                f"""
+                ALTER TABLE `{self._database}`.`{self._table}`
+                    DROP COLUMN IF EXISTS `{column_name}`
+                """
+            )
+        # Удаляем legacy-агрегаты SELECT из старой схемы:
+        # теперь per-query метрики хранятся только в *_by_query_json.
+        for column_name in self._LEGACY_SELECT_AGGREGATE_COLUMNS:
+            self._execute(
+                f"""
+                ALTER TABLE `{self._database}`.`{self._table}`
+                    DROP COLUMN IF EXISTS `{column_name}`
+                """
+            )
+        # Удаляем legacy memory-колонки (раньше были отдельными полями в таблице).
+        for column_name in self._LEGACY_MEMORY_COLUMNS:
+            self._execute(
+                f"""
+                ALTER TABLE `{self._database}`.`{self._table}`
+                    DROP COLUMN IF EXISTS `{column_name}`
+                """
+            )
 
     def store_result(
         self,
@@ -555,107 +550,62 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             source_table_insert_bytes_per_second_measurements_percentiles_readable=list(
                 result.source_table_insert_bytes_per_second_measurements_percentiles_readable
             ),
-            tested_table_insert_memory_usage_measurements=list(
-                result.tested_table_insert_memory_usage_measurements
+            tested_table_insert_metrics_json=(
+                result.tested_table_insert_metrics_json
+                or self._build_insert_metrics_json(
+                    time_ms_measurements=result.tested_table_insert_time_ms_measurements,
+                    time_ms_percentiles=result.tested_table_insert_time_ms_measurements_percentiles,
+                    time_ms_speedup_percentiles=(
+                        result.tested_table_insert_time_ms_measurements_percentiles_speed_up_coefs
+                    ),
+                    rows_per_second_measurements=(
+                        result.tested_table_insert_rows_per_second_measurements
+                    ),
+                    rows_per_second_percentiles=(
+                        result.tested_table_insert_rows_per_second_measurements_percentiles
+                    ),
+                    bytes_per_second_measurements=(
+                        result.tested_table_insert_bytes_per_second_measurements
+                    ),
+                    bytes_per_second_measurements_readable=(
+                        result.tested_table_insert_bytes_per_second_measurements_readable
+                    ),
+                    bytes_per_second_percentiles=(
+                        result.tested_table_insert_bytes_per_second_measurements_percentiles
+                    ),
+                    bytes_per_second_percentiles_readable=(
+                        result.tested_table_insert_bytes_per_second_measurements_percentiles_readable
+                    ),
+                )
             ),
-            tested_table_insert_memory_usage_measurements_readable=list(
-                result.tested_table_insert_memory_usage_measurements_readable
-            ),
-            source_table_insert_memory_usage_measurements=list(
-                result.source_table_insert_memory_usage_measurements
-            ),
-            source_table_insert_memory_usage_measurements_readable=list(
-                result.source_table_insert_memory_usage_measurements_readable
-            ),
-            tested_table_insert_memory_usage_measurements_percentiles=list(
-                result.tested_table_insert_memory_usage_measurements_percentiles
-            ),
-            tested_table_insert_memory_usage_measurements_percentiles_readable=list(
-                result.tested_table_insert_memory_usage_measurements_percentiles_readable
-            ),
-            source_table_insert_memory_usage_measurements_percentiles=list(
-                result.source_table_insert_memory_usage_measurements_percentiles
-            ),
-            source_table_insert_memory_usage_measurements_percentiles_readable=list(
-                result.source_table_insert_memory_usage_measurements_percentiles_readable
+            source_table_insert_metrics_json=(
+                result.source_table_insert_metrics_json
+                or self._build_insert_metrics_json(
+                    time_ms_measurements=result.source_table_insert_time_ms_measurements,
+                    time_ms_percentiles=result.source_table_insert_time_ms_measurements_percentiles,
+                    time_ms_speedup_percentiles=[],
+                    rows_per_second_measurements=(
+                        result.source_table_insert_rows_per_second_measurements
+                    ),
+                    rows_per_second_percentiles=(
+                        result.source_table_insert_rows_per_second_measurements_percentiles
+                    ),
+                    bytes_per_second_measurements=(
+                        result.source_table_insert_bytes_per_second_measurements
+                    ),
+                    bytes_per_second_measurements_readable=(
+                        result.source_table_insert_bytes_per_second_measurements_readable
+                    ),
+                    bytes_per_second_percentiles=(
+                        result.source_table_insert_bytes_per_second_measurements_percentiles
+                    ),
+                    bytes_per_second_percentiles_readable=(
+                        result.source_table_insert_bytes_per_second_measurements_percentiles_readable
+                    ),
+                )
             ),
             tested_table_select_test_query=result.tested_table_select_test_query,
             source_table_select_test_query=result.source_table_select_test_query,
-            tested_table_select_time_ms_measurements=list(
-                result.tested_table_select_time_ms_measurements
-            ),
-            source_table_select_time_ms_measurements=list(
-                result.source_table_select_time_ms_measurements
-            ),
-            tested_table_select_time_ms_measurements_percentiles=list(
-                result.tested_table_select_time_ms_measurements_percentiles
-            ),
-            source_table_select_time_ms_measurements_percentiles=list(
-                result.source_table_select_time_ms_measurements_percentiles
-            ),
-            tested_table_select_time_ms_measurements_percentiles_speed_up_coefs=list(
-                result.tested_table_select_time_ms_measurements_percentiles_speed_up_coefs
-            ),
-            tested_table_select_rows_per_second_measurements=list(
-                result.tested_table_select_rows_per_second_measurements
-            ),
-            source_table_select_rows_per_second_measurements=list(
-                result.source_table_select_rows_per_second_measurements
-            ),
-            tested_table_select_rows_per_second_measurements_percentiles=list(
-                result.tested_table_select_rows_per_second_measurements_percentiles
-            ),
-            source_table_select_rows_per_second_measurements_percentiles=list(
-                result.source_table_select_rows_per_second_measurements_percentiles
-            ),
-            tested_table_select_bytes_per_second_measurements=list(
-                result.tested_table_select_bytes_per_second_measurements
-            ),
-            tested_table_select_bytes_per_second_measurements_readable=list(
-                result.tested_table_select_bytes_per_second_measurements_readable
-            ),
-            source_table_select_bytes_per_second_measurements=list(
-                result.source_table_select_bytes_per_second_measurements
-            ),
-            source_table_select_bytes_per_second_measurements_readable=list(
-                result.source_table_select_bytes_per_second_measurements_readable
-            ),
-            tested_table_select_bytes_per_second_measurements_percentiles=list(
-                result.tested_table_select_bytes_per_second_measurements_percentiles
-            ),
-            tested_table_select_bytes_per_second_measurements_percentiles_readable=list(
-                result.tested_table_select_bytes_per_second_measurements_percentiles_readable
-            ),
-            source_table_select_bytes_per_second_measurements_percentiles=list(
-                result.source_table_select_bytes_per_second_measurements_percentiles
-            ),
-            source_table_select_bytes_per_second_measurements_percentiles_readable=list(
-                result.source_table_select_bytes_per_second_measurements_percentiles_readable
-            ),
-            tested_table_select_memory_usage_measurements=list(
-                result.tested_table_select_memory_usage_measurements
-            ),
-            tested_table_select_memory_usage_measurements_readable=list(
-                result.tested_table_select_memory_usage_measurements_readable
-            ),
-            source_table_select_memory_usage_measurements=list(
-                result.source_table_select_memory_usage_measurements
-            ),
-            source_table_select_memory_usage_measurements_readable=list(
-                result.source_table_select_memory_usage_measurements_readable
-            ),
-            tested_table_select_memory_usage_measurements_percentiles=list(
-                result.tested_table_select_memory_usage_measurements_percentiles
-            ),
-            tested_table_select_memory_usage_measurements_percentiles_readable=list(
-                result.tested_table_select_memory_usage_measurements_percentiles_readable
-            ),
-            source_table_select_memory_usage_measurements_percentiles=list(
-                result.source_table_select_memory_usage_measurements_percentiles
-            ),
-            source_table_select_memory_usage_measurements_percentiles_readable=list(
-                result.source_table_select_memory_usage_measurements_percentiles_readable
-            ),
             # Храним per-query summary в основной таблице как JSON-map:
             #   query_id -> per-query metrics.
             tested_table_select_metrics_by_query_json=self._to_query_keyed_json_map(
@@ -762,6 +712,46 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
 
         return json.dumps(
             query_map,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+
+    @classmethod
+    def _build_insert_metrics_json(
+        cls,
+        *,
+        time_ms_measurements: List[float],
+        time_ms_percentiles: List[float],
+        time_ms_speedup_percentiles: List[float],
+        rows_per_second_measurements: List[float],
+        rows_per_second_percentiles: List[float],
+        bytes_per_second_measurements: List[float],
+        bytes_per_second_measurements_readable: List[str],
+        bytes_per_second_percentiles: List[float],
+        bytes_per_second_percentiles_readable: List[str],
+    ) -> Optional[str]:
+        """Собирает компактный JSON-снимок insert-метрик."""
+        payload = {
+            "insert_main": {
+                "time_ms_measurements": list(time_ms_measurements),
+                "time_ms_percentiles": list(time_ms_percentiles),
+                "time_ms_percentiles_speed_up_coefs": list(time_ms_speedup_percentiles),
+                "rows_per_second_measurements": list(rows_per_second_measurements),
+                "rows_per_second_percentiles": list(rows_per_second_percentiles),
+                "bytes_per_second_measurements": list(bytes_per_second_measurements),
+                "bytes_per_second_measurements_readable": list(
+                    bytes_per_second_measurements_readable
+                ),
+                "bytes_per_second_percentiles": list(bytes_per_second_percentiles),
+                "bytes_per_second_percentiles_readable": list(
+                    bytes_per_second_percentiles_readable
+                ),
+            }
+        }
+        return json.dumps(
+            payload,
             ensure_ascii=False,
             indent=2,
             sort_keys=True,

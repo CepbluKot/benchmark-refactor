@@ -46,9 +46,19 @@ class TaskMonitorCelery:
     задач не будут приходить в monitor.
     """
 
-    def __init__(self, app: Any, benchmark_name: str = "") -> None:
+    def __init__(
+        self,
+        app: Any,
+        benchmark_name: str = "",
+        *,
+        progress_position: int = 0,
+        progress_leave: bool = False,
+        fixed_total: Optional[int] = None,
+    ) -> None:
         self.app = app
         self.benchmark_name = benchmark_name
+        self._fixed_total_mode = fixed_total is not None
+        initial_total = max(0, int(fixed_total or 0))
 
         try:
             # Используем тот же адаптер прогресс-бара, что и в legacy:
@@ -61,16 +71,19 @@ class TaskMonitorCelery:
             self.pbar = _NoopProgressBar(desc=f"{benchmark_name} tasks")
         else:
             self.pbar: Any = tqdm(
-                total=0,
+                total=initial_total,
                 desc=f"{benchmark_name} tasks",
                 unit="task",
                 dynamic_ncols=True,
                 file=sys.stdout,
+                position=max(0, int(progress_position)),
+                leave=bool(progress_leave),
             )
 
         self.pbar_lock = Lock()
         self._cond = Condition(self.pbar_lock)
-        self.total_n_tests = 0
+        self.total_n_tests = initial_total
+        self.sent_n_tests = 0
         self.succeeded = 0
         self.failed = 0
         self._task_ids: set[str] = set()
@@ -119,8 +132,17 @@ class TaskMonitorCelery:
 
     def _inc_n_tests_sent(self, n_tests: int = 1) -> None:
         with self._cond:
-            self.total_n_tests += n_tests
-            self.pbar.total = self.total_n_tests
+            self.sent_n_tests += n_tests
+            if not self._fixed_total_mode:
+                self.total_n_tests += n_tests
+                self.pbar.total = self.total_n_tests
+            elif self.sent_n_tests > self.total_n_tests:
+                logger.warning(
+                    "TaskMonitorCelery: sent tasks (%d) превысили fixed_total (%d), "
+                    "но fixed target не меняем",
+                    self.sent_n_tests,
+                    self.total_n_tests,
+                )
             self.pbar.set_description(
                 f"{datetime.now():%Y-%m-%d %H:%M:%S} {self.benchmark_name} tasks"
             )
@@ -139,7 +161,8 @@ class TaskMonitorCelery:
             self.pbar.update(1)
             self.pbar.set_postfix(
                 {
-                    "sent": self.total_n_tests,
+                    "sent": self.sent_n_tests,
+                    "target": self.total_n_tests,
                     "succ": self.succeeded,
                     "fail": self.failed,
                 }
@@ -148,7 +171,7 @@ class TaskMonitorCelery:
             self._cond.notify_all()
 
     def _all_done_pred(self) -> bool:
-        return self.all_sent and ((self.succeeded + self.failed) >= self.total_n_tests)
+        return self.all_sent and ((self.succeeded + self.failed) >= self.sent_n_tests)
 
     def _on_task_succeeded(self, event: dict[str, Any]) -> None:
         task_id = event.get("uuid") or event.get("task_id") or event.get("id")

@@ -123,6 +123,8 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
 
         self.assertIn("tested_table_select_metrics_by_query_json", columns)
         self.assertIn("source_table_select_metrics_by_query_json", columns)
+        self.assertIn("tested_table_insert_metrics_json", columns)
+        self.assertIn("source_table_insert_metrics_json", columns)
         self.assertIn("score_calculation_json", columns)
         self.assertIn(
             "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
@@ -143,9 +145,17 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             row_by_column["tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json"]
             or "{}"
         )
+        tested_insert_metrics_json = json.loads(
+            row_by_column["tested_table_insert_metrics_json"] or "{}"
+        )
+        source_insert_metrics_json = json.loads(
+            row_by_column["source_table_insert_metrics_json"] or "{}"
+        )
         self.assertIn("query_0", tested_per_query_json)
         self.assertIn("query_0", source_per_query_json)
         self.assertIn("query_0", speedup_per_query_json)
+        self.assertIn("insert_main", tested_insert_metrics_json)
+        self.assertIn("insert_main", source_insert_metrics_json)
         self.assertEqual(
             tested_per_query_json["query_0"]["elapsed_ms_measurements"],
             [10, 20],
