@@ -1,0 +1,13 @@
+{
+  "connections": [
+    {
+      "id": "prod_ch_dm_core_logs_adqm",
+      "dbms": "clickhouse",
+      "credential_type": "password",
+      "host": "localhost",
+      "port": 8123,
+      "login": "default1",
+      "password": "1"
+    }
+  ]
+}
