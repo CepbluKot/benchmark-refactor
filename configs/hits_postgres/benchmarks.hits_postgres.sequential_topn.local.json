@@ -12,7 +12,6 @@
       ],
       "tables": {
         "default": [
-          "hits_postgres",
           "messages"
         ]
       },
@@ -44,7 +43,7 @@
             "auto_generate_alternatives": true,
             "auto_compressions_datatype": "String",
             "types": [
-              "String"
+              "String", "LowCardinality(String)"
             ]
           }
         ],
@@ -54,57 +53,6 @@
             "by_type": "Int32",
             "auto_generate_indexes": true,
             "indexes": [
-              {
-                "type": "set(512)",
-                "granularity": 2,
-                "index_granularity_values": [
-                  8192,
-                  16384
-                ]
-              },
-              {
-                "type": "bloom_filter(0.01)",
-                "granularity": 2,
-                "index_granularity_values": [
-                  8192
-                ]
-              }
-            ]
-          },
-          {
-            "by_name": "country",
-            "by_type": "String",
-            "auto_generate_indexes": true,
-            "indexes": [
-              {
-                "type": "set(128)",
-                "granularity": 2,
-                "index_granularity_values": [
-                  16384
-                ]
-              },
-              {
-                "type": "bloom_filter(0.01)",
-                "granularity": 2,
-                "index_granularity_values": [
-                  8192,
-                  16384
-                ]
-              }
-            ]
-          },
-          {
-            "by_name": "device_type",
-            "by_type": "String",
-            "auto_generate_indexes": true,
-            "indexes": [
-              {
-                "type": "ngrambf_v1(3, 256, 2, 0)",
-                "granularity": 2,
-                "index_granularity_values": [
-                  8192
-                ]
-              }
             ]
           }
         ]
@@ -117,7 +65,7 @@
             "index_rules": [
               {
                 "by_name": "msg",
-                "by_type": "String",
+                "by_type": "LowCardinality(String)",
                 "indexes": [
                   {
                     "type": "ngrambf_v1(3, 256, 2, 0)",
