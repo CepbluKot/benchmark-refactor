@@ -52,9 +52,9 @@ _DANGEROUS_INPUT_KEYWORDS = (
 )
 _READ_ONLY_SQL_PREFIXES = ("select", "with", "show", "describe", "desc", "explain")
 _BASELINE_TABLE_MARKER = "__source_baseline__"
-_COLD_SELECT_CACHE_DROP_QUERIES = (
-    "SYSTEM DROP MARK CACHE",
-    "SYSTEM DROP UNCOMPRESSED CACHE",
+_COLD_SELECT_SETTINGS_ASSIGNMENTS = (
+    "use_uncompressed_cache = 0",
+    "use_index_marks_cache = 0",
 )
 
 
@@ -91,6 +91,278 @@ def _strip_leading_sql_comments(query: str) -> str:
             break
         stripped = stripped[end_pos + 2 :].lstrip()
     return stripped
+
+
+def _is_identifier_char(ch: str) -> bool:
+    """Проверяет, что символ может быть частью SQL-идентификатора."""
+    return ch.isalnum() or ch == "_"
+
+
+def _skip_sql_line_comment(text: str, i: int) -> int:
+    """Сдвигает позицию в конец SQL line-comment `-- ...`."""
+    i += 2
+    while i < len(text) and text[i] != "\n":
+        i += 1
+    return i
+
+
+def _skip_sql_block_comment(text: str, i: int) -> int:
+    """Сдвигает позицию после SQL block-comment `/* ... */`."""
+    i += 2
+    while i + 1 < len(text):
+        if text[i] == "*" and text[i + 1] == "/":
+            return i + 2
+        i += 1
+    return len(text)
+
+
+def _find_top_level_keyword_pos(sql: str, keyword: str, *, start: int = 0) -> int:
+    """
+    Возвращает позицию keyword на верхнем уровне SQL (вне строк/скобок/комментариев).
+
+    Если keyword не найден, возвращает `-1`.
+    """
+    if not keyword:
+        return -1
+    needle = keyword.upper()
+    nlen = len(needle)
+    depth = 0
+    quote: Optional[str] = None
+    i = max(0, int(start))
+    while i < len(sql):
+        ch = sql[i]
+        if quote is not None:
+            if ch == quote:
+                if i + 1 < len(sql) and sql[i + 1] == quote:
+                    i += 2
+                    continue
+                if i > 0 and sql[i - 1] == "\\":
+                    i += 1
+                    continue
+                quote = None
+            i += 1
+            continue
+
+        if ch in ("'", '"', "`"):
+            quote = ch
+            i += 1
+            continue
+
+        if ch == "-" and i + 1 < len(sql) and sql[i + 1] == "-":
+            i = _skip_sql_line_comment(sql, i)
+            continue
+        if ch == "/" and i + 1 < len(sql) and sql[i + 1] == "*":
+            i = _skip_sql_block_comment(sql, i)
+            continue
+
+        if ch == "(":
+            depth += 1
+            i += 1
+            continue
+        if ch == ")" and depth > 0:
+            depth -= 1
+            i += 1
+            continue
+
+        if depth == 0 and sql[i : i + nlen].upper() == needle:
+            prev_ok = i == 0 or not _is_identifier_char(sql[i - 1])
+            next_pos = i + nlen
+            next_ok = next_pos >= len(sql) or not _is_identifier_char(sql[next_pos])
+            if prev_ok and next_ok:
+                return i
+
+        i += 1
+    return -1
+
+
+def _split_top_level_commas_sql(text: str) -> List[str]:
+    """Разбивает SQL-фрагмент по top-level запятым (вне строк/скобок/комментариев)."""
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    quote: Optional[str] = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote is not None:
+            buf.append(ch)
+            if ch == quote:
+                if i + 1 < len(text) and text[i + 1] == quote:
+                    buf.append(text[i + 1])
+                    i += 2
+                    continue
+                if i > 0 and text[i - 1] == "\\":
+                    i += 1
+                    continue
+                quote = None
+            i += 1
+            continue
+
+        if ch in ("'", '"', "`"):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == "-" and i + 1 < len(text) and text[i + 1] == "-":
+            i = _skip_sql_line_comment(text, i)
+            continue
+        if ch == "/" and i + 1 < len(text) and text[i + 1] == "*":
+            i = _skip_sql_block_comment(text, i)
+            continue
+
+        if ch == "(":
+            depth += 1
+        elif ch == ")" and depth > 0:
+            depth -= 1
+
+        if ch == "," and depth == 0:
+            chunk = "".join(buf).strip()
+            if chunk:
+                parts.append(chunk)
+            buf = []
+            i += 1
+            continue
+
+        buf.append(ch)
+        i += 1
+
+    chunk = "".join(buf).strip()
+    if chunk:
+        parts.append(chunk)
+    return parts
+
+
+def _find_top_level_trailing_comment_span(sql: str) -> Optional[tuple[int, int]]:
+    """
+    Ищет trailing top-level комментарий в конце SQL (`-- ...` или `/* ... */`).
+
+    Возвращает `(start, end)` если комментарий находится в хвосте запроса
+    (после него только пробелы), иначе `None`.
+    """
+    depth = 0
+    quote: Optional[str] = None
+    comment_spans: list[tuple[int, int]] = []
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if quote is not None:
+            if ch == quote:
+                if i + 1 < len(sql) and sql[i + 1] == quote:
+                    i += 2
+                    continue
+                if i > 0 and sql[i - 1] == "\\":
+                    i += 1
+                    continue
+                quote = None
+            i += 1
+            continue
+
+        if ch in ("'", '"', "`"):
+            quote = ch
+            i += 1
+            continue
+
+        if ch == "(":
+            depth += 1
+            i += 1
+            continue
+        if ch == ")" and depth > 0:
+            depth -= 1
+            i += 1
+            continue
+
+        if depth == 0 and ch == "-" and i + 1 < len(sql) and sql[i + 1] == "-":
+            start = i
+            end = _skip_sql_line_comment(sql, i)
+            comment_spans.append((start, end))
+            i = end
+            continue
+        if depth == 0 and ch == "/" and i + 1 < len(sql) and sql[i + 1] == "*":
+            start = i
+            end = _skip_sql_block_comment(sql, i)
+            comment_spans.append((start, end))
+            i = end
+            continue
+
+        i += 1
+
+    for start, end in reversed(comment_spans):
+        if sql[end:].strip():
+            continue
+        if sql[:start].strip():
+            return (start, end)
+    return None
+
+
+def _with_cold_select_settings(query: str) -> str:
+    """
+    Возвращает SELECT query c отключёнными cache-настройками через `SETTINGS`.
+
+    Формирует/обновляет только два ключа:
+      - use_uncompressed_cache = 0
+      - use_index_marks_cache = 0
+    """
+    normalized = query.rstrip()
+    while normalized.endswith(";"):
+        normalized = normalized[:-1].rstrip()
+
+    if not normalized:
+        return normalized
+
+    trailing_comment = ""
+    trailing_comment_span = _find_top_level_trailing_comment_span(normalized)
+    if trailing_comment_span is not None:
+        start, _ = trailing_comment_span
+        trailing_comment = normalized[start:].strip()
+        normalized = normalized[:start].rstrip()
+
+    if not normalized:
+        return trailing_comment
+
+    required_settings = list(_COLD_SELECT_SETTINGS_ASSIGNMENTS)
+
+    settings_pos = _find_top_level_keyword_pos(normalized, "SETTINGS")
+    format_pos = _find_top_level_keyword_pos(normalized, "FORMAT")
+    rewritten = ""
+    if settings_pos < 0:
+        if format_pos >= 0:
+            before = normalized[:format_pos].rstrip()
+            after = normalized[format_pos:].lstrip()
+            rewritten = f"{before} SETTINGS {', '.join(required_settings)} {after}"
+        else:
+            rewritten = f"{normalized} SETTINGS {', '.join(required_settings)}"
+        if trailing_comment:
+            return f"{rewritten} {trailing_comment}"
+        return rewritten
+
+    settings_body_start = settings_pos + len("SETTINGS")
+    settings_body_end = format_pos if format_pos >= 0 and format_pos > settings_pos else len(normalized)
+    settings_body = normalized[settings_body_start:settings_body_end]
+    raw_assignments = _split_top_level_commas_sql(settings_body)
+
+    filtered_assignments: list[str] = []
+    for assignment in raw_assignments:
+        matcher = re.match(r"^\s*`?([A-Za-z_][A-Za-z0-9_]*)`?\s*=", assignment)
+        if matcher is not None:
+            key = matcher.group(1).lower()
+            if key in {"use_uncompressed_cache", "use_index_marks_cache"}:
+                continue
+        filtered_assignments.append(assignment.strip())
+
+    filtered_assignments.extend(required_settings)
+    rebuilt_settings = ", ".join(item for item in filtered_assignments if item)
+
+    before_settings = normalized[:settings_body_start].rstrip()
+    if settings_body_end < len(normalized):
+        after_settings = normalized[settings_body_end:].lstrip()
+        rewritten = f"{before_settings} {rebuilt_settings} {after_settings}"
+    else:
+        rewritten = f"{before_settings} {rebuilt_settings}"
+
+    if trailing_comment:
+        return f"{rewritten} {trailing_comment}"
+    return rewritten
 
 
 def is_safe_input_parameter(param: str) -> bool:
@@ -1607,18 +1879,6 @@ def _measure_insert(
     }
 
 
-def _drop_cold_select_caches(client: _ClickHouseRuntimeClient) -> None:
-    """Сбрасывает кэши ClickHouse перед cold-select замером."""
-    for system_query in _COLD_SELECT_CACHE_DROP_QUERIES:
-        try:
-            client.execute(system_query)
-        except Exception:
-            logger.exception(
-                "Не удалось выполнить `%s` перед cold-select замером",
-                system_query,
-            )
-
-
 def _normalize_select_query_payload(
     query_entry: Any,
     *,
@@ -1684,15 +1944,16 @@ def _measure_select_queries(
                 client.execute_user_read_only_query(warmup_query)
 
         for measurement_id in range(max(1, query_measurements_count)):
+            effective_query = query
             if query_cache_mode == "cold":
-                _drop_cold_select_caches(client)
+                effective_query = _with_cold_select_settings(query)
 
             attempt_n = 0
             sleep_sec = initial_sleep_sec
             query_metrics: Dict[str, float] = _error_query_metrics()
             while True:
                 query_metrics = client.execute_select_with_metrics(
-                    query,
+                    effective_query,
                     query_tag=f"select-{uuid.uuid4().hex}",
                 )
                 if not _is_error_query_metrics(query_metrics):

@@ -14,9 +14,11 @@ from src.benchmark_runtime.implementations.clickhouse_celery.tasks import (
     _ClickHouseRuntimeClient,
     _bytes_per_second,
     _error_query_metrics,
+    _find_top_level_trailing_comment_span,
     _measure_insert,
     _measure_select_queries,
     _rows_per_second,
+    _with_cold_select_settings,
     QueryPayload,
     QueryPlanPayload,
     SourceBenchmarkTaskPayload,
@@ -2581,7 +2583,7 @@ ORDER BY msg
             [10_000.0],
         )
 
-    def test_measure_select_queries_cold_mode_drops_caches_before_each_measurement(self) -> None:
+    def test_measure_select_queries_cold_mode_uses_query_settings_before_each_measurement(self) -> None:
         fake_client = _FakeRuntimeClient(
             query_metrics_sequence=[
                 {
@@ -2615,16 +2617,60 @@ ORDER BY msg
         )
 
         self.assertEqual(len(fake_client.select_with_metrics_calls), 2)
-        self.assertEqual(
-            fake_client.execute_calls.count("SYSTEM DROP MARK CACHE"),
-            2,
-        )
-        self.assertEqual(
-            fake_client.execute_calls.count("SYSTEM DROP UNCOMPRESSED CACHE"),
-            2,
+        self.assertFalse(any(call.startswith("SYSTEM DROP") for call in fake_client.execute_calls))
+        self.assertTrue(
+            all(
+                "SETTINGS use_uncompressed_cache = 0, use_index_marks_cache = 0" in call
+                for call in fake_client.select_with_metrics_calls
+            )
         )
         self.assertEqual(stats["per_query"][0]["select_operations_count"], 2)
         self.assertEqual(stats["per_query"][0]["cache_mode"], "cold")
+
+    def test_with_cold_select_settings_appends_settings_when_missing(self) -> None:
+        query = "SELECT count() FROM t1"
+        rewritten = _with_cold_select_settings(query)
+        self.assertEqual(
+            rewritten,
+            "SELECT count() FROM t1 SETTINGS use_uncompressed_cache = 0, use_index_marks_cache = 0",
+        )
+
+    def test_with_cold_select_settings_updates_existing_settings_and_keeps_format(self) -> None:
+        query = (
+            "SELECT count() FROM t1 "
+            "SETTINGS max_threads = 4, use_uncompressed_cache = 1 "
+            "FORMAT JSONEachRow;"
+        )
+        rewritten = _with_cold_select_settings(query)
+        self.assertIn("SETTINGS", rewritten)
+        self.assertIn("max_threads = 4", rewritten)
+        self.assertIn("use_uncompressed_cache = 0", rewritten)
+        self.assertIn("use_index_marks_cache = 0", rewritten)
+        self.assertNotIn("use_uncompressed_cache = 1", rewritten)
+        self.assertIn("FORMAT JSONEachRow", rewritten)
+
+    def test_with_cold_select_settings_is_idempotent(self) -> None:
+        query = (
+            "SELECT count() FROM t1 "
+            "SETTINGS max_threads = 4, use_uncompressed_cache = 0, use_index_marks_cache = 0"
+        )
+        rewritten_once = _with_cold_select_settings(query)
+        rewritten_twice = _with_cold_select_settings(rewritten_once)
+        self.assertEqual(rewritten_once, rewritten_twice)
+
+    def test_with_cold_select_settings_keeps_trailing_line_comment(self) -> None:
+        query = "SELECT count() FROM t1 -- tail comment"
+        rewritten = _with_cold_select_settings(query)
+        self.assertIn("SETTINGS use_uncompressed_cache = 0, use_index_marks_cache = 0", rewritten)
+        self.assertTrue(rewritten.endswith("-- tail comment"))
+        self.assertIn("SELECT count() FROM t1 SETTINGS", rewritten)
+
+    def test_find_top_level_trailing_comment_span_ignores_comment_tokens_inside_strings(self) -> None:
+        query = "SELECT '--not comment' AS x, 1 AS y -- real tail"
+        span = _find_top_level_trailing_comment_span(query)
+        self.assertIsNotNone(span)
+        start, end = span
+        self.assertEqual(query[start:end], "-- real tail")
 
     def test_measure_select_queries_warm_mode_runs_query_warmups_once(self) -> None:
         fake_client = _FakeRuntimeClient(
