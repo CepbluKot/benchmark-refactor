@@ -85,7 +85,10 @@
                 "indexes": [
                   {
                     "type": "bloom_filter(0.01)",
-                    "granularity": 228,
+                    "granularity": [
+                      228,
+                      256
+                    ],
                     "index_granularity_values": [
                       8192
                     ]

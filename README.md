@@ -254,7 +254,7 @@ Runner не пишет результаты в store. Сохранение вы�
   (типы/кодеки/индексы/прочие параметры); `index_params` оставлен только как legacy nullable-колонка;
 - DDL-снимки: `tested_table_ddl` (как минимум), при наличии `source_table_ddl`;
 - размер таблицы: `tested_table_consumed_compressed_size_bytes_overall`
-  (данные без индексов) и `tested_table_total_size_bytes_with_indexes`
+  (данные без индексов) и `tested_table_consumed_compressed_size_bytes_with_indexes`
   (данные + размеры skip-индексов);
 - метрики combined-схемы (insert/select/compression/indexes) + `extra_json` для расширений;
 - per-query select-метрики хранятся в основной таблице в JSON-полях
@@ -538,20 +538,14 @@ config = load_config("configs/benchmark.project.local.json")
 #### 1) Запусти Celery worker
 
 ```bash
-export RABBITMQ_HOSTNAME='localhost'
-export RABBITMQ_LOGIN='guest'
-export RABBITMQ_PASSWORD='guest'
-export RABBITMQ_PORT='5672'
+export BENCH_CELERY_BROKER_URL='pyamqp://guest:guest@localhost:5672//'
+export BENCH_CELERY_BACKEND_URL='rpc://guest:guest@localhost:5672//'
 export CELERY_WORKER_CONCURRENCY='4'
 export CLICKHOUSE_MANAGER_MAX_CONCURRENT_STREAMS_PER_PROCESS='1'
 export MAX_COPY_N_RETRIES='100'
 export MAX_COPY_RETRY_SLEEP_SEC='10'
 export MAX_COPY_RETRY_SLEEP_SEC_INCREMENT='2'
 # export CLICKHOUSE_STREAM_SLOT_ACQUIRE_TIMEOUT_SEC='5'
-
-# опционально можно переопределить готовыми URL
-# export BENCH_CELERY_BROKER_URL='pyamqp://guest:guest@localhost:5672//'
-# export BENCH_CELERY_BACKEND_URL='rpc://guest:guest@localhost:5672//'
 
 ./venv/bin/celery -A src.benchmark_runtime.implementations.clickhouse_celery.tasks worker -E --loglevel=INFO
 ```
@@ -717,15 +711,21 @@ print(run_id)
   (если не задан, используется `by_type`).
 - `indexes[].index_granularity_values` (`int[]`, optional) — ограничения на
   `SETTINGS index_granularity` именно для этого индекс-варианта.
+- `indexes[].granularity` поддерживает:
+  - одно число (`int`) — один вариант индекса;
+  - массив (`int[]`) — несколько вариантов индекса с разными `GRANULARITY`.
 
 Важно про `auto_generate_indexes`:
 - авто-генерация строится по типовым профилям (numeric/date/string/uuid/ipv/low-cardinality);
 - ручные `indexes` не теряются: они объединяются с авто-сгенерированными значениями;
-- дубли по паре `(type, granularity)` автоматически удаляются.
+- дубли по паре `(type, granularity)` автоматически удаляются
+  (после раскрытия `granularity`-массивов в отдельные варианты).
 - `minmax` автоматически добавляется для range-типов:
   `Int8/16/32/64`, `Float32/64`, `Decimal*`, `Date/DateTime*`.
 - `set(...)` и `bloom_filter(...)` в auto-режиме не добавляются:
   если они нужны, указывай их явно в `index_rules[].indexes`.
+- no-index комбинации (DDL без единого индекса) по умолчанию исключаются
+  из `indexes`/`combined`/sequential-index-stage.
 
 ### `benchmarks.json`
 
@@ -790,7 +790,7 @@ print(run_id)
 - `score = (insert_ratio * select_ratio * compression_ratio) ** (1/3)`
 
 Для `compression_ratio` используются полные размеры таблиц
-`данные + skip-индексы` (`*_total_size_bytes_with_indexes`).
+`данные + skip-индексы` (`*_consumed_compressed_size_bytes_with_indexes`).
 
 `scoring` поля:
 - `mode`

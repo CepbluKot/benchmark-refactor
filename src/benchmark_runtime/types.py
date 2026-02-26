@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from src.clickhouse_ddl import TableDDL
 from src.combiner import VariantMeta
@@ -313,8 +313,22 @@ class BenchmarkVariantResult(_FrozenModel):
     source_table_consumed_compressed_size_bytes_by_each_column: Optional[str] = None
     tested_table_consumed_compressed_size_bytes_overall: Optional[float] = None
     tested_table_consumed_compressed_size_bytes_overall_readable: Optional[str] = None
-    tested_table_total_size_bytes_with_indexes: Optional[float] = None
-    tested_table_total_size_bytes_with_indexes_readable: Optional[str] = None
+    tested_table_consumed_compressed_size_bytes_with_indexes: Optional[float] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "tested_table_consumed_compressed_size_bytes_with_indexes",
+            "tested_table_total_size_bytes_with_indexes",
+        ),
+        serialization_alias="tested_table_consumed_compressed_size_bytes_with_indexes",
+    )
+    tested_table_consumed_compressed_size_bytes_with_indexes_readable: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "tested_table_consumed_compressed_size_bytes_with_indexes_readable",
+            "tested_table_total_size_bytes_with_indexes_readable",
+        ),
+        serialization_alias="tested_table_consumed_compressed_size_bytes_with_indexes_readable",
+    )
     source_table_consumed_compressed_size_bytes_overall: Optional[float] = None
     source_table_consumed_compressed_size_bytes_overall_readable: Optional[str] = None
     tested_table_compression_overall_coef: Optional[float] = None
@@ -511,8 +525,22 @@ class StoredBenchmarkResult(_FrozenModel):
     source_table_consumed_compressed_size_bytes_by_each_column: Optional[str] = None
     tested_table_consumed_compressed_size_bytes_overall: Optional[float] = None
     tested_table_consumed_compressed_size_bytes_overall_readable: Optional[str] = None
-    tested_table_total_size_bytes_with_indexes: Optional[float] = None
-    tested_table_total_size_bytes_with_indexes_readable: Optional[str] = None
+    tested_table_consumed_compressed_size_bytes_with_indexes: Optional[float] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "tested_table_consumed_compressed_size_bytes_with_indexes",
+            "tested_table_total_size_bytes_with_indexes",
+        ),
+        serialization_alias="tested_table_consumed_compressed_size_bytes_with_indexes",
+    )
+    tested_table_consumed_compressed_size_bytes_with_indexes_readable: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "tested_table_consumed_compressed_size_bytes_with_indexes_readable",
+            "tested_table_total_size_bytes_with_indexes_readable",
+        ),
+        serialization_alias="tested_table_consumed_compressed_size_bytes_with_indexes_readable",
+    )
     source_table_consumed_compressed_size_bytes_overall: Optional[float] = None
     source_table_consumed_compressed_size_bytes_overall_readable: Optional[str] = None
     tested_table_compression_overall_coef: Optional[float] = None

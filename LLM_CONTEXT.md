@@ -113,7 +113,8 @@
    - `TaskMonitorCelery` для progress-bar и ожидания Celery batch
      (требует запуск worker с `-E` / `--events`)
      и использует `tqdm_loggable` (как в legacy) для корректного вывода в логах
-   - `settings.py` (RABBITMQ_* + CELERY_WORKER_CONCURRENCY + retry/stream-limit env, как в legacy)
+   - `settings.py` (`BENCH_CELERY_BROKER_URL`, `BENCH_CELERY_BACKEND_URL`,
+     `CELERY_WORKER_CONCURRENCY`, retry/stream-limit env)
 
 ### 4.3 Backward-compatible re-export
 
@@ -165,7 +166,7 @@
 5. DDL-снимки: `tested_table_ddl` (обязательный), `source_table_ddl` (опциональный).
 6. метрики размера:
    - `tested_table_consumed_compressed_size_bytes_overall` (данные без индексов),
-   - `tested_table_total_size_bytes_with_indexes` (данные + размеры skip-индексов).
+   - `tested_table_consumed_compressed_size_bytes_with_indexes` (данные + размеры skip-индексов).
 7. extended combined-метрики: insert/select/compression/indexes поля + `extra_json`.
 8. per-query select-метрики хранятся в основной таблице в JSON-полях
    `tested_table_select_metrics_by_query_json`,
@@ -257,6 +258,8 @@
    (если global не задан — берётся per-index список).
 5. При применении нового `index_granularity` старое значение из исходного DDL
    заменяется без дублей; итоговый variant-DDL содержит ровно один ключ.
+6. Полностью no-index комбинации (когда в варианте не добавлен ни один индекс)
+   по умолчанию исключаются.
 
 ### 5.3 Реестр
 
@@ -345,6 +348,9 @@ Baseline исходного DDL для них уже выполнен runner-о�
 4. Для range-типов (`Int8/16/32/64`, `Float32/64`, `Decimal*`, `Date/DateTime*`) авто-генерация добавляет `minmax`.
 5. `set(...)` и `bloom_filter(...)` auto-генератор не добавляет; их задают вручную в `indexes`.
 6. В `indexes[]` можно задать `index_granularity_values` для конкретного индекс-варианта.
+7. `indexes[].granularity` может быть как `int`, так и `int[]`:
+   - `int` => один индекс-вариант;
+   - `int[]` => несколько индекс-вариантов (по одному на каждую granularity).
 
 ### 7.2 Контракты верхнего уровня
 
@@ -394,7 +400,7 @@ Baseline исходного DDL для них уже выполнен runner-о�
 1. `insert_ratio = median(source_insert_ms) / median(tested_insert_ms)`.
 2. `select_ratio = median(source_select_ms) / median(tested_select_ms)`.
 3. `compression_ratio = source_size_bytes / tested_size_bytes`
-   (используются `*_total_size_bytes_with_indexes`).
+   (используются `*_consumed_compressed_size_bytes_with_indexes`).
 4. `score = (insert_ratio * select_ratio * compression_ratio) ** (1/3)`.
 
 Приоритет override:

@@ -198,11 +198,11 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
                 tested_table_consumed_compressed_size_bytes_overall_readable=(
                     result.tested_table_consumed_compressed_size_bytes_overall_readable
                 ),
-                tested_table_total_size_bytes_with_indexes=(
-                    result.tested_table_total_size_bytes_with_indexes
+                tested_table_consumed_compressed_size_bytes_with_indexes=(
+                    result.tested_table_consumed_compressed_size_bytes_with_indexes
                 ),
-                tested_table_total_size_bytes_with_indexes_readable=(
-                    result.tested_table_total_size_bytes_with_indexes_readable
+                tested_table_consumed_compressed_size_bytes_with_indexes_readable=(
+                    result.tested_table_consumed_compressed_size_bytes_with_indexes_readable
                 ),
                 source_table_consumed_compressed_size_bytes_overall=(
                     result.source_table_consumed_compressed_size_bytes_overall

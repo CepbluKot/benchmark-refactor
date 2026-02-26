@@ -1,10 +1,10 @@
-"""Настройки Celery worker для ClickHouse runtime (по аналогии с legacy settings)."""
+"""Настройки Celery worker для ClickHouse runtime."""
 
 from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -42,32 +42,12 @@ class ClickHouseCeleryWorkerSettings(BaseSettings):
         validation_alias="MAX_COPY_RETRY_SLEEP_SEC_INCREMENT",
         ge=0,
     )
-    rabbitmq_hostname: str = Field(
-        default="localhost",
-        validation_alias="RABBITMQ_HOSTNAME",
-    )
-    rabbitmq_login: SecretStr = Field(
-        default=SecretStr("guest"),
-        validation_alias="RABBITMQ_LOGIN",
-    )
-    rabbitmq_password: SecretStr = Field(
-        default=SecretStr("guest"),
-        validation_alias="RABBITMQ_PASSWORD",
-    )
-    rabbitmq_port: int = Field(
-        default=5672,
-        validation_alias="RABBITMQ_PORT",
-        gt=0,
-        lt=65536,
-    )
-
-    # Явные URL можно переопределить через env; если пусто — собираем из RABBITMQ_*
-    celery_broker_url: str | None = Field(
-        default=None,
+    celery_broker_url: str = Field(
+        default="pyamqp://guest:guest@localhost:5672//",
         validation_alias="BENCH_CELERY_BROKER_URL",
     )
-    celery_backend_url: str | None = Field(
-        default=None,
+    celery_backend_url: str = Field(
+        default="rpc://guest:guest@localhost:5672//",
         validation_alias="BENCH_CELERY_BACKEND_URL",
     )
 
@@ -78,40 +58,33 @@ class ClickHouseCeleryWorkerSettings(BaseSettings):
         extra="ignore",
     )
 
-    @field_validator("rabbitmq_hostname", mode="before")
+    @field_validator("celery_broker_url", mode="before")
     @classmethod
-    def validate_rabbitmq_hostname(cls, value: object) -> str:
-        """Проверяет, что hostname не пустой."""
+    def validate_celery_broker_url(cls, value: object) -> str:
+        """Проверяет, что broker URL не пустой."""
         cleaned = str(value).strip()
         if not cleaned:
-            raise ValueError("RABBITMQ_HOSTNAME не должен быть пустым")
+            raise ValueError("BENCH_CELERY_BROKER_URL не должен быть пустым")
+        return cleaned
+
+    @field_validator("celery_backend_url", mode="before")
+    @classmethod
+    def validate_celery_backend_url(cls, value: object) -> str:
+        """Проверяет, что backend URL не пустой."""
+        cleaned = str(value).strip()
+        if not cleaned:
+            raise ValueError("BENCH_CELERY_BACKEND_URL не должен быть пустым")
         return cleaned
 
     @property
     def broker_url(self) -> str:
         """Broker URL для Celery."""
-        if self.celery_broker_url:
-            return self.celery_broker_url.strip()
-
-        login = self.rabbitmq_login.get_secret_value()
-        password = self.rabbitmq_password.get_secret_value()
-        return (
-            f"pyamqp://{login}:{password}"
-            f"@{self.rabbitmq_hostname}:{self.rabbitmq_port}//"
-        )
+        return self.celery_broker_url.strip()
 
     @property
     def backend_url(self) -> str:
         """Backend URL для Celery."""
-        if self.celery_backend_url:
-            return self.celery_backend_url.strip()
-
-        login = self.rabbitmq_login.get_secret_value()
-        password = self.rabbitmq_password.get_secret_value()
-        return (
-            f"rpc://{login}:{password}"
-            f"@{self.rabbitmq_hostname}:{self.rabbitmq_port}//"
-        )
+        return self.celery_backend_url.strip()
 
 
 @lru_cache(maxsize=1)

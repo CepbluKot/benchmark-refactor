@@ -54,9 +54,14 @@ def _deduplicate_index_configs_preserve_order(
     values: List[IndexConfig],
 ) -> List[IndexConfig]:
     """Удаляет дубли index-конфигов, сохраняя исходный порядок."""
-    seen: set[tuple[str, int, Optional[tuple[int, ...]]]] = set()
+    seen: set[tuple[str, int, Optional[tuple[int, ...]], Optional[tuple[int, ...]]]] = set()
     deduplicated: list[IndexConfig] = []
     for value in values:
+        granularity_values = (
+            tuple(value.granularity_values)
+            if value.granularity_values is not None
+            else None
+        )
         table_granularity_values = (
             tuple(value.table_index_granularity_values)
             if value.table_index_granularity_values is not None
@@ -65,6 +70,7 @@ def _deduplicate_index_configs_preserve_order(
         key = (
             value.type.strip(),
             int(value.granularity),
+            granularity_values,
             table_granularity_values,
         )
         if key in seen:
@@ -72,6 +78,29 @@ def _deduplicate_index_configs_preserve_order(
         seen.add(key)
         deduplicated.append(value)
     return deduplicated
+
+
+def _expand_index_granularity_configs(
+    values: List[IndexConfig],
+) -> List[IndexConfig]:
+    """
+    Раскрывает `granularity_values` в набор отдельных index-конфигов.
+
+    Пример:
+      {"type": "minmax", "granularity": [2, 4]}
+    -> два runtime-конфига с granularity=2 и granularity=4.
+    """
+    expanded: list[IndexConfig] = []
+    for value in values:
+        for granularity in value.iter_granularity_values():
+            expanded.append(
+                IndexConfig(
+                    type=value.type,
+                    granularity=granularity,
+                    table_index_granularity_values=value.table_index_granularity_values,
+                )
+            )
+    return _deduplicate_index_configs_preserve_order(expanded)
 
 
 def _expand_auto_column_alternatives(
@@ -165,6 +194,7 @@ def _index_rule_from_config(cfg: IndexRuleConfig) -> IndexRule:
         cfg,
         indexes=list(cfg.indexes),
     )
+    indexes = _expand_index_granularity_configs(indexes)
     return IndexRule(
         by_type=cfg.by_type,
         by_name=cfg.by_name,

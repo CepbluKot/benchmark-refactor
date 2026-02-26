@@ -92,8 +92,8 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json=(
                 '[{"query_index":0,"elapsed_ms_percentiles_speed_up_coefs":[2.0,2.0]}]'
             ),
-            tested_table_total_size_bytes_with_indexes=1234.0,
-            tested_table_total_size_bytes_with_indexes_readable="1.21 KiB",
+            tested_table_consumed_compressed_size_bytes_with_indexes=1234.0,
+            tested_table_consumed_compressed_size_bytes_with_indexes_readable="1.21 KiB",
             score_calculation_json='{"mode":"expression","final_score":1.0}',
             score=1.0,
         )
@@ -128,8 +128,11 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
             columns,
         )
-        self.assertIn("tested_table_total_size_bytes_with_indexes", columns)
-        self.assertIn("tested_table_total_size_bytes_with_indexes_readable", columns)
+        self.assertIn("tested_table_consumed_compressed_size_bytes_with_indexes", columns)
+        self.assertIn(
+            "tested_table_consumed_compressed_size_bytes_with_indexes_readable",
+            columns,
+        )
         tested_per_query_json = json.loads(
             row_by_column["tested_table_select_metrics_by_query_json"] or "{}"
         )
@@ -158,9 +161,12 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
         )
         self.assertIn("\n", row_by_column["variant_params"])
         self.assertEqual(json.loads(row_by_column["variant_params"]), {"mode": "types"})
-        self.assertEqual(row_by_column["tested_table_total_size_bytes_with_indexes"], 1234.0)
         self.assertEqual(
-            row_by_column["tested_table_total_size_bytes_with_indexes_readable"],
+            row_by_column["tested_table_consumed_compressed_size_bytes_with_indexes"],
+            1234.0,
+        )
+        self.assertEqual(
+            row_by_column["tested_table_consumed_compressed_size_bytes_with_indexes_readable"],
             "1.21 KiB",
         )
 

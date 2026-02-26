@@ -10,7 +10,7 @@ Pydantic-модели JSON-конфига бенчмарка.
 
 from __future__ import annotations
 
-from typing import Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
@@ -113,10 +113,15 @@ class ColumnRuleConfig(_Base):
 
 
 class IndexConfig(_Base):
-    """Конфигурация одного skip-индекса (тип + гранулярность)."""
+    """Конфигурация одного skip-индекса (тип + гранулярность/перебор гранулярностей)."""
 
     type: str
     granularity: int = Field(default=1, ge=1)
+    granularity_values: Optional[List[int]] = Field(
+        default=None,
+        validation_alias=AliasChoices("granularity_values"),
+        serialization_alias="granularity_values",
+    )
     table_index_granularity_values: Optional[List[int]] = Field(
         default=None,
         validation_alias=AliasChoices(
@@ -139,6 +144,63 @@ class IndexConfig(_Base):
           {"type": "...", "granularity": 2, "index_granularity_values": [8192, 16384]}.
         """
         return _normalize_positive_int_sequence(values)
+
+    @field_validator("granularity_values")
+    @classmethod
+    def normalize_granularity_values(
+        cls,
+        values: Optional[List[int]],
+    ) -> Optional[List[int]]:
+        """
+        Нормализует дополнительный перебор granularities для skip-индекса.
+
+        Поддерживает конфиг вида:
+          {"type": "...", "granularity_values": [1, 2, 4]}.
+        """
+        return _normalize_positive_int_sequence(values)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_granularity_array_in_granularity_field(
+        cls,
+        data: Any,
+    ) -> Any:
+        """
+        Поддерживает запись `granularity` как массива.
+
+        Пример:
+          {"type": "minmax", "granularity": [1, 2, 4]}.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        granularity = data.get("granularity")
+        if not isinstance(granularity, list):
+            return data
+        if not granularity:
+            raise ValueError("granularity как массив не должен быть пустым")
+
+        normalized = dict(data)
+        if normalized.get("granularity_values") is None:
+            normalized["granularity_values"] = granularity
+        normalized["granularity"] = granularity[0]
+        return normalized
+
+    @model_validator(mode="after")
+    def synchronize_granularity_with_values(self) -> "IndexConfig":
+        """
+        Если задан `granularity_values`, базовый `granularity` синхронизируется
+        с первым значением, чтобы сериализация и отладка были консистентными.
+        """
+        if self.granularity_values is not None:
+            self.granularity = self.granularity_values[0]
+        return self
+
+    def iter_granularity_values(self) -> List[int]:
+        """Возвращает эффективный список granularities для перебора индекса."""
+        if self.granularity_values is not None:
+            return list(self.granularity_values)
+        return [self.granularity]
 
 
 class IndexRuleConfig(_Base):

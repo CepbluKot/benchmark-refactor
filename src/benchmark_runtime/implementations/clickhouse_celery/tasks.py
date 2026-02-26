@@ -2331,7 +2331,10 @@ def _build_baseline_variant_result(
         or source_total_size_bytes
     )
     tested_total_size_bytes_with_indexes = float(
-        metrics.get("tested_table_total_size_bytes_with_indexes", tested_total_size_bytes)
+        metrics.get(
+            "tested_table_consumed_compressed_size_bytes_with_indexes",
+            metrics.get("tested_table_total_size_bytes_with_indexes", tested_total_size_bytes),
+        )
         or tested_total_size_bytes
     )
     source_rows = int(metrics.get("total_n_rows_in_source_table", 0) or 0)
@@ -2494,8 +2497,8 @@ def _build_baseline_variant_result(
         tested_table_consumed_compressed_size_bytes_overall_readable=make_readable_bytes(
             tested_total_size_bytes
         ),
-        tested_table_total_size_bytes_with_indexes=tested_total_size_bytes_with_indexes,
-        tested_table_total_size_bytes_with_indexes_readable=make_readable_bytes(
+        tested_table_consumed_compressed_size_bytes_with_indexes=tested_total_size_bytes_with_indexes,
+        tested_table_consumed_compressed_size_bytes_with_indexes_readable=make_readable_bytes(
             tested_total_size_bytes_with_indexes
         ),
         source_table_consumed_compressed_size_bytes_overall=source_total_size_bytes,
@@ -2815,6 +2818,11 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             "tested_table_consumed_compressed_size_bytes_overall_readable": make_readable_bytes(
                 tested_total_size_bytes
             ),
+            "tested_table_consumed_compressed_size_bytes_with_indexes": tested_total_size_bytes_with_indexes,
+            "tested_table_consumed_compressed_size_bytes_with_indexes_readable": make_readable_bytes(
+                tested_total_size_bytes_with_indexes
+            ),
+            # Backward-compatible internal aliases for older runs/tests.
             "tested_table_total_size_bytes_with_indexes": tested_total_size_bytes_with_indexes,
             "tested_table_total_size_bytes_with_indexes_readable": make_readable_bytes(
                 tested_total_size_bytes_with_indexes
@@ -3735,8 +3743,8 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
             tested_table_consumed_compressed_size_bytes_overall_readable=make_readable_bytes(
                 tested_total_size_bytes
             ),
-            tested_table_total_size_bytes_with_indexes=tested_total_size_bytes_with_indexes,
-            tested_table_total_size_bytes_with_indexes_readable=make_readable_bytes(
+            tested_table_consumed_compressed_size_bytes_with_indexes=tested_total_size_bytes_with_indexes,
+            tested_table_consumed_compressed_size_bytes_with_indexes_readable=make_readable_bytes(
                 tested_total_size_bytes_with_indexes
             ),
             source_table_consumed_compressed_size_bytes_overall=source_total_size_bytes,

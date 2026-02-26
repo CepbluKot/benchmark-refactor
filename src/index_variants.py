@@ -7,6 +7,7 @@
   - Берём декартово произведение: для каждой колонки выбираем один индекс.
   - Все выбранные индексы добавляются к таблице (существующие индексы заменяются).
   - None = не добавлять индекс для этой колонки.
+  - Полностью no-index комбинации (без единого индекса) по умолчанию исключаются.
 """
 
 from __future__ import annotations
@@ -141,18 +142,7 @@ def iter_index_variants(
     )
 
     if not resolved:
-        current_idx = 0
-        effective_granularity_values = global_granularity_values or [None]
-        for table_index_granularity in effective_granularity_values:
-            variant = table.copy()
-            if table_index_granularity is not None:
-                variant.set_index_granularity(table_index_granularity)
-            yield variant, IndexVariantMeta(
-                index=current_idx,
-                index_choices={},
-                table_index_granularity=table_index_granularity,
-            )
-            current_idx += 1
+        # Нет matched-колонок => нет индексных вариантов.
         return
 
     col_names = [name for name, _ in resolved]
@@ -179,6 +169,10 @@ def iter_index_variants(
 
     global_idx = 0
     for combo in itertools.product(*variant_lists):
+        # Полностью no-index combo исключаем по умолчанию.
+        if all(idx_def is None for idx_def, _ in combo):
+            continue
+
         base_variant = table.copy()
 
         # Убираем все старые индексы для matched-колонок, оставляем остальные
@@ -227,13 +221,13 @@ def total_index_variants(
     column_order: Optional[Dict[str, int]] = None,
     table_index_granularity_values: Optional[List[int]] = None,
 ) -> int:
-    """Количество вариантов (включая «без индекса» для каждой колонки)."""
+    """Количество вариантов (полностью no-index комбинации исключены)."""
     resolved = _resolve_index_columns(table, rules, column_order=column_order)
     global_granularity_values = _normalize_table_index_granularity_values(
         table_index_granularity_values
     )
     if not resolved:
-        return len(global_granularity_values) if global_granularity_values else 1
+        return 0
 
     has_per_index_constraints = any(
         variant.table_index_granularity_values is not None
@@ -244,25 +238,36 @@ def total_index_variants(
         n = 1
         for _, alt in resolved:
             n *= (alt.total() + 1)  # +1 за вариант None
+        # Исключаем комбинацию, где для всех колонок выбран None.
+        n -= 1
+        if n <= 0:
+            return 0
         granularity_multiplier = len(global_granularity_values) if global_granularity_values else 1
         return n * granularity_multiplier
 
-    variant_constraints_lists: List[List[Optional[List[int]]]] = []
+    variant_choice_lists: List[List[Tuple[bool, Optional[List[int]]]]] = []
     for _, alt in resolved:
-        constraints: List[Optional[List[int]]] = [None]
+        choices: List[Tuple[bool, Optional[List[int]]]] = [(False, None)]
         for variant in alt.variants:
-            constraints.append(
-                list(variant.table_index_granularity_values)
-                if variant.table_index_granularity_values is not None
-                else None
+            choices.append(
+                (
+                    True,
+                    (
+                        list(variant.table_index_granularity_values)
+                        if variant.table_index_granularity_values is not None
+                        else None
+                    ),
+                )
             )
-        variant_constraints_lists.append(constraints)
+        variant_choice_lists.append(choices)
 
     total = 0
-    for combo_constraints in itertools.product(*variant_constraints_lists):
+    for combo_choices in itertools.product(*variant_choice_lists):
+        if not any(is_index for is_index, _ in combo_choices):
+            continue
         effective_granularity_values = _resolve_effective_table_index_granularity_values(
             global_values=global_granularity_values,
-            selected_constraints=list(combo_constraints),
+            selected_constraints=[constraints for _, constraints in combo_choices],
         )
         total += len(effective_granularity_values)
     return total

@@ -69,7 +69,10 @@
                 "indexes": [
                   {
                     "type": "ngrambf_v1(3, 256, 2, 0)",
-                    "granularity": 2,
+                    "granularity": [
+                      
+                      2
+                    ],
                     "index_granularity_values": [
                       8192
                     ]

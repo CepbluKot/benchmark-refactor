@@ -1000,8 +1000,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
 
         first_indexes = [idx.expr for idx in jobs[0].variant_ddl.indexes]
         second_indexes = [idx.expr for idx in jobs[1].variant_ddl.indexes]
-        self.assertEqual(first_indexes, [])
-        self.assertEqual(second_indexes, ["user_id"])
+        self.assertEqual(first_indexes, ["user_id"])
+        self.assertEqual(second_indexes, ["event_time"])
         self.assertTrue(all(job.insert_rows_limit == 222 for job in jobs))
 
     def test_engine_resolve_insert_rows_limit_supports_future_variant_modes(self) -> None:
@@ -1323,9 +1323,9 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         run_id = runner.run()
 
         self.assertEqual(run_id, 1)
-        # Для одного column-rule в indexes режиме: (1 index + None) * 2 granularity = 4.
-        self.assertEqual(len(adapter.executed_jobs), 4)
-        self.assertEqual(len(result_store.records), 4)
+        # Для одного column-rule в indexes режиме: (1 index) * 2 granularity = 2.
+        self.assertEqual(len(adapter.executed_jobs), 2)
+        self.assertEqual(len(result_store.records), 2)
 
         granularities = {
             record.variant_params.get("table_index_granularity")
@@ -2170,16 +2170,16 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         run_id = runner.run()
 
         # Этап 1: 2 варианта типов (UInt64/UInt32).
-        # Этап 2: для top-1 (UInt32) запускаются 3 варианта индексов (None + 2 indexes).
+        # Этап 2: для top-1 (UInt32) запускаются 2 варианта индексов.
         self.assertEqual(run_id, 1)
-        self.assertEqual(len(result_store.records), 5)
-        self.assertEqual(len(adapter.executed_jobs), 5)
+        self.assertEqual(len(result_store.records), 4)
+        self.assertEqual(len(adapter.executed_jobs), 4)
         self.assertTrue(all(r.benchmark_run_id == 1 for r in result_store.records))
         self.assertTrue(all(j.benchmark_run_id == 1 for j in adapter.executed_jobs))
 
         stages = [job.variant_meta.mode for job in adapter.executed_jobs]
         self.assertEqual(stages[:2], ["types", "types"])
-        self.assertEqual(stages[2:], ["indexes", "indexes", "indexes"])
+        self.assertEqual(stages[2:], ["indexes", "indexes"])
 
         # Индексный этап должен идти по лучшему варианту типов (UInt32).
         indexed_job_types = [
@@ -2187,7 +2187,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             for job in adapter.executed_jobs
             if job.variant_meta.mode == "indexes"
         ]
-        self.assertEqual(indexed_job_types, ["UInt32", "UInt32", "UInt32"])
+        self.assertEqual(indexed_job_types, ["UInt32", "UInt32"])
         self.assertTrue(
             all(
                 job.insert_rows_limit == 111
@@ -2204,7 +2204,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         )
 
         global_indexes = [job.variant_meta.global_index for job in adapter.executed_jobs]
-        self.assertEqual(global_indexes, [0, 1, 2, 3, 4])
+        self.assertEqual(global_indexes, [0, 1, 2, 3])
 
         variant_tables = [job.variant_table for job in adapter.executed_jobs]
         self.assertEqual(len(variant_tables), len(set(variant_tables)))
@@ -2336,7 +2336,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
 
         run_id = runner.run()
         self.assertEqual(run_id, 1)
-        self.assertEqual(len(adapter.executed_jobs), 5)
+        self.assertEqual(len(adapter.executed_jobs), 4)
         self.assertTrue(
             all(
                 job.insert_rows_limit == 111
@@ -2404,11 +2404,11 @@ class PlannerEngineRunnerTests(unittest.TestCase):
 
         run_id = runner.run()
         self.assertEqual(run_id, 1)
-        self.assertEqual(len(adapter.executed_jobs), 5)
-        self.assertEqual(len(result_store.records), 5)
+        self.assertEqual(len(adapter.executed_jobs), 4)
+        self.assertEqual(len(result_store.records), 4)
         self.assertEqual(
             [job.variant_meta.mode for job in adapter.executed_jobs],
-            ["types", "types", "indexes", "indexes", "indexes"],
+            ["types", "types", "indexes", "indexes"],
         )
         self.assertEqual(
             [
@@ -2416,7 +2416,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                 for job in adapter.executed_jobs
                 if job.variant_meta.mode == "indexes"
             ],
-            ["UInt32", "UInt32", "UInt32"],
+            ["UInt32", "UInt32"],
         )
 
     def test_types_strategy_dispatch_only_does_not_store_in_runner(self) -> None:
@@ -2504,7 +2504,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(run_id, 1)
         self.assertEqual(
             [job.variant_meta.mode for job in adapter.executed_jobs],
-            ["indexes", "indexes", "indexes"],
+            ["indexes", "indexes"],
         )
         self.assertEqual(len(store.records), 0)
 
@@ -2668,7 +2668,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
 
         run_id = runner.run()
         self.assertEqual(run_id, 1)
-        self.assertEqual(len(adapter.executed_jobs), 4)
+        self.assertEqual(len(adapter.executed_jobs), 3)
         self.assertTrue(all(job.insert_rows_limit == 555 for job in adapter.executed_jobs))
 
     def test_sequential_mode_uses_dedicated_variant_caps_for_types_and_indexes(self) -> None:

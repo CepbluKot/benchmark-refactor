@@ -92,7 +92,7 @@ class CombinerAndNamingTests(unittest.TestCase):
                 column_rules=self.column_rules,
                 index_rules=self.index_rules,
             ),
-            3,
+            2,
         )
         self.assertEqual(
             total_variants(
@@ -101,7 +101,7 @@ class CombinerAndNamingTests(unittest.TestCase):
                 column_rules=self.column_rules,
                 index_rules=self.index_rules,
             ),
-            7,
+            6,
         )
         self.assertEqual(
             total_variants(
@@ -110,7 +110,7 @@ class CombinerAndNamingTests(unittest.TestCase):
                 column_rules=self.column_rules,
                 index_rules=self.index_rules,
             ),
-            12,
+            8,
         )
 
     def test_iter_variants_respects_max_iterations(self) -> None:
@@ -160,9 +160,9 @@ class CombinerAndNamingTests(unittest.TestCase):
         _, meta_first = prioritized_event_time[0]
         _, meta_second = prioritized_event_time[1]
         self.assertIsNone(meta_first.index_choices["event_time"])
-        self.assertIsNone(meta_first.index_choices["user_id"])
-        self.assertIsNone(meta_second.index_choices["event_time"])
-        self.assertIsNotNone(meta_second.index_choices["user_id"])
+        self.assertIsNotNone(meta_first.index_choices["user_id"])
+        self.assertIsNotNone(meta_second.index_choices["event_time"])
+        self.assertIsNone(meta_second.index_choices["user_id"])
 
         # user_id приоритетнее event_time: второй вариант меняет event_time.
         prioritized_user_id = list(
@@ -176,8 +176,8 @@ class CombinerAndNamingTests(unittest.TestCase):
             )
         )
         _, meta_second_reversed = prioritized_user_id[1]
-        self.assertIsNotNone(meta_second_reversed.index_choices["event_time"])
-        self.assertIsNone(meta_second_reversed.index_choices["user_id"])
+        self.assertIsNone(meta_second_reversed.index_choices["event_time"])
+        self.assertIsNotNone(meta_second_reversed.index_choices["user_id"])
 
     def test_indexes_mode_crosses_with_table_index_granularity_values(self) -> None:
         """Проверяет декартово произведение index-вариантов и SETTINGS index_granularity."""
@@ -188,7 +188,7 @@ class CombinerAndNamingTests(unittest.TestCase):
             index_rules=self.index_rules,
             table_index_granularity_values=[8192, 16384],
         )
-        self.assertEqual(total, 6)  # (2 variants + None) * 2 granularity values
+        self.assertEqual(total, 4)  # (2 variants) * 2 granularity values
 
         variants = list(
             iter_variants(
@@ -199,7 +199,7 @@ class CombinerAndNamingTests(unittest.TestCase):
                 table_index_granularity_values=[8192, 16384],
             )
         )
-        self.assertEqual(len(variants), 6)
+        self.assertEqual(len(variants), 4)
 
         granularities = {
             meta.table_index_granularity
@@ -219,7 +219,7 @@ class CombinerAndNamingTests(unittest.TestCase):
             index_rules=self.index_rules,
             table_index_granularity_values=[8192, 16384],
         )
-        self.assertEqual(total, 24)  # 4 column variants * ((2 + None) * 2)
+        self.assertEqual(total, 16)  # 4 column variants * (2 * 2)
 
     def test_indexes_mode_supports_per_index_table_granularity_values(self) -> None:
         """Проверяет per-index index_granularity_values в indexes-режиме."""
@@ -250,7 +250,7 @@ class CombinerAndNamingTests(unittest.TestCase):
             column_rules=[],
             index_rules=index_rules,
         )
-        self.assertEqual(total, 3)
+        self.assertEqual(total, 2)
 
         variants = list(
             iter_variants(
@@ -260,7 +260,7 @@ class CombinerAndNamingTests(unittest.TestCase):
                 index_rules=index_rules,
             )
         )
-        self.assertEqual(len(variants), 3)
+        self.assertEqual(len(variants), 2)
         choices = {
             (
                 meta.index_choices["user_id"].index_type
@@ -273,7 +273,6 @@ class CombinerAndNamingTests(unittest.TestCase):
         self.assertEqual(
             choices,
             {
-                (None, None),
                 ("minmax", 8192),
                 ("bloom_filter(0.01)", 16384),
             },
@@ -304,7 +303,7 @@ class CombinerAndNamingTests(unittest.TestCase):
             index_rules=index_rules,
             table_index_granularity_values=[8192, 16384],
         )
-        self.assertEqual(total, 3)
+        self.assertEqual(total, 1)
 
         variants = list(
             iter_variants(
@@ -315,7 +314,7 @@ class CombinerAndNamingTests(unittest.TestCase):
                 table_index_granularity_values=[8192, 16384],
             )
         )
-        self.assertEqual(len(variants), 3)
+        self.assertEqual(len(variants), 1)
         selected_with_index = [
             meta.table_index_granularity
             for _, meta in variants
@@ -360,7 +359,7 @@ class CombinerAndNamingTests(unittest.TestCase):
             column_rules=[],
             index_rules=index_rules,
         )
-        self.assertEqual(total, 3)
+        self.assertEqual(total, 2)
 
         variants = list(
             iter_variants(
@@ -370,7 +369,7 @@ class CombinerAndNamingTests(unittest.TestCase):
                 index_rules=index_rules,
             )
         )
-        self.assertEqual(len(variants), 3)
+        self.assertEqual(len(variants), 2)
         self.assertTrue(
             all(
                 not (

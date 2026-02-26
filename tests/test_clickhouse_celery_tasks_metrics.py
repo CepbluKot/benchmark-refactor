@@ -379,9 +379,12 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             [make_readable_bytes(6144.0), make_readable_bytes(8192.0)],
         )
         self.assertEqual(result.metrics["total_n_rows_in_source_table"], 321)
-        self.assertEqual(result.metrics["tested_table_total_size_bytes_with_indexes"], 1024.0)
         self.assertEqual(
-            result.metrics["tested_table_total_size_bytes_with_indexes_readable"],
+            result.metrics["tested_table_consumed_compressed_size_bytes_with_indexes"],
+            1024.0,
+        )
+        self.assertEqual(
+            result.metrics["tested_table_consumed_compressed_size_bytes_with_indexes_readable"],
             make_readable_bytes(1024.0),
         )
         self.assertIn("`bench_tmp`.`events__source_baseline__", result.metrics["source_table_select_test_query"])
@@ -1023,9 +1026,12 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
         self.assertIsNone(stored_result.index_params)
         self.assertIn("index_choices", result.variant_params)
         self.assertIn("user_id", result.variant_params.get("index_choices", {}))
-        self.assertEqual(result.tested_table_total_size_bytes_with_indexes, 2050.0)
         self.assertEqual(
-            result.tested_table_total_size_bytes_with_indexes_readable,
+            result.tested_table_consumed_compressed_size_bytes_with_indexes,
+            2050.0,
+        )
+        self.assertEqual(
+            result.tested_table_consumed_compressed_size_bytes_with_indexes_readable,
             make_readable_bytes(2050.0),
         )
 

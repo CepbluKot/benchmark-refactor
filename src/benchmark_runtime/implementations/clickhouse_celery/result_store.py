@@ -129,8 +129,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "source_table_consumed_compressed_size_bytes_by_each_column",
         "tested_table_consumed_compressed_size_bytes_overall",
         "tested_table_consumed_compressed_size_bytes_overall_readable",
-        "tested_table_total_size_bytes_with_indexes",
-        "tested_table_total_size_bytes_with_indexes_readable",
+        "tested_table_consumed_compressed_size_bytes_with_indexes",
+        "tested_table_consumed_compressed_size_bytes_with_indexes_readable",
         "source_table_consumed_compressed_size_bytes_overall",
         "source_table_consumed_compressed_size_bytes_overall_readable",
         "tested_table_compression_overall_coef",
@@ -289,8 +289,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `source_table_consumed_compressed_size_bytes_by_each_column` Nullable(String),
                 `tested_table_consumed_compressed_size_bytes_overall` Nullable(Float64),
                 `tested_table_consumed_compressed_size_bytes_overall_readable` Nullable(String),
-                `tested_table_total_size_bytes_with_indexes` Nullable(Float64),
-                `tested_table_total_size_bytes_with_indexes_readable` Nullable(String),
+                `tested_table_consumed_compressed_size_bytes_with_indexes` Nullable(Float64),
+                `tested_table_consumed_compressed_size_bytes_with_indexes_readable` Nullable(String),
                 `source_table_consumed_compressed_size_bytes_overall` Nullable(Float64),
                 `source_table_consumed_compressed_size_bytes_overall_readable` Nullable(String),
                 `tested_table_compression_overall_coef` Nullable(Float64),
@@ -335,8 +335,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `tested_table_select_memory_usage_measurements_percentiles_readable` Array(String),
                 ADD COLUMN IF NOT EXISTS `source_table_select_memory_usage_measurements_percentiles` Array(Float64),
                 ADD COLUMN IF NOT EXISTS `source_table_select_memory_usage_measurements_percentiles_readable` Array(String),
-                ADD COLUMN IF NOT EXISTS `tested_table_total_size_bytes_with_indexes` Nullable(Float64),
-                ADD COLUMN IF NOT EXISTS `tested_table_total_size_bytes_with_indexes_readable` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes` Nullable(Float64),
+                ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes_readable` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `score_calculation_json` Nullable(String)
             """
         )
@@ -681,11 +681,11 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             tested_table_consumed_compressed_size_bytes_overall_readable=(
                 result.tested_table_consumed_compressed_size_bytes_overall_readable
             ),
-            tested_table_total_size_bytes_with_indexes=(
-                result.tested_table_total_size_bytes_with_indexes
+            tested_table_consumed_compressed_size_bytes_with_indexes=(
+                result.tested_table_consumed_compressed_size_bytes_with_indexes
             ),
-            tested_table_total_size_bytes_with_indexes_readable=(
-                result.tested_table_total_size_bytes_with_indexes_readable
+            tested_table_consumed_compressed_size_bytes_with_indexes_readable=(
+                result.tested_table_consumed_compressed_size_bytes_with_indexes_readable
             ),
             source_table_consumed_compressed_size_bytes_overall=(
                 result.source_table_consumed_compressed_size_bytes_overall

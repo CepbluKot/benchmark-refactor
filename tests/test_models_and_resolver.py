@@ -67,6 +67,34 @@ class ModelsValidationTests(unittest.TestCase):
                 }
             )
 
+    def test_index_config_accepts_granularity_array_and_normalizes_it(self) -> None:
+        """Проверяет, что granularity может задаваться массивом значений."""
+        index_cfg = IndexConfig.model_validate(
+            {
+                "type": "minmax",
+                "granularity": [4, 2, 4],
+            }
+        )
+        self.assertEqual(index_cfg.granularity, 4)
+        self.assertEqual(index_cfg.granularity_values, [4, 2])
+        self.assertEqual(index_cfg.iter_granularity_values(), [4, 2])
+
+        with self.assertRaises(ValidationError):
+            IndexConfig.model_validate(
+                {
+                    "type": "minmax",
+                    "granularity": [0, 2],
+                }
+            )
+
+        with self.assertRaises(ValidationError):
+            IndexConfig.model_validate(
+                {
+                    "type": "minmax",
+                    "granularity": [],
+                }
+            )
+
     def test_queries_manual_requires_test_queries(self) -> None:
         """Проверяет, что queries manual requires test queries."""
         with self.assertRaises(ValidationError):
@@ -908,6 +936,35 @@ class RuleResolverTests(unittest.TestCase):
         self.assertEqual(len(variants), 2)
         self.assertEqual(variants[0].table_index_granularity_values, [8192])
         self.assertEqual(variants[1].table_index_granularity_values, [16384])
+
+    def test_index_rule_expands_granularity_array_into_multiple_variants(self) -> None:
+        """Проверяет раскрытие granularity-массива в отдельные индекс-варианты."""
+        resolver = RuleResolver(banks={})
+        rules = RulesConfig(
+            index_rules=[
+                IndexRuleConfig(
+                    by_type="UInt64",
+                    indexes=[
+                        IndexConfig.model_validate(
+                            {
+                                "type": "minmax",
+                                "granularity": [2, 4, 2],
+                                "index_granularity_values": [8192],
+                            }
+                        )
+                    ],
+                )
+            ]
+        )
+
+        resolved = resolver.resolve(rules, dbms="clickhouse")
+        variants = resolved.index_rules[0].alternatives.variants
+        variant_pairs = [(item.index_type, item.granularity) for item in variants]
+        self.assertEqual(variant_pairs, [("minmax", 2), ("minmax", 4)])
+        self.assertEqual(
+            [item.table_index_granularity_values for item in variants],
+            [[8192], [8192]],
+        )
 
 
 if __name__ == "__main__":
