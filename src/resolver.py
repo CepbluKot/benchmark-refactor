@@ -28,6 +28,62 @@ from src.models import (
 )
 
 
+def _strip_low_cardinality_wrappers(type_expression: str) -> str:
+    """
+    Удаляет все обёртки `LowCardinality(...)` из type-выражения.
+
+    Примеры:
+      - `LowCardinality(String)` -> `String`
+      - `Nullable(LowCardinality(String))` -> `Nullable(String)`
+      - `Array(LowCardinality(UInt32))` -> `Array(UInt32)`
+    """
+    expression = str(type_expression or "").strip()
+    if not expression:
+        return expression
+
+    marker = "lowcardinality("
+    result_chars: list[str] = []
+    cursor = 0
+    lower_expression = expression.lower()
+
+    while cursor < len(expression):
+        if lower_expression.startswith(marker, cursor):
+            cursor += len(marker)
+            depth = 1
+            inner_chars: list[str] = []
+            while cursor < len(expression) and depth > 0:
+                char = expression[cursor]
+                if char == "(":
+                    depth += 1
+                    inner_chars.append(char)
+                elif char == ")":
+                    depth -= 1
+                    if depth > 0:
+                        inner_chars.append(char)
+                else:
+                    inner_chars.append(char)
+                cursor += 1
+            inner_expression = "".join(inner_chars)
+            result_chars.append(_strip_low_cardinality_wrappers(inner_expression))
+            continue
+
+        result_chars.append(expression[cursor])
+        cursor += 1
+
+    return "".join(result_chars).strip()
+
+
+def _normalize_types_without_low_cardinality(values: List[str]) -> List[str]:
+    """Нормализует список типов и удаляет из него `LowCardinality(...)` обёртки."""
+    normalized: list[str] = []
+    for value in values:
+        stripped = _strip_low_cardinality_wrappers(value)
+        if not stripped:
+            continue
+        normalized.append(stripped)
+    return _deduplicate_preserve_order(normalized)
+
+
 def _deduplicate_preserve_order(values: List[str]) -> List[str]:
     """Удаляет дубликаты, сохраняя исходный порядок значений."""
     seen: set[str] = set()
@@ -90,13 +146,13 @@ def _expand_auto_column_alternatives(
     if not cfg.auto_generate_alternatives:
         return types, codecs
 
-    auto_types_seed = list(types)
+    auto_types_seed = _normalize_types_without_low_cardinality(list(types))
     if not auto_types_seed and cfg.by_type is not None:
-        auto_types_seed = [cfg.by_type]
+        auto_types_seed = _normalize_types_without_low_cardinality([cfg.by_type])
     if not auto_types_seed:
         return types, codecs
 
-    compression_datatype = (
+    compression_datatype = _strip_low_cardinality_wrappers(
         cfg.auto_compressions_datatype
         or cfg.by_type
         or auto_types_seed[0]
@@ -109,9 +165,11 @@ def _expand_auto_column_alternatives(
         auto_compressions,
     )
 
-    auto_types = [item.datatype for item in generated]
+    auto_types = _normalize_types_without_low_cardinality([item.datatype for item in generated])
     auto_codecs = [_normalize_codec_clause(item.codec) for item in generated]
-    merged_types = _deduplicate_preserve_order(types + auto_types)
+    merged_types = _deduplicate_preserve_order(
+        _normalize_types_without_low_cardinality(types + auto_types)
+    )
     merged_codecs = _deduplicate_preserve_order(codecs + auto_codecs)
     return merged_types, merged_codecs
 
@@ -142,13 +200,14 @@ def _expand_auto_index_alternatives(
 
 def _column_rule_from_config(cfg: ColumnRuleConfig) -> ColumnRule:
     """Конвертирует `ColumnRuleConfig` в runtime `ColumnRule`."""
-    types = list(cfg.types)
+    types = _normalize_types_without_low_cardinality(list(cfg.types))
     codecs = list(cfg.codecs)
     types, codecs = _expand_auto_column_alternatives(
         cfg,
         types=types,
         codecs=codecs,
     )
+    types = _normalize_types_without_low_cardinality(types)
     return ColumnRule(
         by_type=cfg.by_type,
         by_name=cfg.by_name,

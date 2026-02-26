@@ -777,10 +777,32 @@ class RuleResolverTests(unittest.TestCase):
         alternatives = resolved.column_rules[0].alternatives
 
         self.assertIn("String", alternatives.types)
-        self.assertIn("LowCardinality(String)", alternatives.types)
+        self.assertNotIn("LowCardinality(String)", alternatives.types)
         self.assertIn("CODEC(LZ4)", alternatives.codecs)
         self.assertIn("CODEC(ZSTD(1))", alternatives.codecs)
         self.assertIn("CODEC(ZSTD(5))", alternatives.codecs)
+
+    def test_low_cardinality_types_are_normalized_out_from_manual_alternatives(self) -> None:
+        """Проверяет, что LowCardinality(...) не попадает в runtime alternatives."""
+        resolver = RuleResolver(banks={})
+        rules = RulesConfig(
+            column_rules=[
+                ColumnRuleConfig(
+                    by_type="String",
+                    types=[
+                        "LowCardinality(String)",
+                        "Nullable(LowCardinality(String))",
+                    ],
+                )
+            ]
+        )
+
+        resolved = resolver.resolve(rules, dbms="clickhouse")
+        alternatives = resolved.column_rules[0].alternatives
+        self.assertIn("String", alternatives.types)
+        self.assertIn("Nullable(String)", alternatives.types)
+        self.assertNotIn("LowCardinality(String)", alternatives.types)
+        self.assertNotIn("Nullable(LowCardinality(String))", alternatives.types)
 
     def test_auto_generate_alternatives_uses_by_type_when_types_empty(self) -> None:
         """Проверяет fallback на by_type для авто-генерации, если types пустой."""

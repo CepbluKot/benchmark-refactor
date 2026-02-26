@@ -27,7 +27,7 @@
       "max_benchmarks_limits": {
         "types": 30,
         "indexes": 30,
-        "sequential": 30
+        "sequential": 5
       },
       "source_insert_rows_per_operation_limits": {
         "sequential": 300000
@@ -44,8 +44,7 @@
             "auto_generate_alternatives": true,
             "auto_compressions_datatype": "String",
             "types": [
-              "String",
-              "LowCardinality(String)"
+              "String"
             ]
           }
         ],

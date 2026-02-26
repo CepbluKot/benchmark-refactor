@@ -1082,6 +1082,307 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
         self.assertEqual(fake_client.drop_calls.count(("bench_tmp", "events__bench__bench_var__0001")), 2)
         self.assertTrue(fake_client.closed)
 
+    def test_run_variant_benchmark_falls_back_to_column_sizes_when_total_size_is_zero(self) -> None:
+        fake_client = _FakeRuntimeClient(
+            query_metrics_sequence=[
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 10_000.0,
+                },
+                {
+                    "elapsed_ns": 50_000_000.0,
+                    "read_rows": 500.0,
+                    "read_bytes": 5_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+            ],
+            count_rows_map={("bench_tmp", "messages__bench__bench_var__0001"): 200},
+            column_sizes_map={
+                ("bench_tmp", "messages__bench__bench_var__0001"): {
+                    "msg": {
+                        "name": "msg",
+                        "datatype": "LowCardinality(String)",
+                        "size_compressed_bytes": 200,
+                        "size_compressed_bytes_readable": "200 B",
+                    }
+                }
+            },
+            index_sizes_map={("bench_tmp", "messages__bench__bench_var__0001"): {}},
+            total_size_map={("bench_tmp", "messages__bench__bench_var__0001"): 0.0},
+        )
+        fake_store = _FakeResultStore()
+
+        payload = VariantBenchmarkTaskPayload(
+            connection=self._connection_payload(),
+            result_connection=self._connection_payload(),
+            result_database="benchmark_results",
+            result_table="combined_benchmark_results",
+            benchmark_run_id=2,
+            benchmark_started_at=datetime(2026, 2, 24, 13, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_var_lowcard",
+            source_database="analytics",
+            source_table="messages",
+            variant_database="bench_tmp",
+            variant_table="messages__bench__bench_var__0001",
+            variant_mode="types",
+            variant_params={},
+            variant_ddl="""
+CREATE TABLE bench_tmp.messages__bench__bench_var__0001
+(
+    `msg` LowCardinality(String)
+)
+ENGINE = MergeTree
+ORDER BY msg
+""",
+            max_iterations=1,
+            insert_rows_limit=1000,
+            query_plan=QueryPlanPayload(
+                test_queries=["SELECT count() FROM `bench_tmp`.`messages__bench__bench_var__0001`"],
+            ),
+            source_benchmark={
+                "source_table_ddl": VALID_SOURCE_DDL,
+                "metrics": {
+                    "total_n_rows_in_source_table": 300,
+                    "source_table_insert_time_ms_measurements_percentiles": [300.0],
+                    "source_table_select_time_ms_measurements_percentiles": [150.0],
+                    "source_table_consumed_compressed_size_bytes_overall": 0.0,
+                    "source_table_consumed_compressed_size_bytes_by_each_column": {
+                        "msg": {
+                            "name": "msg",
+                            "datatype": "String",
+                            "size_compressed_bytes": 400,
+                            "size_compressed_bytes_readable": "400 B",
+                        }
+                    },
+                    "source_table_insert_rows_per_second_measurements_percentiles": [1.0],
+                    "source_table_insert_bytes_per_second_measurements_percentiles": [1.0],
+                    "source_table_insert_memory_usage_measurements_percentiles": [1.0],
+                    "source_table_select_rows_per_second_measurements_percentiles": [1.0],
+                    "source_table_select_bytes_per_second_measurements_percentiles": [1.0],
+                    "source_table_select_memory_usage_measurements_percentiles": [1.0],
+                    "source_table_select_test_query": "SELECT count() FROM source_messages",
+                },
+            },
+            measured_percentiles=[100],
+        )
+
+        with patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks._ClickHouseRuntimeClient",
+            return_value=fake_client,
+        ), patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks.ClickHouseBenchmarkResultStore",
+            return_value=fake_store,
+        ):
+            result = run_variant_benchmark(payload)
+
+        self.assertEqual(result.tested_table_compression_overall_coef, 2.0)
+        parsed_cols_sizes = json.loads(result.tested_table_cols_sizes or "{}")
+        self.assertEqual(parsed_cols_sizes.get("msg", {}).get("size_compressed_bytes"), 200)
+
+    def test_run_variant_benchmark_forces_score_minus_one_when_compression_by_column_empty(self) -> None:
+        fake_client = _FakeRuntimeClient(
+            query_metrics_sequence=[
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 10_000.0,
+                },
+                {
+                    "elapsed_ns": 50_000_000.0,
+                    "read_rows": 500.0,
+                    "read_bytes": 5_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+            ],
+            count_rows_map={("bench_tmp", "events__bench__bench_var__0001"): 200},
+            column_sizes_map={
+                ("bench_tmp", "events__bench__bench_var__0001"): {
+                    "user_id": {
+                        "name": "user_id",
+                        "datatype": "UInt64",
+                        "size_compressed_bytes": 200,
+                        "size_compressed_bytes_readable": "200 B",
+                    }
+                }
+            },
+            total_size_map={("bench_tmp", "events__bench__bench_var__0001"): 200.0},
+        )
+        fake_store = _FakeResultStore()
+
+        payload = VariantBenchmarkTaskPayload(
+            connection=self._connection_payload(),
+            result_connection=self._connection_payload(),
+            result_database="benchmark_results",
+            result_table="combined_benchmark_results",
+            benchmark_run_id=2,
+            benchmark_started_at=datetime(2026, 2, 24, 13, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_var_force_minus_one",
+            source_database="analytics",
+            source_table="events",
+            variant_database="bench_tmp",
+            variant_table="events__bench__bench_var__0001",
+            variant_mode="types",
+            variant_params={},
+            variant_ddl=VALID_VARIANT_DDL,
+            max_iterations=1,
+            insert_rows_limit=1000,
+            query_plan=QueryPlanPayload(
+                test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
+            ),
+            source_benchmark={
+                "source_table_ddl": VALID_SOURCE_DDL,
+                "metrics": {
+                    "total_n_rows_in_source_table": 300,
+                    "source_table_insert_time_ms_measurements_percentiles": [300.0],
+                    "source_table_select_time_ms_measurements_percentiles": [150.0],
+                    "source_table_insert_rows_per_second_measurements_percentiles": [1.0],
+                    "source_table_insert_bytes_per_second_measurements_percentiles": [1.0],
+                    "source_table_insert_memory_usage_measurements_percentiles": [1.0],
+                    "source_table_select_rows_per_second_measurements_percentiles": [1.0],
+                    "source_table_select_bytes_per_second_measurements_percentiles": [1.0],
+                    "source_table_select_memory_usage_measurements_percentiles": [1.0],
+                    # Специально не совпадает с tested column name -> пустой compression_by_column_coef.
+                    "source_table_consumed_compressed_size_bytes_by_each_column": {
+                        "event_time": {
+                            "name": "event_time",
+                            "datatype": "DateTime",
+                            "size_compressed_bytes": 400,
+                            "size_compressed_bytes_readable": "400 B",
+                        }
+                    },
+                    "source_table_consumed_compressed_size_bytes_overall": 400.0,
+                    "source_table_select_test_query": "SELECT count() FROM source_events",
+                },
+            },
+            measured_percentiles=[100],
+        )
+
+        with patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks._ClickHouseRuntimeClient",
+            return_value=fake_client,
+        ), patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks.ClickHouseBenchmarkResultStore",
+            return_value=fake_store,
+        ):
+            result = run_variant_benchmark(payload)
+
+        self.assertEqual(result.score, -1.0)
+        parsed_score = json.loads(result.score_calculation_json or "{}")
+        self.assertEqual(parsed_score.get("status"), "forced_missing_column_compression_coef")
+        self.assertEqual(parsed_score.get("final_score"), -1.0)
+
+    def test_run_variant_benchmark_forces_score_minus_one_when_indexes_json_empty(self) -> None:
+        fake_client = _FakeRuntimeClient(
+            query_metrics_sequence=[
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 10_000.0,
+                },
+                {
+                    "elapsed_ns": 50_000_000.0,
+                    "read_rows": 500.0,
+                    "read_bytes": 5_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+            ],
+            count_rows_map={("bench_tmp", "events__bench__bench_var__0002"): 200},
+            column_sizes_map={
+                ("bench_tmp", "events__bench__bench_var__0002"): {
+                    "user_id": {
+                        "name": "user_id",
+                        "datatype": "UInt64",
+                        "size_compressed_bytes": 200,
+                        "size_compressed_bytes_readable": "200 B",
+                    }
+                }
+            },
+            # Пустые index sizes для variant_mode=indexes -> принудительный score=-1.
+            index_sizes_map={("bench_tmp", "events__bench__bench_var__0002"): {}},
+            total_size_map={("bench_tmp", "events__bench__bench_var__0002"): 200.0},
+        )
+        fake_store = _FakeResultStore()
+
+        payload = VariantBenchmarkTaskPayload(
+            connection=self._connection_payload(),
+            result_connection=self._connection_payload(),
+            result_database="benchmark_results",
+            result_table="combined_benchmark_results",
+            benchmark_run_id=2,
+            benchmark_started_at=datetime(2026, 2, 24, 13, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_var_force_minus_one_indexes",
+            source_database="analytics",
+            source_table="events",
+            variant_database="bench_tmp",
+            variant_table="events__bench__bench_var__0002",
+            variant_mode="indexes",
+            variant_params={
+                "index_choices": {
+                    "user_id": {
+                        "name": "idx_user_id",
+                        "expr": "user_id",
+                        "index_type": "minmax",
+                        "granularity": "2",
+                    }
+                }
+            },
+            variant_ddl=VALID_VARIANT_DDL,
+            max_iterations=1,
+            insert_rows_limit=1000,
+            query_plan=QueryPlanPayload(
+                test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0002`"],
+            ),
+            source_benchmark={
+                "source_table_ddl": VALID_SOURCE_DDL,
+                "metrics": {
+                    "total_n_rows_in_source_table": 300,
+                    "source_table_insert_time_ms_measurements_percentiles": [300.0],
+                    "source_table_select_time_ms_measurements_percentiles": [150.0],
+                    "source_table_insert_rows_per_second_measurements_percentiles": [1.0],
+                    "source_table_insert_bytes_per_second_measurements_percentiles": [1.0],
+                    "source_table_insert_memory_usage_measurements_percentiles": [1.0],
+                    "source_table_select_rows_per_second_measurements_percentiles": [1.0],
+                    "source_table_select_bytes_per_second_measurements_percentiles": [1.0],
+                    "source_table_select_memory_usage_measurements_percentiles": [1.0],
+                    "source_table_consumed_compressed_size_bytes_by_each_column": {
+                        "user_id": {
+                            "name": "user_id",
+                            "datatype": "UInt64",
+                            "size_compressed_bytes": 400,
+                            "size_compressed_bytes_readable": "400 B",
+                        }
+                    },
+                    "source_table_consumed_compressed_size_bytes_overall": 400.0,
+                    "source_table_select_test_query": "SELECT count() FROM source_events",
+                },
+            },
+            measured_percentiles=[100],
+        )
+
+        with patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks._ClickHouseRuntimeClient",
+            return_value=fake_client,
+        ), patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks.ClickHouseBenchmarkResultStore",
+            return_value=fake_store,
+        ):
+            result = run_variant_benchmark(payload)
+
+        self.assertEqual(result.score, -1.0)
+        parsed_score = json.loads(result.score_calculation_json or "{}")
+        self.assertEqual(parsed_score.get("status"), "forced_missing_tested_table_indexes_sizes")
+        self.assertEqual(parsed_score.get("final_score"), -1.0)
+
     def test_run_variant_benchmark_uses_custom_scoring_expression_by_index(self) -> None:
         fake_client = _FakeRuntimeClient(
             query_metrics_sequence=[
@@ -1115,7 +1416,16 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
                 },
             ],
             count_rows_map={("bench_tmp", "events__bench__bench_var__0001"): 222},
-            column_sizes_map={("bench_tmp", "events__bench__bench_var__0001"): {}},
+            column_sizes_map={
+                ("bench_tmp", "events__bench__bench_var__0001"): {
+                    "user_id": {
+                        "name": "user_id",
+                        "datatype": "UInt64",
+                        "size_compressed_bytes": 200,
+                        "size_compressed_bytes_readable": "200 B",
+                    }
+                }
+            },
             total_size_map={("bench_tmp", "events__bench__bench_var__0001"): 2000.0},
         )
         fake_store = _FakeResultStore()
@@ -1130,6 +1440,14 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             "source_table_select_rows_per_second_measurements_percentiles": [1.0, 1.0],
             "source_table_select_bytes_per_second_measurements_percentiles": [1.0, 1.0],
             "source_table_select_memory_usage_measurements_percentiles": [1.0, 1.0],
+            "source_table_consumed_compressed_size_bytes_by_each_column": {
+                "user_id": {
+                    "name": "user_id",
+                    "datatype": "UInt64",
+                    "size_compressed_bytes": 400,
+                    "size_compressed_bytes_readable": "400 B",
+                }
+            },
         }
 
         payload = VariantBenchmarkTaskPayload(
@@ -1215,7 +1533,16 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
                 },
             ],
             count_rows_map={("bench_tmp", "events__bench__bench_var__0001"): 222},
-            column_sizes_map={("bench_tmp", "events__bench__bench_var__0001"): {}},
+            column_sizes_map={
+                ("bench_tmp", "events__bench__bench_var__0001"): {
+                    "user_id": {
+                        "name": "user_id",
+                        "datatype": "UInt64",
+                        "size_compressed_bytes": 200,
+                        "size_compressed_bytes_readable": "200 B",
+                    }
+                }
+            },
             total_size_map={("bench_tmp", "events__bench__bench_var__0001"): 2000.0},
         )
         fake_store = _FakeResultStore()
@@ -1230,6 +1557,14 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             "source_table_select_rows_per_second_measurements_percentiles": [1.0, 1.0],
             "source_table_select_bytes_per_second_measurements_percentiles": [1.0, 1.0],
             "source_table_select_memory_usage_measurements_percentiles": [1.0, 1.0],
+            "source_table_consumed_compressed_size_bytes_by_each_column": {
+                "user_id": {
+                    "name": "user_id",
+                    "datatype": "UInt64",
+                    "size_compressed_bytes": 400,
+                    "size_compressed_bytes_readable": "400 B",
+                }
+            },
         }
 
         payload = VariantBenchmarkTaskPayload(
@@ -1309,7 +1644,16 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
                 },
             ],
             count_rows_map={("bench_tmp", "events__bench__bench_var__0001"): 222},
-            column_sizes_map={("bench_tmp", "events__bench__bench_var__0001"): {}},
+            column_sizes_map={
+                ("bench_tmp", "events__bench__bench_var__0001"): {
+                    "user_id": {
+                        "name": "user_id",
+                        "datatype": "UInt64",
+                        "size_compressed_bytes": 200,
+                        "size_compressed_bytes_readable": "200 B",
+                    }
+                }
+            },
             total_size_map={("bench_tmp", "events__bench__bench_var__0001"): 2000.0},
         )
         fake_store = _FakeResultStore()
@@ -1324,6 +1668,14 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             "source_table_select_rows_per_second_measurements_percentiles": [1.0, 1.0],
             "source_table_select_bytes_per_second_measurements_percentiles": [1.0, 1.0],
             "source_table_select_memory_usage_measurements_percentiles": [1.0, 1.0],
+            "source_table_consumed_compressed_size_bytes_by_each_column": {
+                "user_id": {
+                    "name": "user_id",
+                    "datatype": "UInt64",
+                    "size_compressed_bytes": 400,
+                    "size_compressed_bytes_readable": "400 B",
+                }
+            },
         }
 
         payload = VariantBenchmarkTaskPayload(
@@ -1409,7 +1761,16 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
                 },
             ],
             count_rows_map={("bench_tmp", "events__bench__bench_var__0001"): 222},
-            column_sizes_map={("bench_tmp", "events__bench__bench_var__0001"): {}},
+            column_sizes_map={
+                ("bench_tmp", "events__bench__bench_var__0001"): {
+                    "user_id": {
+                        "name": "user_id",
+                        "datatype": "UInt64",
+                        "size_compressed_bytes": 200,
+                        "size_compressed_bytes_readable": "200 B",
+                    }
+                }
+            },
             total_size_map={("bench_tmp", "events__bench__bench_var__0001"): 2000.0},
         )
         fake_store = _FakeResultStore()
@@ -1424,6 +1785,14 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             "source_table_select_rows_per_second_measurements_percentiles": [1.0, 1.0],
             "source_table_select_bytes_per_second_measurements_percentiles": [1.0, 1.0],
             "source_table_select_memory_usage_measurements_percentiles": [1.0, 1.0],
+            "source_table_consumed_compressed_size_bytes_by_each_column": {
+                "user_id": {
+                    "name": "user_id",
+                    "datatype": "UInt64",
+                    "size_compressed_bytes": 400,
+                    "size_compressed_bytes_readable": "400 B",
+                }
+            },
         }
 
         payload = VariantBenchmarkTaskPayload(
@@ -1504,7 +1873,16 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
                 },
             ],
             count_rows_map={("bench_tmp", "events__bench__bench_var__0001"): 222},
-            column_sizes_map={("bench_tmp", "events__bench__bench_var__0001"): {}},
+            column_sizes_map={
+                ("bench_tmp", "events__bench__bench_var__0001"): {
+                    "user_id": {
+                        "name": "user_id",
+                        "datatype": "UInt64",
+                        "size_compressed_bytes": 200,
+                        "size_compressed_bytes_readable": "200 B",
+                    }
+                }
+            },
             total_size_map={("bench_tmp", "events__bench__bench_var__0001"): 2000.0},
         )
         fake_store = _FakeResultStore()
@@ -1519,6 +1897,14 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             "source_table_select_rows_per_second_measurements_percentiles": [1.0, 1.0],
             "source_table_select_bytes_per_second_measurements_percentiles": [1.0, 1.0],
             "source_table_select_memory_usage_measurements_percentiles": [1.0, 1.0],
+            "source_table_consumed_compressed_size_bytes_by_each_column": {
+                "user_id": {
+                    "name": "user_id",
+                    "datatype": "UInt64",
+                    "size_compressed_bytes": 400,
+                    "size_compressed_bytes_readable": "400 B",
+                }
+            },
         }
 
         payload = VariantBenchmarkTaskPayload(
@@ -1723,6 +2109,84 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
                 "events__bench__bench_var__0001",
                 allowed_database="bench_tmp",
             )
+
+    def test_runtime_client_get_column_sizes_aggregates_low_cardinality_subcolumns(self) -> None:
+        client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
+        client.execute = lambda query, params=None: [  # type: ignore[method-assign]
+            ("msg", "LowCardinality(String)", 0),
+            ("msg.keys", "UInt32", 120),
+            ("msg.dictionary", "String", 880),
+        ]
+
+        sizes = client.get_column_sizes("bench_tmp", "messages")
+        self.assertIn("msg", sizes)
+        self.assertNotIn("msg.keys", sizes)
+        self.assertNotIn("msg.dictionary", sizes)
+        self.assertEqual(sizes["msg"]["datatype"], "LowCardinality(String)")
+        self.assertEqual(sizes["msg"]["size_compressed_bytes"], 1000)
+        self.assertEqual(
+            sizes["msg"]["size_compressed_bytes_readable"],
+            make_readable_bytes(1000),
+        )
+
+    def test_runtime_client_get_column_sizes_fallbacks_to_parts_columns_when_columns_zero(self) -> None:
+        client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
+
+        def _execute(query: str, params: Optional[Dict[str, Any]] = None):
+            del params
+            if "FROM system.columns" in query:
+                return [("msg", "LowCardinality(String)", 0)]
+            if "FROM system.parts_columns" in query:
+                return [("msg", "LowCardinality(String)", 777)]
+            return []
+
+        client.execute = _execute  # type: ignore[method-assign]
+
+        sizes = client.get_column_sizes("bench_tmp", "messages")
+        self.assertIn("msg", sizes)
+        self.assertEqual(sizes["msg"]["size_compressed_bytes"], 777)
+        self.assertEqual(sizes["msg"]["datatype"], "LowCardinality(String)")
+
+    def test_runtime_client_get_total_compressed_size_bytes_fallbacks_to_bytes_on_disk(self) -> None:
+        client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
+
+        def _execute(query: str, params: Optional[Dict[str, Any]] = None):
+            del params
+            if "sum(data_compressed_bytes)" in query:
+                return [(0,)]
+            if "sum(bytes_on_disk)" in query:
+                return [(2048,)]
+            return []
+
+        client.execute = _execute  # type: ignore[method-assign]
+
+        total = client.get_total_compressed_size_bytes("bench_tmp", "messages")
+        self.assertEqual(total, 2048.0)
+
+    def test_runtime_client_get_column_sizes_single_column_uses_total_size_fallback(self) -> None:
+        client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
+
+        def _execute(query: str, params: Optional[Dict[str, Any]] = None):
+            del params
+            if "FROM system.columns" in query:
+                return [("msg", "LowCardinality(String)", 0)]
+            if "FROM system.parts_columns" in query:
+                raise RuntimeError("unknown column data_compressed_bytes")
+            if "sum(data_compressed_bytes)" in query:
+                return [(0,)]
+            if "sum(bytes_on_disk)" in query:
+                return [(555,)]
+            return []
+
+        client.execute = _execute  # type: ignore[method-assign]
+
+        sizes = client.get_column_sizes("bench_tmp", "messages")
+        self.assertIn("msg", sizes)
+        self.assertEqual(sizes["msg"]["size_compressed_bytes"], 555)
+        self.assertEqual(
+            sizes["msg"]["size_compressed_bytes_readable"],
+            make_readable_bytes(555),
+        )
 
     def test_strict_insert_query_uses_numbers_and_respects_measurement_offset(self) -> None:
         query = _ClickHouseRuntimeClient._build_source_select_for_insert(

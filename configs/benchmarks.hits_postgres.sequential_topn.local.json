@@ -32,8 +32,7 @@
           {
             "by_type": "String",
             "types": [
-              "String",
-              "LowCardinality(String)"
+              "String"
             ],
             "codecs": [
               "CODEC(LZ4)",

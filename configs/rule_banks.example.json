@@ -60,7 +60,7 @@
         },
         {
           "by_type": "String",
-          "types": ["String", "LowCardinality(String)"],
+          "types": ["String"],
           "codecs": ["CODEC(LZ4)", "CODEC(ZSTD(1))", "CODEC(ZSTD(3))"]
         },
         {
@@ -70,12 +70,12 @@
         },
         {
           "by_type": "LowCardinality(String)",
-          "types": ["LowCardinality(String)", "String"],
+          "types": ["String"],
           "codecs": ["CODEC(LZ4)", "CODEC(ZSTD(1))", "CODEC(ZSTD(3))"]
         },
         {
           "by_type": "LowCardinality(UInt32)",
-          "types": ["LowCardinality(UInt32)", "UInt32"],
+          "types": ["UInt32"],
           "codecs": ["CODEC(LZ4)", "CODEC(ZSTD(1))"]
         },
         {
@@ -125,12 +125,12 @@
         },
         {
           "by_type": "Nullable(String)",
-          "types": ["Nullable(String)", "Nullable(LowCardinality(String))"],
+          "types": ["Nullable(String)"],
           "codecs": ["CODEC(ZSTD(1))", "CODEC(ZSTD(3))"]
         },
         {
           "by_type": "Nullable(LowCardinality(String))",
-          "types": ["Nullable(LowCardinality(String))", "Nullable(String)"],
+          "types": ["Nullable(String)"],
           "codecs": ["CODEC(ZSTD(1))", "CODEC(ZSTD(3))"]
         },
         {

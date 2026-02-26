@@ -162,6 +162,67 @@ def _error_query_metrics() -> Dict[str, float]:
     }
 
 
+def _sum_column_compressed_size_bytes(column_sizes: Any) -> float:
+    """Суммирует `size_compressed_bytes` по словарю колонок."""
+    if not isinstance(column_sizes, dict):
+        return 0.0
+    total = 0.0
+    for stats in column_sizes.values():
+        if not isinstance(stats, dict):
+            continue
+        try:
+            value = float(stats.get("size_compressed_bytes", 0.0) or 0.0)
+        except Exception:
+            continue
+        if value > 0 and math.isfinite(value):
+            total += value
+    return total
+
+
+def _wait_for_table_size_materialization_if_needed(
+    client: "_ClickHouseRuntimeClient",
+    *,
+    database: str,
+    table: str,
+    column_sizes: Dict[str, Dict[str, Any]],
+    index_sizes: Dict[str, Dict[str, Any]],
+    total_size_bytes: float,
+    timeout_sec: float = 5.0,
+    poll_sec: float = 0.5,
+) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], float]:
+    """
+    Короткий poll размеров таблицы, если первичный снимок дал нули.
+
+    Нужно для случаев, когда сразу после INSERT системные таблицы ещё не успели
+    отдать финальные размеры (в т.ч. на некоторых схемах LowCardinality).
+    """
+    effective_total_size = float(total_size_bytes or 0.0)
+    effective_column_sizes = dict(column_sizes or {})
+    effective_index_sizes = dict(index_sizes or {})
+
+    if effective_total_size > 0 or _sum_column_compressed_size_bytes(effective_column_sizes) > 0:
+        return effective_column_sizes, effective_index_sizes, effective_total_size
+
+    deadline = time.monotonic() + max(0.0, float(timeout_sec))
+    while time.monotonic() < deadline:
+        sleep_time = max(0.0, float(poll_sec))
+        if sleep_time > 0:
+            time.sleep(sleep_time)
+
+        effective_column_sizes = client.get_column_sizes(database, table)
+        effective_index_sizes = client.get_index_sizes(database, table)
+        effective_total_size = float(
+            client.get_total_compressed_size_bytes(database, table) or 0.0
+        )
+        if (
+            effective_total_size > 0
+            or _sum_column_compressed_size_bytes(effective_column_sizes) > 0
+        ):
+            break
+
+    return effective_column_sizes, effective_index_sizes, effective_total_size
+
+
 def _to_metric_or_error(value: Any) -> float:
     """Безопасно приводит значение метрики к float, иначе возвращает `-1`."""
     if value is None:
@@ -838,7 +899,16 @@ class _ClickHouseRuntimeClient:
         return int(rows[0][0] or 0)
 
     def get_total_compressed_size_bytes(self, database: str, table: str) -> float:
-        """Суммарный compressed size таблицы."""
+        """
+        Суммарный размер таблицы в байтах.
+
+        Приоритет:
+          1) `sum(data_compressed_bytes)` из `system.parts`;
+          2) fallback `sum(bytes_on_disk)` из `system.parts`.
+
+        Fallback нужен для случаев, когда в конкретной версии/режиме ClickHouse
+        `data_compressed_bytes` может быть временно нулевым.
+        """
         rows = self.execute(
             """
             SELECT sum(data_compressed_bytes)
@@ -849,12 +919,48 @@ class _ClickHouseRuntimeClient:
             """,
             {"database": database, "table": table},
         )
-        if not rows or rows[0][0] is None:
+        compressed_size = 0.0
+        if rows and rows[0][0] is not None:
+            try:
+                compressed_size = float(rows[0][0])
+            except Exception:
+                compressed_size = 0.0
+        if compressed_size > 0:
+            return compressed_size
+
+        fallback_rows = self.execute(
+            """
+            SELECT sum(bytes_on_disk)
+            FROM system.parts
+            WHERE database = %(database)s
+              AND table = %(table)s
+              AND active = 1
+            """,
+            {"database": database, "table": table},
+        )
+        if not fallback_rows or fallback_rows[0][0] is None:
             return 0.0
-        return float(rows[0][0])
+        try:
+            fallback_size = float(fallback_rows[0][0])
+        except Exception:
+            fallback_size = 0.0
+        if fallback_size > 0:
+            logger.info(
+                "Используем fallback bytes_on_disk для %s.%s: %.0f B",
+                database,
+                table,
+                fallback_size,
+            )
+        return fallback_size
 
     def get_column_sizes(self, database: str, table: str) -> Dict[str, Dict[str, Any]]:
-        """Размеры колонок (compressed bytes) + type."""
+        """
+        Размеры колонок (compressed bytes) + type.
+
+        Важно для LowCardinality: ClickHouse может хранить фактический объём
+        в subcolumns (`col.dictionary`, `col.keys` и т.п.). Поэтому агрегируем
+        subcolumns в базовую колонку `col`.
+        """
         rows = self.execute(
             """
             SELECT
@@ -867,16 +973,88 @@ class _ClickHouseRuntimeClient:
             """,
             {"database": database, "table": table},
         )
-        result: dict[str, dict[str, Any]] = {}
-        for name, data_type, compressed_bytes in rows:
-            bytes_value = int(compressed_bytes or 0)
-            result[str(name)] = {
-                "name": str(name),
-                "datatype": str(data_type),
-                "size_compressed_bytes": bytes_value,
-                "size_compressed_bytes_readable": make_readable_bytes(bytes_value),
-            }
-        return result
+        aggregated: dict[str, dict[str, Any]] = {}
+        has_main_column_type: set[str] = set()
+
+        def _merge_rows(rows_to_merge: Sequence[tuple[Any, Any, Any]]) -> None:
+            for raw_name, data_type, compressed_bytes in rows_to_merge:
+                full_name = str(raw_name)
+                base_name = full_name.split(".", 1)[0]
+                is_subcolumn = full_name != base_name
+                try:
+                    bytes_value = int(compressed_bytes or 0)
+                except Exception:
+                    bytes_value = 0
+
+                entry = aggregated.get(base_name)
+                if entry is None:
+                    entry = {
+                        "name": base_name,
+                        "datatype": str(data_type),
+                        "size_compressed_bytes": 0,
+                    }
+                    aggregated[base_name] = entry
+
+                entry["size_compressed_bytes"] = int(entry["size_compressed_bytes"]) + bytes_value
+
+                # Предпочитаем datatype основной колонки, если он есть.
+                if not is_subcolumn:
+                    entry["datatype"] = str(data_type)
+                    has_main_column_type.add(base_name)
+                elif base_name not in has_main_column_type and not entry.get("datatype"):
+                    entry["datatype"] = str(data_type)
+
+        _merge_rows(rows)
+
+        # Fallback для случаев, когда system.columns даёт только нули
+        # (например, некоторые LowCardinality-представления).
+        if _sum_column_compressed_size_bytes(aggregated) <= 0:
+            part_bytes_fields = (
+                "data_compressed_bytes",
+                "column_data_compressed_bytes",
+            )
+            for bytes_field in part_bytes_fields:
+                try:
+                    part_rows = self.execute(
+                        f"""
+                        SELECT
+                            `column`,
+                            any(type),
+                            sum({bytes_field})
+                        FROM system.parts_columns
+                        WHERE database = %(database)s
+                          AND table = %(table)s
+                          AND active = 1
+                        GROUP BY `column`
+                        """,
+                        {"database": database, "table": table},
+                    )
+                    # Не затираем, а домерживаем: datatype из system.columns важнее.
+                    # Если в system.columns были только нули, здесь появятся реальные bytes.
+                    _merge_rows(part_rows)
+                    if _sum_column_compressed_size_bytes(aggregated) > 0:
+                        break
+                except Exception:
+                    logger.exception(
+                        "Не удалось получить column sizes из system.parts_columns "
+                        "(field=%s) для %s.%s",
+                        bytes_field,
+                        database,
+                        table,
+                    )
+
+        # Последний fallback для single-column таблиц: если побайтовой разбивки нет,
+        # но общий размер таблицы известен, заполняем им единственную колонку.
+        if _sum_column_compressed_size_bytes(aggregated) <= 0 and len(aggregated) == 1:
+            total_size_bytes = self.get_total_compressed_size_bytes(database, table)
+            if total_size_bytes > 0:
+                only_column_name = next(iter(aggregated))
+                aggregated[only_column_name]["size_compressed_bytes"] = int(total_size_bytes)
+
+        for entry in aggregated.values():
+            bytes_value = int(entry.get("size_compressed_bytes", 0) or 0)
+            entry["size_compressed_bytes_readable"] = make_readable_bytes(bytes_value)
+        return aggregated
 
     def get_index_sizes(self, database: str, table: str) -> Dict[str, Dict[str, Any]]:
         """Размеры skip-индексов в bytes."""
@@ -2517,17 +2695,42 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
         source_total_rows = client.count_rows(payload.source_database, payload.source_table)
         tested_total_rows = client.count_rows(baseline_database, baseline_table)
         source_columns_sizes = client.get_column_sizes(payload.source_database, payload.source_table)
-        tested_columns_sizes = client.get_column_sizes(baseline_database, baseline_table)
         source_indexes_sizes = client.get_index_sizes(payload.source_database, payload.source_table)
-        tested_indexes_sizes = client.get_index_sizes(baseline_database, baseline_table)
         source_total_size_bytes = client.get_total_compressed_size_bytes(
             payload.source_database,
             payload.source_table,
         )
+        source_columns_sizes, source_indexes_sizes, source_total_size_bytes = (
+            _wait_for_table_size_materialization_if_needed(
+                client,
+                database=payload.source_database,
+                table=payload.source_table,
+                column_sizes=source_columns_sizes,
+                index_sizes=source_indexes_sizes,
+                total_size_bytes=source_total_size_bytes,
+            )
+        )
+        if source_total_size_bytes <= 0:
+            source_total_size_bytes = _sum_column_compressed_size_bytes(source_columns_sizes)
+
+        tested_columns_sizes = client.get_column_sizes(baseline_database, baseline_table)
+        tested_indexes_sizes = client.get_index_sizes(baseline_database, baseline_table)
         tested_total_size_bytes = client.get_total_compressed_size_bytes(
             baseline_database,
             baseline_table,
         )
+        tested_columns_sizes, tested_indexes_sizes, tested_total_size_bytes = (
+            _wait_for_table_size_materialization_if_needed(
+                client,
+                database=baseline_database,
+                table=baseline_table,
+                column_sizes=tested_columns_sizes,
+                index_sizes=tested_indexes_sizes,
+                total_size_bytes=tested_total_size_bytes,
+            )
+        )
+        if tested_total_size_bytes <= 0:
+            tested_total_size_bytes = _sum_column_compressed_size_bytes(tested_columns_sizes)
         source_total_index_size_bytes = float(
             sum(
                 float(index_stats.get("size_compressed_bytes", 0.0) or 0.0)
@@ -2908,6 +3111,18 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
             payload.variant_database,
             payload.variant_table,
         )
+        tested_columns_sizes, tested_indexes_sizes, tested_total_size_bytes = (
+            _wait_for_table_size_materialization_if_needed(
+                client,
+                database=payload.variant_database,
+                table=payload.variant_table,
+                column_sizes=tested_columns_sizes,
+                index_sizes=tested_indexes_sizes,
+                total_size_bytes=tested_total_size_bytes,
+            )
+        )
+        if tested_total_size_bytes <= 0:
+            tested_total_size_bytes = _sum_column_compressed_size_bytes(tested_columns_sizes)
         tested_total_index_size_bytes = float(
             sum(
                 float(index_stats.get("size_compressed_bytes", 0.0) or 0.0)
@@ -2918,10 +3133,48 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
         source_total_size_bytes = float(
             source_metrics.get("source_table_consumed_compressed_size_bytes_overall", 0.0) or 0.0
         )
+        if source_total_size_bytes <= 0:
+            source_total_size_bytes = _sum_column_compressed_size_bytes(
+                source_metrics.get("source_table_consumed_compressed_size_bytes_by_each_column", {})
+            )
+        if source_total_size_bytes <= 0:
+            # Защита от редких baseline-анomalies: читаем live size source-таблицы.
+            live_source_columns_sizes = client.get_column_sizes(
+                payload.source_database,
+                payload.source_table,
+            )
+            live_source_index_sizes = client.get_index_sizes(
+                payload.source_database,
+                payload.source_table,
+            )
+            live_source_total_size_bytes = client.get_total_compressed_size_bytes(
+                payload.source_database,
+                payload.source_table,
+            )
+            (
+                live_source_columns_sizes,
+                live_source_index_sizes,
+                live_source_total_size_bytes,
+            ) = _wait_for_table_size_materialization_if_needed(
+                client,
+                database=payload.source_database,
+                table=payload.source_table,
+                column_sizes=live_source_columns_sizes,
+                index_sizes=live_source_index_sizes,
+                total_size_bytes=live_source_total_size_bytes,
+            )
+            if live_source_total_size_bytes <= 0:
+                live_source_total_size_bytes = _sum_column_compressed_size_bytes(
+                    live_source_columns_sizes
+                )
+            if live_source_total_size_bytes > 0:
+                source_total_size_bytes = live_source_total_size_bytes
         source_total_size_bytes_with_indexes = float(
             source_metrics.get("source_table_total_size_bytes_with_indexes", source_total_size_bytes)
             or source_total_size_bytes
         )
+        if source_total_size_bytes_with_indexes <= 0 and source_total_size_bytes > 0:
+            source_total_size_bytes_with_indexes = source_total_size_bytes
 
         tested_table_indexes_sizes_percent_from_col_size: dict[str, float] = {}
         for index_name, index_stats in tested_indexes_sizes.items():
@@ -3214,6 +3467,57 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
                 f"{payload.variant_table}"
             ),
         )
+        force_score_to_minus_one_reason: Optional[str] = None
+        force_score_to_minus_one_status: Optional[str] = None
+        if payload.variant_mode == "types" and not compression_by_column_coef:
+            force_score_to_minus_one_status = "forced_missing_column_compression_coef"
+            force_score_to_minus_one_reason = (
+                "tested_table_compression_by_each_column_coef пустой при variant_mode=types; "
+                "вариант принудительно помечен score=-1"
+            )
+        elif payload.variant_mode == "indexes":
+            if not tested_indexes_sizes:
+                force_score_to_minus_one_status = "forced_missing_tested_table_indexes_sizes"
+                force_score_to_minus_one_reason = (
+                    "tested_table_indexes_sizes пустой при variant_mode=indexes; "
+                    "вариант принудительно помечен score=-1"
+                )
+            elif not tested_table_indexes_sizes_percent_from_col_size:
+                force_score_to_minus_one_status = (
+                    "forced_missing_tested_table_indexes_sizes_percent_from_col_size"
+                )
+                force_score_to_minus_one_reason = (
+                    "tested_table_indexes_sizes_percent_from_col_size пустой при "
+                    "variant_mode=indexes; вариант принудительно помечен score=-1"
+                )
+
+        if force_score_to_minus_one_reason is not None:
+            previous_score = score
+            previous_score_details: Any = score_calculation_json
+            if score_calculation_json:
+                try:
+                    previous_score_details = json.loads(score_calculation_json)
+                except Exception:
+                    previous_score_details = score_calculation_json
+            score = -1.0
+            score_calculation_json = _to_pretty_score_calculation_json(
+                {
+                    "mode": "forced_fallback",
+                    "status": force_score_to_minus_one_status,
+                    "reason": force_score_to_minus_one_reason,
+                    "previous_score": previous_score,
+                    "previous_score_details": previous_score_details,
+                    "final_score": score,
+                }
+            )
+            logger.warning(
+                "run_variant_benchmark %s %s.%s %s: %s",
+                payload.benchmark_id,
+                payload.source_database,
+                payload.source_table,
+                payload.variant_table,
+                force_score_to_minus_one_reason,
+            )
 
         result = BenchmarkVariantResult(
             benchmark_run_id=payload.benchmark_run_id,

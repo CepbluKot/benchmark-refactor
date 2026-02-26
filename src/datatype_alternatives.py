@@ -47,6 +47,44 @@ ALL_POSSIBLE_PREPROCESSINGS: Set[str] = {
 }
 
 
+def _strip_low_cardinality_wrappers(type_expression: str) -> str:
+    """Удаляет `LowCardinality(...)`-обёртки из type-выражения."""
+    expression = str(type_expression or "").strip()
+    if not expression:
+        return expression
+
+    marker = "lowcardinality("
+    result_chars: list[str] = []
+    cursor = 0
+    lower_expression = expression.lower()
+
+    while cursor < len(expression):
+        if lower_expression.startswith(marker, cursor):
+            cursor += len(marker)
+            depth = 1
+            inner_chars: list[str] = []
+            while cursor < len(expression) and depth > 0:
+                char = expression[cursor]
+                if char == "(":
+                    depth += 1
+                    inner_chars.append(char)
+                elif char == ")":
+                    depth -= 1
+                    if depth > 0:
+                        inner_chars.append(char)
+                else:
+                    inner_chars.append(char)
+                cursor += 1
+            inner_expression = "".join(inner_chars)
+            result_chars.append(_strip_low_cardinality_wrappers(inner_expression))
+            continue
+
+        result_chars.append(expression[cursor])
+        cursor += 1
+
+    return "".join(result_chars).strip()
+
+
 def generate_possible_compressions() -> List[str]:
     """Генерирует список codec-частей без CODEC(...): `ZSTD(1)`, `LZ4`, ..."""
     possible_compressions: list[str] = []
@@ -118,7 +156,7 @@ def generate_possible_new_datatypes(
     """Строит декартово произведение datatype × codec-expression."""
     result: list[DataTypeCodecAlternative] = []
     for new_datatype in new_possible_datatypes:
-        normalized_datatype = str(new_datatype).strip()
+        normalized_datatype = _strip_low_cardinality_wrappers(str(new_datatype).strip())
         if not normalized_datatype:
             continue
         for compression in possible_compressions_w_preprocessings:
