@@ -196,11 +196,14 @@
 8. итоговые значения: `score` и `score_calculation_json`.
 
 Примеры аналитики по новой схеме:
+Для phased-стратегии запросы ниже нужно выполнять к таблице из
+`BENCH_PHASED_RESULT_TABLE` (или `${BENCH_RESULT_TABLE}__phased` по умолчанию).
+Для legacy-стратегий использовать `BENCH_LEGACY_RESULT_TABLE`.
 
 ```sql
 -- Финальный DDL победителя
 SELECT tested_table_ddl
-FROM benchmark_results
+FROM benchmark_results__phased
 WHERE benchmark_run_id = 123
   AND phase = 5
   AND rank_in_phase = 1
@@ -210,13 +213,13 @@ WHERE benchmark_run_id = 123
 -- Lineage победителя по parent_id
 WITH RECURSIVE lineage AS (
     SELECT *
-    FROM benchmark_results
+    FROM benchmark_results__phased
     WHERE benchmark_run_id = 123
       AND phase = 5
       AND rank_in_phase = 1
     UNION ALL
     SELECT r.*
-    FROM benchmark_results r
+    FROM benchmark_results__phased r
     JOIN lineage l ON r.id = l.parent_id
 )
 SELECT phase, phase_name, score, size_bytes_total, variant_params_json
@@ -382,18 +385,19 @@ Baseline исходного DDL для них уже выполнен runner-о�
 6. `test_database` (опционально, отдельная БД для variant-таблиц)
 7. `insert_operations_count`
 8. `sequential_types_top_n_for_indexes`
-9. `insert_rows_per_operation_limit`
-10. `source_insert_rows_per_operation_limit` (legacy fallback baseline-лимита)
-11. `source_insert_rows_per_operation_limits`
-12. `insert_rows_per_operation_limits`
-13. `max_benchmarks_limits`
-14. `max_type_benchmarks` (legacy)
-15. `max_index_benchmarks` (legacy)
-16. `index_granularity_values` (global-перебор `SETTINGS index_granularity`)
-17. `column_rules_mode`, `index_rules_mode`
-18. `queries`
-19. `scoring`
-20. `table_rules[]` (локальные override, включая `strategy` и `test_database`)
+9. `sequential_top_n_limits` (phase-level top-N: `order_by/types/codecs/indexes/final_validation`)
+10. `insert_rows_per_operation_limit`
+11. `source_insert_rows_per_operation_limit` (legacy fallback baseline-лимита)
+12. `source_insert_rows_per_operation_limits`
+13. `insert_rows_per_operation_limits`
+14. `max_benchmarks_limits`
+15. `max_type_benchmarks` (legacy)
+16. `max_index_benchmarks` (legacy)
+17. `index_granularity_values` (global-перебор `SETTINGS index_granularity`)
+18. `column_rules_mode`, `index_rules_mode`
+19. `queries`
+20. `scoring`
+21. `table_rules[]` (локальные override, включая `strategy` и `test_database`)
 
 Правило по `databases`/`tables`:
 1. Если `tables` задан map-форматом (`{db: "*"|[tables]}`), `databases`
@@ -651,16 +655,17 @@ Baseline исходного DDL для них уже выполнен runner-о�
 3. `queries`
 4. `insert_operations_count`
 5. `sequential_types_top_n_for_indexes`
-6. `insert_rows_per_operation_limit`
-7. `source_insert_rows_per_operation_limit`
-8. `source_insert_rows_per_operation_limits`
-9. `insert_rows_per_operation_limits`
-10. `max_benchmarks_limits`
-11. `max_type_benchmarks` / `max_index_benchmarks` (legacy)
-12. `index_granularity_values`
-13. `strategy`
-14. `test_database`
-15. `scoring`
+6. `sequential_top_n_limits`
+7. `insert_rows_per_operation_limit`
+8. `source_insert_rows_per_operation_limit`
+9. `source_insert_rows_per_operation_limits`
+10. `insert_rows_per_operation_limits`
+11. `max_benchmarks_limits`
+12. `max_type_benchmarks` / `max_index_benchmarks` (legacy)
+13. `index_granularity_values`
+14. `strategy`
+15. `test_database`
+16. `scoring`
 
 ## 11) Entry points
 

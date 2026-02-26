@@ -111,3 +111,21 @@ class BenchmarkResultStore(ABC):
     ) -> None:
         """Опционально фиксирует `finished_at` для run-контекста."""
         return None
+
+    def recalculate_phase_ranking(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        phase: Optional[int] = None,
+        variant_mode: Optional[str] = None,
+        phase_name: Optional[str] = None,
+    ) -> None:
+        """
+        Опционально пересчитывает `rank_in_phase`/`is_top_n` для scope фазы.
+
+        По умолчанию no-op: полезно для in-memory store и store без rank-колонок.
+        """
+        return None

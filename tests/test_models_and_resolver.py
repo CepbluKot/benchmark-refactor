@@ -484,6 +484,17 @@ class ModelsValidationTests(unittest.TestCase):
                 },
                 "insert_operations_count": 7,
                 "sequential_types_top_n_for_indexes": 3,
+                "sequential_top_n_limits": {
+                    "order_by": 4,
+                    "types": 3,
+                    "codecs": 2,
+                    "indexes": 1,
+                },
+                "max_winners_per_parent_limits": {
+                    "types": 2,
+                    "codecs": 2,
+                    "indexes": 1,
+                },
                 "insert_rows_per_operation_limit": 123,
                 "source_insert_rows_per_operation_limit": 77,
                 "source_insert_rows_per_operation_limits": {
@@ -508,6 +519,14 @@ class ModelsValidationTests(unittest.TestCase):
                         "table": "events",
                         "insert_operations_count": 4,
                         "sequential_types_top_n_for_indexes": 2,
+                        "sequential_top_n_limits": {
+                            "types": 2,
+                            "indexes": 1
+                        },
+                        "max_winners_per_parent_limits": {
+                            "types": 2,
+                            "codecs": 1,
+                        },
                         "insert_rows_per_operation_limit": 99,
                         "source_insert_rows_per_operation_limit": 44,
                         "source_insert_rows_per_operation_limits": {
@@ -531,6 +550,15 @@ class ModelsValidationTests(unittest.TestCase):
 
         self.assertEqual(bench.max_iterations, 7)
         self.assertEqual(bench.sequential_top_n, 3)
+        self.assertIsNotNone(bench.sequential_top_n_limits)
+        self.assertEqual(bench.sequential_top_n_limits.for_mode("order_by"), 4)
+        self.assertEqual(bench.sequential_top_n_limits.for_mode("types"), 3)
+        self.assertEqual(bench.sequential_top_n_limits.for_mode("codecs"), 2)
+        self.assertEqual(bench.sequential_top_n_limits.for_mode("indexes"), 1)
+        self.assertIsNotNone(bench.max_winners_per_parent_limits)
+        self.assertEqual(bench.max_winners_per_parent_limits.for_mode("types"), 2)
+        self.assertEqual(bench.max_winners_per_parent_limits.for_mode("codecs"), 2)
+        self.assertEqual(bench.max_winners_per_parent_limits.for_mode("indexes"), 1)
         self.assertEqual(bench.insert_rows_limit, 123)
         self.assertEqual(bench.source_insert_rows_limit, 77)
         self.assertIsNotNone(bench.source_insert_rows_limits)
@@ -550,6 +578,12 @@ class ModelsValidationTests(unittest.TestCase):
         table_rule = bench.table_rules[0]
         self.assertEqual(table_rule.max_iterations, 4)
         self.assertEqual(table_rule.sequential_top_n, 2)
+        self.assertIsNotNone(table_rule.sequential_top_n_limits)
+        self.assertEqual(table_rule.sequential_top_n_limits.for_mode("types"), 2)
+        self.assertEqual(table_rule.sequential_top_n_limits.for_mode("indexes"), 1)
+        self.assertIsNotNone(table_rule.max_winners_per_parent_limits)
+        self.assertEqual(table_rule.max_winners_per_parent_limits.for_mode("types"), 2)
+        self.assertEqual(table_rule.max_winners_per_parent_limits.for_mode("codecs"), 1)
         self.assertEqual(table_rule.insert_rows_limit, 99)
         self.assertEqual(table_rule.source_insert_rows_limit, 44)
         self.assertIsNotNone(table_rule.source_insert_rows_limits)

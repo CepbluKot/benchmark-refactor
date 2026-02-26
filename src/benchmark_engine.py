@@ -373,6 +373,18 @@ class BenchmarkPlanner:
                     if table_rule and table_rule.sequential_top_n is not None
                     else benchmark.sequential_top_n
                 )
+                sequential_top_n_limits = self._merge_insert_rows_limits(
+                    benchmark_insert_rows_limits=benchmark.sequential_top_n_limits,
+                    table_insert_rows_limits=(
+                        table_rule.sequential_top_n_limits if table_rule else None
+                    ),
+                )
+                max_winners_per_parent_limits = self._merge_insert_rows_limits(
+                    benchmark_insert_rows_limits=benchmark.max_winners_per_parent_limits,
+                    table_insert_rows_limits=(
+                        table_rule.max_winners_per_parent_limits if table_rule else None
+                    ),
+                )
                 insert_rows_limit = (
                     table_rule.insert_rows_limit
                     if table_rule and table_rule.insert_rows_limit is not None
@@ -468,6 +480,8 @@ class BenchmarkPlanner:
                     mode=mode,
                     max_iterations=max_iterations,
                     sequential_top_n=sequential_top_n,
+                    sequential_top_n_limits=sequential_top_n_limits,
+                    max_winners_per_parent_limits=max_winners_per_parent_limits,
                     insert_rows_limit=insert_rows_limit,
                     source_insert_rows_limit=source_insert_rows_limit,
                     source_insert_rows_limits=source_insert_rows_limits,
@@ -1497,13 +1511,32 @@ class BenchmarkRunner:
 
         Оценка лимитная (верхняя граница), чтобы не перечислять реальные комбинации:
           phase1(order_by)
-          + top_n * (phase2(types) + validation)
-          + top_n * (phase3(codecs) + validation)
-          + top_n * (phase4(indexes) + validation)
-          + phase5(final_validation top_n).
+          + winners_order_by * (phase2(types) + validation)
+          + winners_types * (phase3(codecs) + validation)
+          + winners_codecs * (phase4(indexes) + validation)
+          + winners_final_validation.
         """
-        top_n = max(1, int(table_plan.sequential_top_n))
         fallback_limit = max(1, int(table_plan.max_iterations))
+        top_n_order_by = self._resolve_sequential_stage_top_n(
+            table_plan=table_plan,
+            stage_mode="order_by",
+        )
+        top_n_types = self._resolve_sequential_stage_top_n(
+            table_plan=table_plan,
+            stage_mode="types",
+        )
+        top_n_codecs = self._resolve_sequential_stage_top_n(
+            table_plan=table_plan,
+            stage_mode="codecs",
+        )
+        top_n_indexes = self._resolve_sequential_stage_top_n(
+            table_plan=table_plan,
+            stage_mode="indexes",
+        )
+        top_n_final_validation = self._resolve_sequential_stage_top_n(
+            table_plan=table_plan,
+            stage_mode="final_validation",
+        )
 
         def _stage_limit(variant_mode: str, default_value: int) -> int:
             resolved = self._engine.resolve_variant_generation_limit(
@@ -1524,15 +1557,36 @@ class BenchmarkRunner:
             "indexes_validation",
             max(1, len(table_plan.index_granularity_values or [])),
         )
-        final_validation_limit = min(_stage_limit("final_validation", top_n), top_n)
+        winners_order_by = min(order_by_limit, top_n_order_by)
+        winners_types = min(winners_order_by, top_n_types)
+        winners_codecs = min(winners_types, top_n_codecs)
+        winners_indexes = min(winners_codecs, top_n_indexes)
+        winners_final_validation = min(winners_indexes, top_n_final_validation)
 
         return (
             order_by_limit
-            + top_n * (types_limit + 1)
-            + top_n * (codecs_limit + 1)
-            + top_n * (indexes_limit + indexes_validation_limit)
-            + final_validation_limit
+            + winners_order_by * (types_limit + 1)
+            + winners_types * (codecs_limit + 1)
+            + winners_codecs * (indexes_limit + indexes_validation_limit)
+            + winners_final_validation
         )
+
+    @staticmethod
+    def _resolve_sequential_stage_top_n(
+        *,
+        table_plan: TableBenchmarkPlan,
+        stage_mode: str,
+    ) -> int:
+        """Возвращает top-N победителей для конкретной фазы sequential_phased."""
+        limits = table_plan.sequential_top_n_limits
+        if limits is not None:
+            stage_limit = limits.for_mode(stage_mode)
+            if stage_limit is not None:
+                return max(1, int(stage_limit))
+            sequential_limit = limits.for_mode("sequential")
+            if sequential_limit is not None:
+                return max(1, int(sequential_limit))
+        return max(1, int(table_plan.sequential_top_n))
 
     def _validate_scoring_formulas_before_run(
         self,

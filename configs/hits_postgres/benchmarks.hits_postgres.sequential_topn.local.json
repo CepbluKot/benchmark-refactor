@@ -7,27 +7,45 @@
       "column_rules_mode": "inline_only",
       "index_rules_mode": "inline_only",
       "column_order_mode": "compressed_size_desc",
+      "order_by_first": "event_date",
+      "order_by_candidates": [
+        "event_date"
+      ],
       "tables": {
         "default": [
-          "hits_postgres",
-          "messages"
+          "hits_postgres"
         ]
       },
       "test_database": "benchmark_tmp",
       "insert_operations_count": 10,
-      "sequential_types_top_n_for_indexes": 3,
+      "sequential_top_n_limits": {
+        "order_by": 3,
+        "types": 3,
+        "codecs": 3,
+        "indexes": 3,
+        "final_validation": 3
+      },
+      "max_winners_per_parent_limits": {
+        "types": 3,
+        "codecs": 3,
+        "indexes": 3
+      },
       "scoring": {
         "mode": "expression",
-        "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)",
+        "expression": "pow(safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0), 0.9) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.1)",
         "on_error_score": -1.0
       },
       "max_benchmarks_limits": {
-        "types": 30,
-        "indexes": 30,
-        "sequential": 30
+        "order_by": 10,
+        "types": 10,
+        "codecs": 10,
+        "indexes": 222,
+        "indexes_validation": 222,
+        "final_validation": 10,
+        "sequential": 20
       },
       "source_insert_rows_per_operation_limits": {
-        "sequential": 300000
+        "sequential": 100000
       },
       "insert_rows_per_operation_limits": {
         "types": 100000,
@@ -35,8 +53,15 @@
         "sequential": 100000
       },
       "global_rules": {
+        "order_by_rules": {
+          "first_column": "event_date",
+          "candidates": [
+            "event_date"
+          ],
+          "auto_generate_candidates": false
+        },
         "column_rules": [
-          {
+            {
             "by_type": "String",
             "auto_generate_alternatives": true,
             "auto_compressions_datatype": "String",
@@ -47,60 +72,31 @@
           }
         ],
         "index_rules": [
+
           {
-            "by_name": "user_id",
-            "by_type": "Int32",
-            "auto_generate_indexes": true,
+            "by_name": "page_url",
+            "by_type": "String",
+            "auto_generate_indexes": false,
             "indexes": [
               {
-                "type": "set(512)",
-                "granularity": 2,
+                "type": "tokenbf_v1(32768, 3, 0)",
+                "granularity": [2, 4],
                 "index_granularity_values": [
-                  8192,
-                  16384
-                ]
-              },
-              {
-                "type": "bloom_filter(0.01)",
-                "granularity": 2,
-                "index_granularity_values": [
-                  8192
+                  8192, 16384
                 ]
               }
             ]
           },
           {
-            "by_name": "country",
-            "by_type": "String",
-            "auto_generate_indexes": true,
+            "by_name": "page_url",
+            "by_type": "LowCardinality(String)",
+            "auto_generate_indexes": false,
             "indexes": [
               {
-                "type": "set(128)",
-                "granularity": 2,
+                "type": "tokenbf_v1(32768, 3, 0)",
+                "granularity": [2, 4],
                 "index_granularity_values": [
-                  16384
-                ]
-              },
-              {
-                "type": "bloom_filter(0.01)",
-                "granularity": 2,
-                "index_granularity_values": [
-                  8192,
-                  16384
-                ]
-              }
-            ]
-          },
-          {
-            "by_name": "device_type",
-            "by_type": "String",
-            "auto_generate_indexes": true,
-            "indexes": [
-              {
-                "type": "ngrambf_v1(3, 256, 2, 0)",
-                "granularity": 2,
-                "index_granularity_values": [
-                  8192
+                  8192, 16384
                 ]
               }
             ]
@@ -108,89 +104,34 @@
         ]
       },
       "table_rules": [
-        {
-          "database": "default",
-          "table": "messages",
-          "rules": {
-            "index_rules": [
-              {
-                "by_name": "msg",
-                "by_type": "String",
-                "indexes": [
-                  {
-                    "type": "ngrambf_v1(3, 256, 2, 0)",
-                    "granularity": 2,
-                    "index_granularity_values": [
-                      8192
-                    ]
-                  }
-                ]
-              }
-            ]
-          },
-          "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_msg_count_all",
-                "query": "SELECT count() FROM {table} /* benchmark={benchmark_id} */",
-                "cache_mode": "warm",
-                "select_operations_count": 3,
-                "warmup_queries": [
-                  "SELECT count() FROM {table}"
-                ]
-              },
-              {
-                "query_id": "q_msg_prefix_top100",
-                "query": "SELECT msg, count() FROM {table} WHERE msg LIKE 'a%' GROUP BY msg ORDER BY count() DESC LIMIT 100",
-                "cache_mode": "warm",
-                "select_operations_count": 3,
-                "warmup_queries": [
-                  "SELECT count() FROM {table}"
-                ]
-              }
-            ]
-          }
-        }
+        
       ],
       "queries": {
         "mode": "manual",
         "test_queries": [
           {
-            "query_id": "q_count_all",
-            "query": "SELECT count() FROM {table} /* benchmark={benchmark_id} */",
-            "cache_mode": "warm",
-            "select_operations_count": 3,
-            "warmup_queries": [
-              "SELECT count() FROM {table}"
-            ]
+            "query_id": "q_url_like_error",
+            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%error%'",
+            "cache_mode": "cold",
+            "select_operations_count": 10
           },
           {
-            "query_id": "q_country_top100",
-            "query": "SELECT country, count() FROM {table} GROUP BY country ORDER BY count() DESC LIMIT 100",
-            "cache_mode": "warm",
-            "select_operations_count": 3,
-            "warmup_queries": [
-              "SELECT count() FROM {table}"
-            ]
+            "query_id": "q_url_like_nonexistent",
+            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%very_oooooong_non_existing_marker_42%'",
+            "cache_mode": "cold",
+            "select_operations_count": 10
           },
           {
-            "query_id": "q_mobile_revenue_sum",
-            "query": "SELECT sum(revenue) FROM {table} WHERE device_type = 'mobile'",
-            "cache_mode": "warm",
-            "select_operations_count": 3,
-            "warmup_queries": [
-              "SELECT count() FROM {table}"
-            ]
+            "query_id": "q_url_prefix_api",
+            "query": "SELECT count() FROM {table} WHERE page_url LIKE '/api/%'",
+            "cache_mode": "cold",
+            "select_operations_count": 10
           },
           {
-            "query_id": "q_user_revenue_top100",
-            "query": "SELECT user_id, sum(revenue) FROM {table} GROUP BY user_id ORDER BY sum(revenue) DESC LIMIT 100",
-            "cache_mode": "warm",
-            "select_operations_count": 3,
-            "warmup_queries": [
-              "SELECT count() FROM {table}"
-            ]
+            "query_id": "q_url_like_error_path_segment",
+            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%/error/%'",
+            "cache_mode": "cold",
+            "select_operations_count": 10
           }
         ]
       }

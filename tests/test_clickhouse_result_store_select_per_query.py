@@ -52,6 +52,50 @@ class _CapturingStore(ClickHouseBenchmarkResultStore):
         return []
 
 
+class _RankingStore(_CapturingStore):
+    def __init__(self) -> None:
+        self.update_calls: List[Dict[str, Any]] = []
+        self.select_calls: List[Dict[str, Any]] = []
+        self._rank_rows_by_mode: Dict[str, List[tuple[str, Optional[float]]]] = {}
+        self._run_row_top_n = 1
+        self._run_row_config_json = json.dumps(
+            {
+                "sequential_top_n_limits": {
+                    "order_by": 4,
+                    "types": 3,
+                    "codecs": 2,
+                    "indexes": 2,
+                    "final_validation": 1,
+                    "sequential": 1,
+                }
+            }
+        )
+        super().__init__()
+
+    def set_rank_rows(
+        self,
+        variant_mode: str,
+        rows: List[tuple[str, Optional[float]]],
+    ) -> None:
+        self._rank_rows_by_mode[variant_mode] = list(rows)
+
+    def _execute(self, query: str, params: Optional[Any] = None):
+        normalized = " ".join(query.split()).lower()
+        if "select top_n_winners, config_json" in normalized:
+            return [[self._run_row_top_n, self._run_row_config_json]]
+        if "select id, score" in normalized:
+            mode = ""
+            if isinstance(params, dict):
+                mode = str(params.get("variant_mode") or "")
+            self.select_calls.append(dict(params or {}))
+            return list(self._rank_rows_by_mode.get(mode, []))
+        if " alter table " in f" {normalized} " and " update " in f" {normalized} ":
+            self.update_calls.append(dict(params or {}))
+            return []
+        self.executed_queries.append(query)
+        return []
+
+
 class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
     def test_store_contains_per_query_select_columns_and_values(self) -> None:
         store = _CapturingStore()
@@ -294,6 +338,73 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
         self.assertIn("q_agg_user", speedup_per_query_json)
         self.assertTrue(tested_per_query_json["q_agg_user"]["query"].startswith("SELECT"))
         self.assertTrue(source_per_query_json["q_agg_user"]["query"].startswith("SELECT"))
+
+    def test_recalculate_phase_ranking_scopes_to_variant_mode(self) -> None:
+        store = _RankingStore()
+        store.set_rank_rows(
+            "types_validation",
+            [
+                ("tv_1", 10.0),
+                ("tv_2", 9.0),
+                ("tv_3", 8.0),
+                ("tv_4", 7.0),
+            ],
+        )
+        store.set_rank_rows(
+            "types",
+            [
+                ("t_1", 100.0),
+                ("t_2", 90.0),
+            ],
+        )
+
+        store._recalculate_phase_ranking(
+            benchmark_run_id=77,
+            benchmark_id="bench_rank",
+            source_database="analytics",
+            source_table="events",
+            phase=2,
+            variant_mode="types_validation",
+            phase_name="types_validation",
+        )
+
+        self.assertTrue(store.select_calls)
+        self.assertEqual(store.select_calls[0].get("variant_mode"), "types_validation")
+        self.assertEqual(len(store.update_calls), 4)
+        self.assertEqual(
+            [int(call["rank_in_phase"]) for call in store.update_calls],
+            [1, 2, 3, 4],
+        )
+        self.assertEqual(
+            [bool(call["is_top_n"]) for call in store.update_calls],
+            [True, True, True, False],
+        )
+        self.assertTrue(all(call.get("variant_mode") == "types_validation" for call in store.update_calls))
+
+    def test_resolve_top_n_winners_maps_validation_mode_to_stage_limit(self) -> None:
+        store = _RankingStore()
+
+        top_n_types_validation = store._resolve_top_n_winners(
+            benchmark_run_id=77,
+            benchmark_id="bench_rank",
+            source_database="analytics",
+            source_table="events",
+            phase=2,
+            variant_mode="types_validation",
+            phase_name="types_validation",
+        )
+        top_n_order_by_banner = store._resolve_top_n_winners(
+            benchmark_run_id=77,
+            benchmark_id="bench_rank",
+            source_database="analytics",
+            source_table="events",
+            phase=1,
+            variant_mode="order_by",
+            phase_name="ORDER BY",
+        )
+
+        self.assertEqual(top_n_types_validation, 3)
+        self.assertEqual(top_n_order_by_banner, 4)
 
 
 if __name__ == "__main__":

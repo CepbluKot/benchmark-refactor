@@ -471,6 +471,17 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             tables=["events"],
             test_database="bench_global",
             max_iterations=10,
+            sequential_top_n_limits=InsertRowsLimitsConfig(
+                order_by=4,
+                types=3,
+                codecs=2,
+                indexes=1,
+            ),
+            max_winners_per_parent_limits=InsertRowsLimitsConfig(
+                types=2,
+                codecs=2,
+                indexes=1,
+            ),
             max_benchmarks_limits=InsertRowsLimitsConfig(
                 types=40,
                 indexes=30,
@@ -501,6 +512,14 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                     test_database="bench_events",
                     strategy="sequential_topn_strategy",
                     max_iterations=2,
+                    sequential_top_n_limits=InsertRowsLimitsConfig(
+                        types=2,
+                        indexes=1,
+                    ),
+                    max_winners_per_parent_limits=InsertRowsLimitsConfig(
+                        types=3,
+                        codecs=1,
+                    ),
                     max_benchmarks_limits=InsertRowsLimitsConfig(
                         types=5,
                         indexes=6,
@@ -554,6 +573,15 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(plan.mode, "sequential")
         self.assertEqual(plan.test_database, "bench_events")
         self.assertEqual(plan.max_iterations, 2)
+        self.assertIsNotNone(plan.sequential_top_n_limits)
+        self.assertEqual(plan.sequential_top_n_limits.for_mode("order_by"), 4)
+        self.assertEqual(plan.sequential_top_n_limits.for_mode("types"), 2)
+        self.assertEqual(plan.sequential_top_n_limits.for_mode("codecs"), 2)
+        self.assertEqual(plan.sequential_top_n_limits.for_mode("indexes"), 1)
+        self.assertIsNotNone(plan.max_winners_per_parent_limits)
+        self.assertEqual(plan.max_winners_per_parent_limits.for_mode("types"), 3)
+        self.assertEqual(plan.max_winners_per_parent_limits.for_mode("codecs"), 1)
+        self.assertEqual(plan.max_winners_per_parent_limits.for_mode("indexes"), 1)
         self.assertIsNotNone(plan.max_benchmarks_limits)
         self.assertEqual(plan.max_benchmarks_limits.types, 5)
         self.assertEqual(plan.max_benchmarks_limits.indexes, 6)
@@ -2431,6 +2459,174 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             if job.variant_meta.mode == "indexes_validation"
         ]
         self.assertGreaterEqual(len(index_validation_jobs), 2)
+
+    def test_sequential_phased_topn_strategy_supports_stage_specific_top_n(self) -> None:
+        """Проверяет, что top-N можно задавать отдельно для каждой фазы."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_phased_topn_stage_specific",
+            connection_id="prod_ch",
+            strategy="sequential_phased_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            sequential_top_n=2,
+            sequential_top_n_limits=InsertRowsLimitsConfig(
+                types=1,
+                codecs=1,
+                indexes=1,
+                final_validation=1,
+            ),
+            index_granularity_values=[8192, 16384],
+            order_by_first="event_time",
+            order_by_candidates=["user_id"],
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                        codecs=["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt32",
+                        by_name="user_id",
+                        indexes=[
+                            IndexConfig(
+                                type="minmax",
+                                granularity=[1, 2],
+                                index_granularity_values=[8192, 16384],
+                            )
+                        ],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[
+                    QueryConfigItem(
+                        query="SELECT count() FROM {table} WHERE user_id > 0"
+                    )
+                ],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = SequentialPhasedScoringAdapter()
+        store = InMemoryBenchmarkResultStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=store,
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+
+        order_jobs = [
+            job for job in adapter.executed_jobs if job.variant_meta.mode == "order_by"
+        ]
+        types_validation_jobs = [
+            job
+            for job in adapter.executed_jobs
+            if job.variant_meta.mode == "types_validation"
+        ]
+        codecs_validation_jobs = [
+            job
+            for job in adapter.executed_jobs
+            if job.variant_meta.mode == "codecs_validation"
+        ]
+
+        # При sequential_top_n=2 order_by и types_validation остаются по 2 (по parent-веткам).
+        self.assertEqual(len(order_jobs), 2)
+        self.assertEqual(len(types_validation_jobs), 2)
+        # Но дальше работает stage-specific лимит types=1 => в codecs идет только 1 победитель.
+        self.assertEqual(len(codecs_validation_jobs), 1)
+
+    def test_sequential_phased_topn_strategy_supports_multiple_winners_per_parent(self) -> None:
+        """Проверяет, что max_winners_per_parent_limits реально даёт >1 кандидата на parent."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_phased_topn_per_parent",
+            connection_id="prod_ch",
+            strategy="sequential_phased_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            sequential_top_n=1,
+            sequential_top_n_limits=InsertRowsLimitsConfig(
+                order_by=1,
+                types=1,
+                codecs=1,
+                indexes=1,
+                final_validation=1,
+            ),
+            max_winners_per_parent_limits=InsertRowsLimitsConfig(
+                types=3,
+                codecs=3,
+                indexes=3,
+            ),
+            index_granularity_values=[8192, 16384],
+            order_by_first="event_time",
+            order_by_candidates=["user_id"],
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                        codecs=["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt32",
+                        by_name="user_id",
+                        indexes=[
+                            IndexConfig(
+                                type="minmax",
+                                granularity=[1, 2],
+                                index_granularity_values=[8192, 16384],
+                            )
+                        ],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[
+                    QueryConfigItem(
+                        query="SELECT count() FROM {table} WHERE user_id > 0"
+                    )
+                ],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = SequentialPhasedScoringAdapter()
+        store = InMemoryBenchmarkResultStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=store,
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+
+        index_validation_jobs = [
+            job
+            for job in adapter.executed_jobs
+            if job.variant_meta.mode == "indexes_validation"
+        ]
+        # Для одного parent при лимите 3 ожидаем не меньше 3 финальных кандидатов индексов.
+        self.assertGreaterEqual(len(index_validation_jobs), 3)
 
     def test_sequential_mode_propagates_source_benchmark_to_all_stage_jobs(self) -> None:
         """Проверяет, что baseline source benchmark доступен во всех sequential jobs."""

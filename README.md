@@ -268,11 +268,14 @@ SQL-строки (`*_ddl`, `*_query`, SQL внутри JSON) перед запи
 `score_calculation_json` сохраняется рядом со `score`.
 
 Примеры аналитических SQL по новой схеме:
+Для phased-стратегии используй таблицу из `BENCH_PHASED_RESULT_TABLE`
+(или `${BENCH_RESULT_TABLE}__phased`, если override не задан).
+Для legacy-стратегий используй `BENCH_LEGACY_RESULT_TABLE`.
 
 ```sql
 -- Финальный DDL победителя
 SELECT tested_table_ddl
-FROM benchmark_results
+FROM benchmark_results__phased
 WHERE benchmark_run_id = 123
   AND phase = 5
   AND rank_in_phase = 1
@@ -282,13 +285,13 @@ WHERE benchmark_run_id = 123
 -- Изменение score победителя по фазам (lineage)
 WITH RECURSIVE lineage AS (
     SELECT *
-    FROM benchmark_results
+    FROM benchmark_results__phased
     WHERE benchmark_run_id = 123
       AND phase = 5
       AND rank_in_phase = 1
     UNION ALL
     SELECT r.*
-    FROM benchmark_results r
+    FROM benchmark_results__phased r
     JOIN lineage l ON r.id = l.parent_id
 )
 SELECT phase, phase_name, score, size_bytes_total, variant_params_json
@@ -300,13 +303,13 @@ ORDER BY phase
 -- Что дало самый большой прирост по score
 WITH RECURSIVE lineage AS (
     SELECT *
-    FROM benchmark_results
+    FROM benchmark_results__phased
     WHERE benchmark_run_id = 123
       AND phase = 5
       AND rank_in_phase = 1
     UNION ALL
     SELECT r.*
-    FROM benchmark_results r
+    FROM benchmark_results__phased r
     JOIN lineage l ON r.id = l.parent_id
 )
 SELECT
@@ -320,7 +323,7 @@ ORDER BY phase
 ```sql
 -- Сравнение кандидатов в фазе ORDER BY
 SELECT variant_params_json, score, size_bytes_total, rank_in_phase, is_top_n
-FROM benchmark_results
+FROM benchmark_results__phased
 WHERE benchmark_run_id = 123
   AND phase = 1
 ORDER BY rank_in_phase
@@ -1007,6 +1010,9 @@ print(run_id)
 - legacy-поля:
   - `order_by_first` — фиксированная первая колонка ORDER BY в фазе 1.
   - `order_by_candidates` — колонки-кандидаты, которые добавляются после `order_by_first`.
+  - `sequential_top_n_limits` — top-N победителей по фазам
+    (`order_by`, `types`, `codecs`, `indexes`, `final_validation`).
+    Если для фазы лимит не задан, используется общий `sequential_types_top_n_for_indexes`.
 - новый rules-блок (рекомендуется):
   - `global_rules.order_by_rules` / `table_rules[].rules.order_by_rules`
     с полями `first_column`, `candidates`, `auto_generate_candidates`.

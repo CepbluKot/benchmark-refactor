@@ -69,6 +69,8 @@ class TableBenchmarkPlan(_FrozenModel):
     mode: BenchmarkMode
     max_iterations: int
     sequential_top_n: int
+    sequential_top_n_limits: Optional[InsertRowsLimitsConfig] = None
+    max_winners_per_parent_limits: Optional[InsertRowsLimitsConfig] = None
     insert_rows_limit: Optional[int]
     source_insert_rows_limit: Optional[int] = None
     source_insert_rows_limits: Optional[InsertRowsLimitsConfig] = None

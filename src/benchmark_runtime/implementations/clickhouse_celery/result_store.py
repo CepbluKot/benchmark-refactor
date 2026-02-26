@@ -1488,12 +1488,15 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         benchmark_id: str,
         source_database: str,
         source_table: str,
+        phase: Optional[int] = None,
+        variant_mode: Optional[str] = None,
+        phase_name: Optional[str] = None,
     ) -> int:
-        """Возвращает top_n_winners из benchmark_runs (fallback=1)."""
+        """Возвращает top-N победителей для указанной фазы (fallback=1)."""
         rows = self._execute(
             f"""
-            SELECT top_n_winners
-            FROM `{self._database}`.`{self._runs_table}`
+            SELECT top_n_winners, config_json
+            FROM `{self._database}`.`{self._phased_runs_table}`
             WHERE benchmark_run_id = %(benchmark_run_id)s
               AND benchmark_id = %(benchmark_id)s
               AND source_db_name = %(source_database)s
@@ -1508,13 +1511,89 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 "source_table": source_table,
             },
         )
-        if not rows or rows[0][0] is None:
+        if not rows:
             return 1
+        top_n_winners_raw = rows[0][0]
+        config_json_raw = rows[0][1] if len(rows[0]) > 1 else None
+        default_top_n = 1
         try:
-            value = int(rows[0][0])
+            if top_n_winners_raw is not None:
+                default_top_n = max(1, int(top_n_winners_raw))
         except Exception:
-            return 1
-        return max(1, value)
+            default_top_n = 1
+
+        if not isinstance(config_json_raw, str) or not config_json_raw.strip():
+            return default_top_n
+        try:
+            parsed_config = json.loads(config_json_raw)
+        except Exception:
+            return default_top_n
+        if not isinstance(parsed_config, dict):
+            return default_top_n
+
+        raw_limits = parsed_config.get("sequential_top_n_limits")
+        if not isinstance(raw_limits, dict):
+            return default_top_n
+
+        def _normalize_limit_key(value: Optional[str]) -> Optional[str]:
+            if value is None:
+                return None
+            normalized = str(value).strip().lower()
+            if not normalized:
+                return None
+            normalized = re.sub(r"\s+", "_", normalized)
+            normalized = normalized.replace("-", "_")
+            if normalized == "order by":
+                return "order_by"
+            return normalized
+
+        stage_keys: list[str] = []
+        mode_key = _normalize_limit_key(variant_mode)
+        if mode_key is not None:
+            stage_keys.append(mode_key)
+            if mode_key.endswith("_validation"):
+                stage_keys.append(mode_key[: -len("_validation")])
+        phase_name_key = _normalize_limit_key(phase_name)
+        if phase_name_key is not None:
+            stage_keys.append(phase_name_key)
+            if phase_name_key.endswith("_validation"):
+                stage_keys.append(phase_name_key[: -len("_validation")])
+        if phase is not None:
+            phase_key_by_number = {
+                1: "order_by",
+                2: "types",
+                3: "codecs",
+                4: "indexes",
+                5: "final_validation",
+            }
+            phase_key = phase_key_by_number.get(int(phase))
+            if phase_key is not None:
+                stage_keys.append(phase_key)
+
+        resolved_keys: list[str] = []
+        seen_keys: set[str] = set()
+        for key in stage_keys:
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            resolved_keys.append(key)
+
+        for key in resolved_keys:
+            value = raw_limits.get(key)
+            if value is None:
+                continue
+            try:
+                return max(1, int(value))
+            except Exception:
+                continue
+
+        sequential_value = raw_limits.get("sequential")
+        if sequential_value is not None:
+            try:
+                return max(1, int(sequential_value))
+            except Exception:
+                pass
+        return default_top_n
 
     def _recalculate_phase_ranking(
         self,
@@ -1523,26 +1602,43 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         benchmark_id: str,
         source_database: str,
         source_table: str,
-        phase: int,
+        phase: Optional[int],
+        variant_mode: Optional[str] = None,
+        phase_name: Optional[str] = None,
     ) -> None:
         """Пересчитывает `rank_in_phase`/`is_top_n` для выбранной phase."""
+        if phase is None and not variant_mode and not phase_name:
+            return
+        scope_conditions = [
+            "benchmark_run_id = %(benchmark_run_id)s",
+            "benchmark_id = %(benchmark_id)s",
+            "source_db_name = %(source_database)s",
+            "source_table_name = %(source_table)s",
+        ]
+        scope_params: Dict[str, Any] = {
+            "benchmark_run_id": benchmark_run_id,
+            "benchmark_id": benchmark_id,
+            "source_database": source_database,
+            "source_table": source_table,
+        }
+        if phase is not None:
+            scope_conditions.append("phase = %(phase)s")
+            scope_params["phase"] = int(phase)
+        if variant_mode is not None:
+            scope_conditions.append("variant_mode = %(variant_mode)s")
+            scope_params["variant_mode"] = str(variant_mode)
+        elif phase_name is not None:
+            scope_conditions.append("phase_name = %(phase_name)s")
+            scope_params["phase_name"] = str(phase_name)
+        scope_where_clause = " AND\n              ".join(scope_conditions)
+
         rows = self._execute(
             f"""
             SELECT id, score
             FROM `{self._database}`.`{self._table}`
-            WHERE benchmark_run_id = %(benchmark_run_id)s
-              AND benchmark_id = %(benchmark_id)s
-              AND source_db_name = %(source_database)s
-              AND source_table_name = %(source_table)s
-              AND phase = %(phase)s
+            WHERE {scope_where_clause}
             """,
-            {
-                "benchmark_run_id": benchmark_run_id,
-                "benchmark_id": benchmark_id,
-                "source_database": source_database,
-                "source_table": source_table,
-                "phase": int(phase),
-            },
+            scope_params,
         )
         if not rows:
             return
@@ -1552,6 +1648,9 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             benchmark_id=benchmark_id,
             source_database=source_database,
             source_table=source_table,
+            phase=phase,
+            variant_mode=variant_mode,
+            phase_name=phase_name,
         )
         ranked_rows = sorted(
             rows,
@@ -1568,25 +1667,39 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 UPDATE
                     rank_in_phase = %(rank_in_phase)s,
                     is_top_n = %(is_top_n)s
-                WHERE benchmark_run_id = %(benchmark_run_id)s
-                  AND benchmark_id = %(benchmark_id)s
-                  AND source_db_name = %(source_database)s
-                  AND source_table_name = %(source_table)s
-                  AND phase = %(phase)s
+                WHERE {scope_where_clause}
                   AND id = %(id)s
                 SETTINGS mutations_sync = 1
                 """,
                 {
+                    **scope_params,
                     "rank_in_phase": rank_index,
                     "is_top_n": rank_index <= top_n_winners,
-                    "benchmark_run_id": benchmark_run_id,
-                    "benchmark_id": benchmark_id,
-                    "source_database": source_database,
-                    "source_table": source_table,
-                    "phase": int(phase),
                     "id": str(row_id),
                 },
             )
+
+    def recalculate_phase_ranking(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        phase: Optional[int] = None,
+        variant_mode: Optional[str] = None,
+        phase_name: Optional[str] = None,
+    ) -> None:
+        """Явно пересчитывает rank/top-N для указанного phase-scope."""
+        self._recalculate_phase_ranking(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+            phase=phase,
+            variant_mode=variant_mode,
+            phase_name=phase_name,
+        )
 
     @staticmethod
     def _build_run_record_id(
@@ -1632,7 +1745,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 self._insert_record(
                     record=record,
                     table_name=self._phased_table,
-                    recalculate_phase_ranking=True,
+                    recalculate_phase_ranking=False,
                 )
             else:
                 self._insert_phased_record(record)
@@ -1670,6 +1783,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 source_database=record.source_db_name,
                 source_table=record.source_table_name,
                 phase=int(record.phase),
+                variant_mode=record.variant_mode,
+                phase_name=record.phase_name,
             )
 
     def _insert_phased_record(self, record: StoredBenchmarkResult) -> None:
@@ -1681,14 +1796,6 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             data=[row],
             column_names=self._PHASED_INSERT_COLUMNS,
         )
-        if record.phase is not None:
-            self._recalculate_phase_ranking(
-                benchmark_run_id=record.benchmark_run_id,
-                benchmark_id=record.benchmark_id,
-                source_database=record.source_db_name,
-                source_table=record.source_table_name,
-                phase=int(record.phase),
-            )
 
     def _record_to_clickhouse_map(self, record: StoredBenchmarkResult) -> Dict[str, Any]:
         benchmark_started_at_utc = self._to_naive_utc_datetime(record.benchmark_started_at)

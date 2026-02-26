@@ -619,6 +619,9 @@ class TableRuleConfig(_Base):
       - column_order_mode;
       - insert_operations_count (legacy: max_iterations);
       - sequential_types_top_n_for_indexes (legacy: sequential_top_n);
+      - sequential_top_n_limits (top-N лимиты победителей по фазам).
+      - max_winners_per_parent_limits (лимиты числа победителей на одного parent
+        по фазам для `sequential_phased_topn_strategy`).
       - insert_rows_per_operation_limit (legacy: insert_rows_limit);
       - source_insert_rows_per_operation_limit (legacy: source_insert_rows_limit);
       - source_insert_rows_per_operation_limits;
@@ -654,6 +657,16 @@ class TableRuleConfig(_Base):
             "sequential_top_n",
         ),
         serialization_alias="sequential_types_top_n_for_indexes",
+    )
+    sequential_top_n_limits: Optional[InsertRowsLimitsConfig] = Field(
+        default=None,
+        validation_alias=AliasChoices("sequential_top_n_limits"),
+        serialization_alias="sequential_top_n_limits",
+    )
+    max_winners_per_parent_limits: Optional[InsertRowsLimitsConfig] = Field(
+        default=None,
+        validation_alias=AliasChoices("max_winners_per_parent_limits"),
+        serialization_alias="max_winners_per_parent_limits",
     )
     insert_rows_limit: Optional[int] = Field(
         default=None,
@@ -803,6 +816,10 @@ class BenchmarkConfig(_Base):
       - режим вычисления `score` (встроенный или expression);
       - ограничение по числу insert-замеров и режим комбинатора.
       - `sequential_types_top_n_for_indexes` (legacy: `sequential_top_n`) для двухфазного режима sequential.
+      - `sequential_top_n_limits` — top-N лимиты победителей по фазам
+        (`order_by`, `types`, `codecs`, `indexes`, `final_validation`).
+      - `max_winners_per_parent_limits` — лимиты числа победителей на одного
+        parent-варианта по фазам (`types`, `codecs`, `indexes`).
       - `insert_rows_per_operation_limit` (legacy: `insert_rows_limit`) — сколько строк
         копировать за один insert-замер из source-таблицы в variant.
       - `source_insert_rows_per_operation_limit` (legacy: `source_insert_rows_limit`) —
@@ -845,6 +862,16 @@ class BenchmarkConfig(_Base):
             "sequential_top_n",
         ),
         serialization_alias="sequential_types_top_n_for_indexes",
+    )
+    sequential_top_n_limits: Optional[InsertRowsLimitsConfig] = Field(
+        default=None,
+        validation_alias=AliasChoices("sequential_top_n_limits"),
+        serialization_alias="sequential_top_n_limits",
+    )
+    max_winners_per_parent_limits: Optional[InsertRowsLimitsConfig] = Field(
+        default=None,
+        validation_alias=AliasChoices("max_winners_per_parent_limits"),
+        serialization_alias="max_winners_per_parent_limits",
     )
     insert_rows_limit: Optional[int] = Field(
         default=None,
