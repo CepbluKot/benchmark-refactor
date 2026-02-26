@@ -54,7 +54,6 @@ _READ_ONLY_SQL_PREFIXES = ("select", "with", "show", "describe", "desc", "explai
 _BASELINE_TABLE_MARKER = "__source_baseline__"
 _COLD_SELECT_SETTINGS_ASSIGNMENTS = (
     "use_uncompressed_cache = 0",
-    "use_index_marks_cache = 0",
 )
 
 
@@ -295,13 +294,15 @@ def _find_top_level_trailing_comment_span(sql: str) -> Optional[tuple[int, int]]
     return None
 
 
-def _with_cold_select_settings(query: str) -> str:
+def _with_cold_select_settings(
+    query: str,
+    *,
+    settings_assignments: Optional[Sequence[str]] = None,
+) -> str:
     """
     Возвращает SELECT query c отключёнными cache-настройками через `SETTINGS`.
 
-    Формирует/обновляет только два ключа:
-      - use_uncompressed_cache = 0
-      - use_index_marks_cache = 0
+    Формирует/обновляет ключ `use_uncompressed_cache = 0`.
     """
     normalized = query.rstrip()
     while normalized.endswith(";"):
@@ -320,7 +321,12 @@ def _with_cold_select_settings(query: str) -> str:
     if not normalized:
         return trailing_comment
 
-    required_settings = list(_COLD_SELECT_SETTINGS_ASSIGNMENTS)
+    if settings_assignments is None:
+        required_settings = list(_COLD_SELECT_SETTINGS_ASSIGNMENTS)
+    else:
+        required_settings = [str(item).strip() for item in settings_assignments if str(item).strip()]
+        if not required_settings:
+            required_settings = list(_COLD_SELECT_SETTINGS_ASSIGNMENTS)
 
     settings_pos = _find_top_level_keyword_pos(normalized, "SETTINGS")
     format_pos = _find_top_level_keyword_pos(normalized, "FORMAT")
@@ -346,7 +352,7 @@ def _with_cold_select_settings(query: str) -> str:
         matcher = re.match(r"^\s*`?([A-Za-z_][A-Za-z0-9_]*)`?\s*=", assignment)
         if matcher is not None:
             key = matcher.group(1).lower()
-            if key in {"use_uncompressed_cache", "use_index_marks_cache"}:
+            if key in {"use_uncompressed_cache", "use_index_marks_cache", "use_index_mark_cache"}:
                 continue
         filtered_assignments.append(assignment.strip())
 
@@ -1938,6 +1944,10 @@ def _measure_select_queries(
         query_rows_per_second_entries: list[float] = []
         query_bytes_per_second_entries: list[float] = []
         query_memory_usage_entries: list[float] = []
+        cold_settings_assignments: Optional[List[str]] = None
+
+        if query_cache_mode == "cold":
+            cold_settings_assignments = list(_COLD_SELECT_SETTINGS_ASSIGNMENTS)
 
         if query_cache_mode == "warm":
             for warmup_query in query_warmup_queries:
@@ -1946,7 +1956,10 @@ def _measure_select_queries(
         for measurement_id in range(max(1, query_measurements_count)):
             effective_query = query
             if query_cache_mode == "cold":
-                effective_query = _with_cold_select_settings(query)
+                effective_query = _with_cold_select_settings(
+                    query,
+                    settings_assignments=cold_settings_assignments,
+                )
 
             attempt_n = 0
             sleep_sec = initial_sleep_sec

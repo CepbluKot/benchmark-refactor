@@ -2620,7 +2620,7 @@ ORDER BY msg
         self.assertFalse(any(call.startswith("SYSTEM DROP") for call in fake_client.execute_calls))
         self.assertTrue(
             all(
-                "SETTINGS use_uncompressed_cache = 0, use_index_marks_cache = 0" in call
+                "SETTINGS use_uncompressed_cache = 0" in call
                 for call in fake_client.select_with_metrics_calls
             )
         )
@@ -2632,7 +2632,7 @@ ORDER BY msg
         rewritten = _with_cold_select_settings(query)
         self.assertEqual(
             rewritten,
-            "SELECT count() FROM t1 SETTINGS use_uncompressed_cache = 0, use_index_marks_cache = 0",
+            "SELECT count() FROM t1 SETTINGS use_uncompressed_cache = 0",
         )
 
     def test_with_cold_select_settings_updates_existing_settings_and_keeps_format(self) -> None:
@@ -2645,14 +2645,13 @@ ORDER BY msg
         self.assertIn("SETTINGS", rewritten)
         self.assertIn("max_threads = 4", rewritten)
         self.assertIn("use_uncompressed_cache = 0", rewritten)
-        self.assertIn("use_index_marks_cache = 0", rewritten)
         self.assertNotIn("use_uncompressed_cache = 1", rewritten)
         self.assertIn("FORMAT JSONEachRow", rewritten)
 
     def test_with_cold_select_settings_is_idempotent(self) -> None:
         query = (
             "SELECT count() FROM t1 "
-            "SETTINGS max_threads = 4, use_uncompressed_cache = 0, use_index_marks_cache = 0"
+            "SETTINGS max_threads = 4, use_uncompressed_cache = 0"
         )
         rewritten_once = _with_cold_select_settings(query)
         rewritten_twice = _with_cold_select_settings(rewritten_once)
@@ -2661,7 +2660,7 @@ ORDER BY msg
     def test_with_cold_select_settings_keeps_trailing_line_comment(self) -> None:
         query = "SELECT count() FROM t1 -- tail comment"
         rewritten = _with_cold_select_settings(query)
-        self.assertIn("SETTINGS use_uncompressed_cache = 0, use_index_marks_cache = 0", rewritten)
+        self.assertIn("SETTINGS use_uncompressed_cache = 0", rewritten)
         self.assertTrue(rewritten.endswith("-- tail comment"))
         self.assertIn("SELECT count() FROM t1 SETTINGS", rewritten)
 
