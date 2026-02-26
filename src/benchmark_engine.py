@@ -14,6 +14,7 @@ import logging
 import os
 from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
+import src.benchmark_runtime.implementations.table_strategy.sequential_phased_topn as sequential_phased_topn_strategy_impl
 from src.clickhouse_ddl import TableDDL
 from src.combiner import VariantMeta, iter_variants, total_variants
 from src.models import (
@@ -1073,13 +1074,10 @@ class BenchmarkRunner:
             list(benchmark_ids) if benchmark_ids else "all",
         )
         raw_fixed_global_progress = os.getenv("BENCH_GLOBAL_PROGRESS_FIXED_TOTAL")
-        if raw_fixed_global_progress is None or not raw_fixed_global_progress.strip():
-            fixed_global_progress_enabled = True
-        else:
-            fixed_global_progress_enabled = (
-                raw_fixed_global_progress.strip().lower()
-                in {"1", "true", "yes", "on"}
-            )
+        fixed_global_progress_enabled = (
+            bool(raw_fixed_global_progress and raw_fixed_global_progress.strip())
+            and raw_fixed_global_progress.strip().lower() in {"1", "true", "yes", "on"}
+        )
         global_progress_total: Optional[int] = None
         if fixed_global_progress_enabled:
             global_progress_total = self._estimate_global_progress_target(
@@ -1509,14 +1507,24 @@ class BenchmarkRunner:
         """
         Считает fixed upper bound для `sequential_phased_topn_strategy`.
 
-        Оценка лимитная (верхняя граница), чтобы не перечислять реальные комбинации:
-          phase1(order_by)
-          + winners_order_by * (phase2(types) + validation)
-          + winners_types * (phase3(codecs) + validation)
-          + winners_codecs * (phase4(indexes) + validation)
-          + winners_final_validation.
+        Для phased-стратегии считаем upper-bound по фактической логике фаз:
+        ORDER BY -> types -> codecs -> indexes -> final_validation.
+
+        Важно:
+        - больше не учитываем legacy-этапы `*_validation` (их нет в текущем пайплайне);
+        - фазы `types/codecs/indexes` оцениваются по реальным candidate-правилам.
         """
-        fallback_limit = max(1, int(table_plan.max_iterations))
+        source_ddl, raw_query_plan = self._engine.prepare_table_context(table_plan)
+        order_by_expressions = sequential_phased_topn_strategy_impl._build_order_by_candidates(
+            runner=self,
+            table_plan=table_plan,
+            source_ddl=source_ddl,
+            raw_query_plan=raw_query_plan,
+        )
+        order_by_limit = len(order_by_expressions)
+        if order_by_limit <= 0:
+            return 0
+
         top_n_order_by = self._resolve_sequential_stage_top_n(
             table_plan=table_plan,
             stage_mode="order_by",
@@ -1537,39 +1545,74 @@ class BenchmarkRunner:
             table_plan=table_plan,
             stage_mode="final_validation",
         )
-
-        def _stage_limit(variant_mode: str, default_value: int) -> int:
-            resolved = self._engine.resolve_variant_generation_limit(
-                table_plan=table_plan,
-                variant_mode=variant_mode,
-                job_mode="sequential",
-            )
-            if resolved is None:
-                return max(1, int(default_value))
-            return max(1, int(resolved))
-
-        # ORDER BY phase имеет встроенный hard-limit 20 в самой стратегии.
-        order_by_limit = min(_stage_limit("order_by", 20), 20)
-        types_limit = _stage_limit("types", fallback_limit)
-        codecs_limit = _stage_limit("codecs", fallback_limit)
-        indexes_limit = _stage_limit("indexes", fallback_limit)
-        indexes_validation_limit = _stage_limit(
-            "indexes_validation",
-            max(1, len(table_plan.index_granularity_values or [])),
+        max_winners_per_parent_types = self._resolve_sequential_stage_max_winners_per_parent(
+            table_plan=table_plan,
+            stage_mode="types",
         )
+        max_winners_per_parent_codecs = self._resolve_sequential_stage_max_winners_per_parent(
+            table_plan=table_plan,
+            stage_mode="codecs",
+        )
+        max_winners_per_parent_indexes = self._resolve_sequential_stage_max_winners_per_parent(
+            table_plan=table_plan,
+            stage_mode="indexes",
+        )
+
         winners_order_by = min(order_by_limit, top_n_order_by)
-        winners_types = min(winners_order_by, top_n_types)
-        winners_codecs = min(winners_types, top_n_codecs)
-        winners_indexes = min(winners_codecs, top_n_indexes)
-        winners_final_validation = min(winners_indexes, top_n_final_validation)
+        total_jobs = order_by_limit
 
-        return (
-            order_by_limit
-            + winners_order_by * (types_limit + 1)
-            + winners_types * (codecs_limit + 1)
-            + winners_codecs * (indexes_limit + indexes_validation_limit)
-            + winners_final_validation
+        type_jobs_per_parent = self._estimate_phased_type_jobs_per_parent(
+            table_plan=table_plan,
+            source_ddl=source_ddl,
         )
+        if type_jobs_per_parent > 0:
+            total_jobs += winners_order_by * type_jobs_per_parent
+            winners_types = min(
+                top_n_types,
+                winners_order_by * max_winners_per_parent_types,
+            )
+        else:
+            winners_types = winners_order_by
+
+        codec_jobs_per_parent = self._estimate_phased_codec_jobs_per_parent_upper(
+            table_plan=table_plan,
+            source_ddl=source_ddl,
+        )
+        if codec_jobs_per_parent > 0:
+            total_jobs += winners_types * codec_jobs_per_parent
+            winners_codecs = min(
+                top_n_codecs,
+                winners_types * max_winners_per_parent_codecs,
+            )
+        else:
+            winners_codecs = winners_types
+
+        index_jobs_per_parent, index_table_granularity_variants_upper = (
+            self._estimate_phased_index_jobs_per_parent_upper(
+                table_plan=table_plan,
+                source_ddl=source_ddl,
+                raw_query_plan=raw_query_plan,
+                order_by_expressions=order_by_expressions,
+            )
+        )
+        if index_jobs_per_parent > 0:
+            total_jobs += winners_codecs * index_jobs_per_parent
+            winners_indexes = min(
+                top_n_indexes,
+                winners_codecs * max_winners_per_parent_indexes,
+            )
+        else:
+            winners_indexes = winners_codecs
+
+        final_candidates = min(winners_indexes, top_n_final_validation)
+        global_table_granularity_variants = len(table_plan.index_granularity_values or [])
+        final_variants_per_candidate = max(
+            1,
+            int(global_table_granularity_variants),
+            int(index_table_granularity_variants_upper),
+        )
+        total_jobs += final_candidates * final_variants_per_candidate
+        return max(0, int(total_jobs))
 
     @staticmethod
     def _resolve_sequential_stage_top_n(
@@ -1587,6 +1630,191 @@ class BenchmarkRunner:
             if sequential_limit is not None:
                 return max(1, int(sequential_limit))
         return max(1, int(table_plan.sequential_top_n))
+
+    @staticmethod
+    def _resolve_sequential_stage_max_winners_per_parent(
+        *,
+        table_plan: TableBenchmarkPlan,
+        stage_mode: str,
+    ) -> int:
+        """Возвращает max-winners-per-parent лимит для указанной phased-фазы."""
+        limits = table_plan.max_winners_per_parent_limits
+        if limits is not None:
+            stage_limit = limits.for_mode(stage_mode)
+            if stage_limit is not None:
+                return max(1, int(stage_limit))
+            sequential_limit = limits.for_mode("sequential")
+            if sequential_limit is not None:
+                return max(1, int(sequential_limit))
+        return 1
+
+    @staticmethod
+    def _estimate_phased_possible_types_for_column(
+        *,
+        table_plan: TableBenchmarkPlan,
+        column_name: str,
+        current_type: str,
+    ) -> List[str]:
+        """Список возможных типов колонки после type-фазы."""
+        candidates = sequential_phased_topn_strategy_impl._resolve_type_candidates_for_column(
+            table_plan=table_plan,
+            column_name=column_name,
+            current_type=current_type,
+        )
+        if not candidates:
+            return [current_type]
+        deduped: List[str] = []
+        for candidate in candidates:
+            normalized = str(candidate).strip()
+            if not normalized:
+                continue
+            if normalized in deduped:
+                continue
+            deduped.append(normalized)
+        return deduped or [current_type]
+
+    def _estimate_phased_type_jobs_per_parent(
+        self,
+        *,
+        table_plan: TableBenchmarkPlan,
+        source_ddl: TableDDL,
+    ) -> int:
+        """Количество tasks на одного parent в type-фазе."""
+        del self
+        jobs = 0
+        for column in source_ddl.columns:
+            type_candidates = sequential_phased_topn_strategy_impl._resolve_type_candidates_for_column(
+                table_plan=table_plan,
+                column_name=column.name,
+                current_type=column.type,
+            )
+            if len(type_candidates) <= 1:
+                continue
+            jobs += len(type_candidates)
+        return max(0, int(jobs))
+
+    def _estimate_phased_codec_jobs_per_parent_upper(
+        self,
+        *,
+        table_plan: TableBenchmarkPlan,
+        source_ddl: TableDDL,
+    ) -> int:
+        """
+        Верхняя граница количества codec-tasks на одного parent.
+
+        Для каждой колонки берём максимум числа codec-кандидатов по возможным типам.
+        """
+        jobs = 0
+        for column in source_ddl.columns:
+            max_codec_candidates_for_column = 0
+            possible_types = self._estimate_phased_possible_types_for_column(
+                table_plan=table_plan,
+                column_name=column.name,
+                current_type=column.type,
+            )
+            for tested_type in possible_types:
+                baseline_codec = column.codec if tested_type == column.type else None
+                codec_candidates = (
+                    sequential_phased_topn_strategy_impl._resolve_codec_candidates_for_column(
+                        table_plan=table_plan,
+                        column_name=column.name,
+                        current_type=tested_type,
+                        current_codec=baseline_codec,
+                    )
+                )
+                max_codec_candidates_for_column = max(
+                    max_codec_candidates_for_column,
+                    len(codec_candidates),
+                )
+            if max_codec_candidates_for_column <= 1:
+                continue
+            jobs += max_codec_candidates_for_column
+        return max(0, int(jobs))
+
+    def _estimate_phased_index_jobs_per_parent_upper(
+        self,
+        *,
+        table_plan: TableBenchmarkPlan,
+        source_ddl: TableDDL,
+        raw_query_plan: QueryPlan,
+        order_by_expressions: Sequence[str],
+    ) -> Tuple[int, int]:
+        """
+        Верхняя граница количества index-tasks на одного parent.
+
+        Возвращает:
+        1) max index-tasks на одного parent;
+        2) max вариантов table index_granularity на один финальный кандидат.
+        """
+        column_names = [column.name for column in source_ddl.columns]
+        query_filter_columns = (
+            sequential_phased_topn_strategy_impl._extract_filter_columns_from_query_plan(
+                raw_query_plan,
+                column_names,
+            )
+        )
+
+        max_options_by_column: Dict[str, int] = {}
+        max_table_granularity_variants = 1
+
+        for column in source_ddl.columns:
+            max_options_for_column = 0
+            possible_types = self._estimate_phased_possible_types_for_column(
+                table_plan=table_plan,
+                column_name=column.name,
+                current_type=column.type,
+            )
+            for tested_type in possible_types:
+                ddl_variant = source_ddl.copy()
+                tested_column = ddl_variant.column(column.name)
+                if tested_column is None:
+                    continue
+                tested_column.type = tested_type
+                if tested_type != column.type:
+                    tested_column.codec = None
+                options = sequential_phased_topn_strategy_impl._resolve_index_options_for_column(
+                    table_plan=table_plan,
+                    base_ddl=ddl_variant,
+                    column_name=column.name,
+                )
+                max_options_for_column = max(max_options_for_column, len(options))
+                for option in options:
+                    allowed_values_count = len(option.allowed_table_index_granularity_values or [])
+                    option_granularity_variants = max(
+                        allowed_values_count,
+                        1 if option.table_index_granularity is not None else 0,
+                    )
+                    max_table_granularity_variants = max(
+                        max_table_granularity_variants,
+                        option_granularity_variants,
+                    )
+            max_options_by_column[column.name] = max_options_for_column
+
+        max_jobs_per_parent = 0
+        for order_by_expr in order_by_expressions:
+            order_by_components = {
+                sequential_phased_topn_strategy_impl._normalize_identifier(component)
+                for component in sequential_phased_topn_strategy_impl._parse_order_by_components(
+                    order_by_expr
+                )
+            }
+            candidate_columns = [
+                column_name
+                for column_name in query_filter_columns
+                if column_name not in order_by_components
+            ]
+            if not candidate_columns:
+                candidate_columns = [
+                    column_name
+                    for column_name in column_names
+                    if column_name not in order_by_components
+                ]
+            jobs_for_expression = sum(
+                max_options_by_column.get(column_name, 0) for column_name in candidate_columns
+            )
+            max_jobs_per_parent = max(max_jobs_per_parent, jobs_for_expression)
+
+        return max(0, int(max_jobs_per_parent)), max(1, int(max_table_granularity_variants))
 
     def _validate_scoring_formulas_before_run(
         self,

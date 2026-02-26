@@ -2551,6 +2551,95 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             1,
         )
 
+    def test_runner_estimates_global_progress_for_phased_strategy_by_real_candidates(self) -> None:
+        """Проверяет fixed global target для phased-стратегии по реальным candidate-правилам."""
+        benchmark = BenchmarkConfig(
+            id="bench_phased_progress_estimate",
+            connection_id="prod_ch",
+            strategy="sequential_phased_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            sequential_top_n=2,
+            sequential_top_n_limits=InsertRowsLimitsConfig(
+                order_by=2,
+                types=2,
+                codecs=2,
+                indexes=2,
+                final_validation=2,
+            ),
+            max_winners_per_parent_limits=InsertRowsLimitsConfig(
+                types=2,
+                codecs=2,
+                indexes=2,
+            ),
+            index_granularity_values=[8192, 16384],
+            global_rules=RulesConfig(
+                order_by_rules=OrderByRulesConfig(
+                    first_column="event_time",
+                    candidates=["user_id"],
+                    auto_generate_candidates=False,
+                ),
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_name="user_id",
+                        by_type="UInt64",
+                        types=["UInt64", "UInt32", "UInt16"],
+                        codecs=["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+                    ),
+                    ColumnRuleConfig(
+                        by_name="revenue",
+                        by_type="Nullable(Decimal(18,4))",
+                        types=["Nullable(Decimal(18,4))", "Nullable(Float64)"],
+                    ),
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_name="user_id",
+                        by_type="UInt64",
+                        indexes=[
+                            IndexConfig(
+                                type="minmax",
+                                granularity=4,
+                                index_granularity_values=[8192, 16384],
+                            )
+                        ],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[
+                    QueryConfigItem(
+                        query="SELECT count() FROM {table} WHERE user_id > 0"
+                    )
+                ],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=RecordingExecutionAdapter(),
+            result_store=InMemoryBenchmarkResultStore(),
+        )
+
+        table_plan = next(engine.iter_table_plans())
+        estimated = runner._estimate_sequential_phased_topn_jobs_upper_bound(
+            table_plan=table_plan
+        )
+
+        # Breakdown:
+        # phase1 order_by: 2
+        # phase2 types: 2 parents * (3 user_id + 2 revenue) = 10
+        # phase3 codecs: 2 parents * 3 = 6
+        # phase4 indexes: 2 parents * 3 options = 6
+        # phase5 final: 2 parents * 2 table-granularity = 4
+        self.assertEqual(estimated, 28)
+
     def test_sequential_phased_topn_strategy_supports_multiple_winners_per_parent(self) -> None:
         """Проверяет, что max_winners_per_parent_limits реально даёт >1 кандидата на parent."""
         benchmark = BenchmarkConfig(
