@@ -99,6 +99,30 @@ class SettingsTests(unittest.TestCase):
                 result_table="  ",
             )
 
+    def test_resolved_result_tables_defaults(self) -> None:
+        """Проверяет default-resolve таблиц legacy/phased."""
+        settings = AppSettings(
+            _env_file=None,
+            **self._required_base_kwargs(),
+            result_table="combined_results",
+        )
+        self.assertEqual(settings.resolved_legacy_result_table, "combined_results")
+        self.assertEqual(settings.resolved_phased_result_table, "combined_results__phased")
+        self.assertEqual(settings.resolved_phased_runs_table, "benchmark_runs")
+
+    def test_optional_result_table_overrides_are_trimmed(self) -> None:
+        """Проверяет trim optional override-полей таблиц result store."""
+        settings = AppSettings(
+            _env_file=None,
+            **self._required_base_kwargs(),
+            legacy_result_table="  legacy_tbl  ",
+            phased_result_table="  phased_tbl  ",
+            phased_runs_table="  phased_runs  ",
+        )
+        self.assertEqual(settings.resolved_legacy_result_table, "legacy_tbl")
+        self.assertEqual(settings.resolved_phased_result_table, "phased_tbl")
+        self.assertEqual(settings.resolved_phased_runs_table, "phased_runs")
+
 
 if __name__ == "__main__":
     unittest.main()

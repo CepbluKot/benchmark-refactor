@@ -3,7 +3,7 @@
     {
       "id": "bench_hits_postgres_sequential_topn",
       "connection_id": "local_ch_hits",
-      "strategy": "sequential_topn_strategy",
+      "strategy": "sequential_phased_topn_strategy",
       "column_rules_mode": "inline_only",
       "index_rules_mode": "inline_only",
       "column_order_mode": "compressed_size_desc",

@@ -67,7 +67,7 @@
             "types": 300000,
             "indexes": 120000
           },
-          "strategy": "sequential_topn_strategy",
+          "strategy": "sequential_phased_topn_strategy",
           "rules": {
             "column_rules": [
               {

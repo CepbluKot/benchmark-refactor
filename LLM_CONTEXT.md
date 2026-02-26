@@ -158,15 +158,23 @@
 
 `VariantJob` содержит:
 1. `scoring` — стратегия вычисления variant score (`builtin`/`expression`), уже с учётом table-level override.
+2. `benchmark_strategy` — strategy-key текущего плана; используется для роутинга записи в result-store.
 
 Хранение результатов в ClickHouse:
 
-1. Таблица `benchmark_runs`:
+1. Для `sequential_phased_topn_strategy`:
+   - таблица `BENCH_PHASED_RUNS_TABLE` (по умолчанию `benchmark_runs`) хранит run-level метаданные;
+   - таблица `BENCH_PHASED_RESULT_TABLE` (по умолчанию `${BENCH_RESULT_TABLE}__phased`) хранит variant-результаты phased-стратегии.
+
+2. Для legacy-стратегий (`types/indexes/combined/sequential_topn`):
+   - таблица `BENCH_LEGACY_RESULT_TABLE` (fallback: `BENCH_RESULT_TABLE`) хранит variant-результаты старого пайплайна.
+
+3. Таблица run-level метаданных (`benchmark_runs` по умолчанию):
    - run-level метаданные: `id`, `started_at`, `finished_at`;
    - источник: `source_db_name`, `source_table_name`, `source_table_ddl`, `total_rows`;
    - конфиг/контекст: `benchmark_queries`, `score_weights`, `top_n_winners`, `config_json`.
 
-2. Таблица `benchmark_results`:
+4. Таблица variant-результатов (`benchmark_results`/`benchmark_results__phased` по умолчанию):
    - идентификация/lineage: `id`, `benchmark_run_id`, `parent_id`, `phase`, `phase_name`;
    - время выполнения: `started_at`, `finished_at`;
    - вариант: `variant_params_json`, `tested_table_ddl`;
@@ -174,18 +182,18 @@
      `size_bytes_indexes_json`, `select_metrics_json`, `insert_metrics_json`;
    - ранжирование: `score`, `rank_in_phase`, `is_top_n`.
 
-3. Для backward compatibility также сохраняются legacy/расширенные поля
+5. Для backward compatibility также сохраняются legacy/расширенные поля
    (`variant_params`, `index_params`, combined insert/select/compression/indexes и `extra_json`).
 
-4. per-query select-метрики хранятся как map `query_id -> metrics` и доступны как
+6. per-query select-метрики хранятся как map `query_id -> metrics` и доступны как
    `tested_table_select_metrics_by_query_json`, `source_table_select_metrics_by_query_json`,
    `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json`.
 
-5. SQL-значения перед сохранением форматируются:
+7. SQL-значения перед сохранением форматируются:
    - scalar-поля `*_ddl`, `*_query`;
    - query-поля внутри JSON-метрик (`query`, `source_query`, `warmup_queries`).
 
-6. итоговые значения: `score` и `score_calculation_json`.
+8. итоговые значения: `score` и `score_calculation_json`.
 
 Примеры аналитики по новой схеме:
 

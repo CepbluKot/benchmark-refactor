@@ -257,9 +257,10 @@ Runner не пишет результаты в store. Сохранение вы�
 `VariantJob` + `BenchmarkVariantResult`.
 Что уходит:
 Сохраненные записи и выборки top type-вариантов.
-Физическое хранение в ClickHouse теперь состоит из двух таблиц:
-- `benchmark_runs`: run-level метаданные (`id`, `started_at`, `finished_at`, `source_db_name`, `source_table_name`, `source_table_ddl`, `total_rows`, `benchmark_queries`, `score_weights`, `top_n_winners`, `config_json`).
-- `benchmark_results`: результаты вариантов c lineage/phase-полями (`id`, `benchmark_run_id`, `parent_id`, `phase`, `phase_name`, `started_at`, `finished_at`, `variant_params_json`, `tested_table_ddl`, `size_bytes_total`, `size_bytes_by_column_json`, `size_bytes_indexes_json`, `select_metrics_json`, `insert_metrics_json`, `score`, `rank_in_phase`, `is_top_n`).
+Физическое хранение в ClickHouse теперь разведено по стратегиям:
+- legacy-стратегии (`types_strategy`, `indexes_strategy`, `combined_strategy`, `sequential_topn_strategy`) пишут в таблицу `BENCH_LEGACY_RESULT_TABLE` (fallback: `BENCH_RESULT_TABLE`);
+- phased-стратегия (`sequential_phased_topn_strategy`) пишет в `BENCH_PHASED_RESULT_TABLE` + run-level таблицу `BENCH_PHASED_RUNS_TABLE`.
+Если `BENCH_PHASED_RESULT_TABLE` не задан, используется `${BENCH_RESULT_TABLE}__phased`.
 Дополнительно сохраняются legacy/расширенные поля (`variant_params`, `index_params`, combined метрики), чтобы не ломать текущие стратегии и тесты.
 `variant_params` содержит всю параметризацию варианта; для phased top-N туда также пишется `parent_variant_table`.
 per-query select-метрики хранятся в JSON-map `query_id -> metrics` и дублируются в `select_metrics_json`.
@@ -527,6 +528,9 @@ BENCH_TEST_DATABASE=bench_tmp
 BENCH_RESULT_CONNECTION_ID=prod_ch
 BENCH_RESULT_DATABASE=benchmark_results
 BENCH_RESULT_TABLE=benchmark_results
+BENCH_LEGACY_RESULT_TABLE=benchmark_results_legacy
+BENCH_PHASED_RESULT_TABLE=benchmark_results_phased
+BENCH_PHASED_RUNS_TABLE=benchmark_runs
 ```
 
 Если `BENCH_RESULT_CONNECTION_ID` не задан, берётся первый connection из конфига.
@@ -635,7 +639,10 @@ engine = BenchmarkEngine(planner=planner)
 result_store = ClickHouseBenchmarkResultStore(
     connection=connection,
     database="benchmark_results",
-    table="benchmark_results",
+    table="benchmark_results_phased",
+    legacy_table="benchmark_results_legacy",
+    phased_table="benchmark_results_phased",
+    phased_runs_table="benchmark_runs",
 )
 
 runner = BenchmarkRunner(
@@ -643,7 +650,10 @@ runner = BenchmarkRunner(
     execution_adapter=CeleryClickHouseExecutionAdapter(
         connections_by_id={c.id: c for c in config.connections},
         result_database="benchmark_results",
-        result_table="benchmark_results",
+        result_table="benchmark_results_legacy",
+        legacy_result_table="benchmark_results_legacy",
+        phased_result_table="benchmark_results_phased",
+        phased_runs_table="benchmark_runs",
     ),
     result_store=result_store,
 )

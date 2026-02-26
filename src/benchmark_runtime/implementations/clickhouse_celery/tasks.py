@@ -982,6 +982,7 @@ class SourceBenchmarkTaskPayload(BaseModel):
     benchmark_run_id: int
     benchmark_started_at: datetime
     benchmark_id: str
+    benchmark_strategy: str = "types_strategy"
     source_database: str
     test_database: Optional[str] = None
     source_table: str
@@ -989,6 +990,9 @@ class SourceBenchmarkTaskPayload(BaseModel):
     result_connection: Optional[ConnectionPayload] = None
     result_database: Optional[str] = None
     result_table: Optional[str] = None
+    result_table_legacy: Optional[str] = None
+    result_table_phased: Optional[str] = None
+    result_runs_table_phased: Optional[str] = None
     query_plan: QueryPlanPayload
     max_iterations: int
     insert_rows_limit: Optional[int] = None
@@ -1005,10 +1009,14 @@ class VariantBenchmarkTaskPayload(BaseModel):
     result_connection: ConnectionPayload
     result_database: str
     result_table: str
+    result_table_legacy: Optional[str] = None
+    result_table_phased: Optional[str] = None
+    result_runs_table_phased: Optional[str] = None
 
     benchmark_run_id: int
     benchmark_started_at: datetime
     benchmark_id: str
+    benchmark_strategy: str = "types_strategy"
 
     source_database: str
     source_table: str
@@ -2640,6 +2648,9 @@ def _store_source_benchmark_result_if_configured(
         connection=payload.result_connection.to_result_store_params(),
         database=payload.result_database,
         table=payload.result_table,
+        legacy_table=payload.result_table_legacy,
+        phased_table=payload.result_table_phased,
+        phased_runs_table=payload.result_runs_table_phased,
         create_table_if_missing=True,
     )
     try:
@@ -2656,6 +2667,7 @@ def _store_source_benchmark_result_if_configured(
             benchmark_run_id=payload.benchmark_run_id,
             benchmark_started_at=payload.benchmark_started_at,
             benchmark_id=payload.benchmark_id,
+            benchmark_strategy=payload.benchmark_strategy,
             source_database=payload.source_database,
             source_table=payload.source_table,
             variant_table=baseline_table,
@@ -3102,6 +3114,9 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
         connection=payload.result_connection.to_result_store_params(),
         database=payload.result_database,
         table=payload.result_table,
+        legacy_table=payload.result_table_legacy,
+        phased_table=payload.result_table_phased,
+        phased_runs_table=payload.result_runs_table_phased,
         create_table_if_missing=True,
     )
 
@@ -3764,6 +3779,7 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
             benchmark_run_id=payload.benchmark_run_id,
             benchmark_started_at=payload.benchmark_started_at,
             benchmark_id=payload.benchmark_id,
+            benchmark_strategy=payload.benchmark_strategy,
             source_database=payload.source_database,
             source_table=payload.source_table,
             variant_table=payload.variant_table,

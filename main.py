@@ -289,16 +289,27 @@ def run_from_settings() -> int:
         config=config,
         preferred_connection_id=app_settings.result_connection_id,
     )
+    legacy_result_table = app_settings.resolved_legacy_result_table
+    phased_result_table = app_settings.resolved_phased_result_table
+    phased_runs_table = app_settings.resolved_phased_runs_table
     logger.info(
-        "Result store connection: connection_id=%s, target=%s.%s",
+        "Result store connection: connection_id=%s, legacy_target=%s.%s, phased_target=%s.%s, phased_runs=%s.%s",
         result_connection.id,
         app_settings.result_database,
-        app_settings.result_table,
+        legacy_result_table,
+        app_settings.result_database,
+        phased_result_table,
+        app_settings.result_database,
+        phased_runs_table,
     )
     result_store = ClickHouseBenchmarkResultStore(
         connection=result_connection,
         database=app_settings.result_database,
-        table=app_settings.result_table,
+        table=phased_result_table,
+        runs_table=phased_runs_table,
+        legacy_table=legacy_result_table,
+        phased_table=phased_result_table,
+        phased_runs_table=phased_runs_table,
         create_table_if_missing=True,
     )
     _log_build_metadata(
@@ -317,7 +328,10 @@ def run_from_settings() -> int:
         connections_by_id=connections_by_id,
         result_connections_by_id=result_connections_by_id,
         result_database=app_settings.result_database,
-        result_table=app_settings.result_table,
+        result_table=legacy_result_table,
+        legacy_result_table=legacy_result_table,
+        phased_result_table=phased_result_table,
+        phased_runs_table=phased_runs_table,
     )
 
     fetchers: Dict[str, object] = {}

@@ -194,7 +194,7 @@
             "sequential": 150000,
             "future_custom_mode": 90000
           },
-          "strategy": "sequential_topn_strategy"
+          "strategy": "sequential_phased_topn_strategy"
         }
       ]
     }

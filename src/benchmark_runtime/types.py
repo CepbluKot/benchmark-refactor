@@ -93,6 +93,7 @@ class VariantJob(_FrozenModel):
     benchmark_run_id: int
     benchmark_started_at: datetime
     benchmark_id: str
+    benchmark_strategy: BenchmarkStrategy = "types_strategy"
     connection_id: str
     connection_dbms: str
     source_database: str
@@ -117,6 +118,7 @@ class SourceBenchmarkJob(_FrozenModel):
     benchmark_run_id: int
     benchmark_started_at: datetime
     benchmark_id: str
+    benchmark_strategy: BenchmarkStrategy = "types_strategy"
     connection_id: str
     connection_dbms: str
     source_database: str

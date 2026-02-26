@@ -51,6 +51,9 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
         result_connections_by_id: Optional[Dict[str, ConnectionConfig]] = None,
         result_database: str = "benchmark_results",
         result_table: str = "benchmark_results",
+        legacy_result_table: Optional[str] = None,
+        phased_result_table: Optional[str] = None,
+        phased_runs_table: str = "benchmark_runs",
         celery_app: Any = None,
         source_task_name: str = SOURCE_BENCHMARK_TASK_NAME,
         variant_task_name: str = VARIANT_BENCHMARK_TASK_NAME,
@@ -74,7 +77,9 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
             else {}
         )
         self._result_database = result_database
-        self._result_table = result_table
+        self._legacy_result_table = legacy_result_table or result_table
+        self._phased_result_table = phased_result_table or result_table
+        self._phased_runs_table = phased_runs_table
         self._source_task_name = source_task_name
         self._variant_task_name = variant_task_name
         self._source_result_timeout_sec = source_result_timeout_sec
@@ -242,13 +247,17 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
             benchmark_run_id=job.benchmark_run_id,
             benchmark_started_at=job.benchmark_started_at,
             benchmark_id=job.benchmark_id,
+            benchmark_strategy=job.benchmark_strategy,
             source_database=job.source_database,
             test_database=job.test_database,
             source_table=job.source_table,
             source_table_ddl=job.source_table_ddl.to_ddl(),
             result_connection=self._to_connection_payload(result_connection),
             result_database=self._result_database,
-            result_table=self._result_table,
+            result_table=self._legacy_result_table,
+            result_table_legacy=self._legacy_result_table,
+            result_table_phased=self._phased_result_table,
+            result_runs_table_phased=self._phased_runs_table,
             query_plan=QueryPlanPayload(
                 test_queries=[
                     QueryPayload(
@@ -274,10 +283,14 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
             connection=self._to_connection_payload(connection),
             result_connection=self._to_connection_payload(result_connection),
             result_database=self._result_database,
-            result_table=self._result_table,
+            result_table=self._legacy_result_table,
+            result_table_legacy=self._legacy_result_table,
+            result_table_phased=self._phased_result_table,
+            result_runs_table_phased=self._phased_runs_table,
             benchmark_run_id=job.benchmark_run_id,
             benchmark_started_at=job.benchmark_started_at,
             benchmark_id=job.benchmark_id,
+            benchmark_strategy=job.benchmark_strategy,
             source_database=job.source_database,
             source_table=job.source_table,
             variant_database=job.variant_database,

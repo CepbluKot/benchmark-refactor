@@ -25,7 +25,22 @@ class _FakeSettings:
     result_connection_id = "prod_ch"
     result_database = "bench_results"
     result_table = "combined_results"
+    legacy_result_table = None
+    phased_result_table = None
+    phased_runs_table = "benchmark_runs"
     log_level = "INFO"
+
+    @property
+    def resolved_legacy_result_table(self) -> str:
+        return self.legacy_result_table or self.result_table
+
+    @property
+    def resolved_phased_result_table(self) -> str:
+        return self.phased_result_table or f"{self.result_table}__phased"
+
+    @property
+    def resolved_phased_runs_table(self) -> str:
+        return self.phased_runs_table
 
     @staticmethod
     def decode_celery_config():
@@ -228,6 +243,9 @@ class MainMockedRuntimeTests(unittest.TestCase):
 
         self.assertEqual(adapter.kwargs["result_database"], "bench_results")
         self.assertEqual(adapter.kwargs["result_table"], "combined_results")
+        self.assertEqual(adapter.kwargs["legacy_result_table"], "combined_results")
+        self.assertEqual(adapter.kwargs["phased_result_table"], "combined_results__phased")
+        self.assertEqual(adapter.kwargs["phased_runs_table"], "benchmark_runs")
         self.assertEqual(adapter.kwargs["result_connections_by_id"]["prod_ch"].id, "prod_ch")
 
     def test_run_from_settings_uses_max_run_id_from_result_store(self) -> None:

@@ -12,6 +12,9 @@ JSON-конфиги передаются как base64-строки:
   - BENCH_RESULT_CONNECTION_ID
   - BENCH_RESULT_DATABASE
   - BENCH_RESULT_TABLE
+  - BENCH_LEGACY_RESULT_TABLE
+  - BENCH_PHASED_RESULT_TABLE
+  - BENCH_PHASED_RUNS_TABLE
 """
 
 from __future__ import annotations
@@ -106,6 +109,9 @@ class AppSettings(BaseSettings):
     result_connection_id: Optional[str] = None
     result_database: str = "benchmark_results"
     result_table: str = "benchmark_results"
+    legacy_result_table: Optional[str] = None
+    phased_result_table: Optional[str] = None
+    phased_runs_table: str = "benchmark_runs"
     log_level: str = "INFO"
 
     model_config = SettingsConfigDict(
@@ -179,6 +185,41 @@ class AppSettings(BaseSettings):
         if not normalized:
             raise ValueError("result_database/result_table не должны быть пустыми")
         return normalized
+
+    @field_validator("legacy_result_table", "phased_result_table", mode="before")
+    @classmethod
+    def parse_optional_table_name(cls, value: object) -> Optional[str]:
+        """Нормализует optional имя таблицы (пустая строка -> None)."""
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            return None
+        return normalized
+
+    @field_validator("phased_runs_table", mode="before")
+    @classmethod
+    def parse_phased_runs_table(cls, value: object) -> str:
+        """Проверяет, что имя phased runs table не пустое."""
+        normalized = str(value).strip()
+        if not normalized:
+            raise ValueError("phased_runs_table не должно быть пустым")
+        return normalized
+
+    @property
+    def resolved_legacy_result_table(self) -> str:
+        """Эффективная таблица для старых стратегий."""
+        return self.legacy_result_table or self.result_table
+
+    @property
+    def resolved_phased_result_table(self) -> str:
+        """Эффективная таблица для phased-стратегии."""
+        return self.phased_result_table or f"{self.result_table}__phased"
+
+    @property
+    def resolved_phased_runs_table(self) -> str:
+        """Эффективная таблица run-level метаданных для phased-стратегии."""
+        return self.phased_runs_table
 
     def decode_celery_config(self) -> Dict[str, Any]:
         """Возвращает celery-конфиг из BENCH_CELERY_CONFIG_B64."""
