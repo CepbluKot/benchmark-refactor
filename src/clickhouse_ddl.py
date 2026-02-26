@@ -106,26 +106,122 @@ class TableDDL(BaseModel):
     # ── низкоуровневые helpers ────────────────────────────────────────────────
 
     @staticmethod
+    def _skip_line_comment(text: str, i: int) -> int:
+        """Сдвигает позицию в конец SQL line-comment `-- ...`."""
+        i += 2
+        while i < len(text) and text[i] != '\n':
+            i += 1
+        return i
+
+    @staticmethod
+    def _skip_block_comment(text: str, i: int) -> int:
+        """Сдвигает позицию после SQL block-comment `/* ... */`."""
+        i += 2
+        while i + 1 < len(text):
+            if text[i] == '*' and text[i + 1] == '/':
+                return i + 2
+            i += 1
+        return len(text)
+
+    @staticmethod
+    def _error_preview(text: str, start: int = 0, limit: int = 120) -> str:
+        """
+        Возвращает короткий фрагмент SQL для диагностик.
+
+        Это убирает «магические» срезы вида `text[:60]` из сообщений ошибок.
+        """
+        start = max(start, 0)
+        if start >= len(text):
+            return ""
+        chunk = text[start:start + max(limit, 1)]
+        if start + len(chunk) < len(text):
+            chunk += "..."
+        return chunk
+
+    @staticmethod
     def _find_closing_paren(text: str, pos: int) -> int:
         """Возвращает позицию закрывающей скобки для открывающей на pos."""
         assert text[pos] == '(', f"Expected '(' at pos {pos}, got {text[pos]!r}"
         depth = 0
-        for i in range(pos, len(text)):
-            if text[i] == '(':
+        quote: Optional[str] = None
+        i = pos
+        while i < len(text):
+            ch = text[i]
+            if quote is not None:
+                if ch == quote:
+                    # SQL-экранирование кавычки удвоением ('', "", ``).
+                    if i + 1 < len(text) and text[i + 1] == quote:
+                        i += 2
+                        continue
+                    # Поддержка backslash-экранирования.
+                    if i > 0 and text[i - 1] == '\\':
+                        i += 1
+                        continue
+                    quote = None
+                i += 1
+                continue
+
+            if ch in ("'", '"', '`'):
+                quote = ch
+                i += 1
+                continue
+
+            if ch == '-' and i + 1 < len(text) and text[i + 1] == '-':
+                i = TableDDL._skip_line_comment(text, i)
+                continue
+            if ch == '/' and i + 1 < len(text) and text[i + 1] == '*':
+                i = TableDDL._skip_block_comment(text, i)
+                continue
+
+            if ch == '(':
                 depth += 1
-            elif text[i] == ')':
+            elif ch == ')':
                 depth -= 1
                 if depth == 0:
                     return i
-        raise ValueError(f"Unbalanced parentheses at pos {pos}: {text[pos:pos+80]!r}")
+            i += 1
+        preview = TableDDL._error_preview(text, start=pos)
+        raise ValueError(f"Unbalanced parentheses at pos {pos}: {preview!r}")
 
     @staticmethod
     def _split_top_level_commas(text: str) -> List[str]:
         """Разбивает строку по запятым верхнего уровня (не внутри скобок)."""
         parts: List[str] = []
         depth = 0
+        quote: Optional[str] = None
         buf: List[str] = []
-        for ch in text:
+        i = 0
+        while i < len(text):
+            ch = text[i]
+            if quote is not None:
+                buf.append(ch)
+                if ch == quote:
+                    # SQL-экранирование кавычки удвоением ('', "", ``).
+                    if i + 1 < len(text) and text[i + 1] == quote:
+                        buf.append(text[i + 1])
+                        i += 2
+                        continue
+                    # Поддержка backslash-экранирования.
+                    if i > 0 and text[i - 1] == '\\':
+                        i += 1
+                        continue
+                    quote = None
+                i += 1
+                continue
+
+            if ch in ("'", '"', '`'):
+                quote = ch
+                buf.append(ch)
+                i += 1
+                continue
+
+            if ch == '-' and i + 1 < len(text) and text[i + 1] == '-':
+                i = TableDDL._skip_line_comment(text, i)
+                continue
+            if ch == '/' and i + 1 < len(text) and text[i + 1] == '*':
+                i = TableDDL._skip_block_comment(text, i)
+                continue
+
             if ch == '(':
                 depth += 1
             elif ch == ')':
@@ -137,10 +233,100 @@ class TableDDL(BaseModel):
                 buf = []
             else:
                 buf.append(ch)
+            i += 1
         s = ''.join(buf).strip()
         if s:
             parts.append(s)
         return parts
+
+    @staticmethod
+    def _strip_sql_comments(text: str) -> str:
+        """
+        Удаляет SQL-комментарии (`-- ...` и `/* ... */`) только вне строк.
+
+        Это защищает значения COMMENT 'foo -- bar' от случайного удаления хвоста строки.
+        """
+        out: List[str] = []
+        quote: Optional[str] = None
+        i = 0
+        while i < len(text):
+            ch = text[i]
+            if quote is not None:
+                out.append(ch)
+                if ch == quote:
+                    # SQL-экранирование кавычки удвоением ('', "", ``).
+                    if i + 1 < len(text) and text[i + 1] == quote:
+                        out.append(text[i + 1])
+                        i += 2
+                        continue
+                    # Поддержка backslash-экранирования.
+                    if i > 0 and text[i - 1] == '\\':
+                        i += 1
+                        continue
+                    quote = None
+                i += 1
+                continue
+
+            if ch in ("'", '"', '`'):
+                quote = ch
+                out.append(ch)
+                i += 1
+                continue
+
+            # Комментарии удаляем только вне кавычек.
+            if ch == '-' and i + 1 < len(text) and text[i + 1] == '-':
+                i = TableDDL._skip_line_comment(text, i)
+                continue
+            if ch == '/' and i + 1 < len(text) and text[i + 1] == '*':
+                i = TableDDL._skip_block_comment(text, i)
+                continue
+
+            out.append(ch)
+            i += 1
+        return ''.join(out)
+
+    @staticmethod
+    def _is_top_level_pos(text: str, pos: int) -> bool:
+        """
+        Возвращает True, если `pos` находится на верхнем уровне SQL-текста.
+
+        Верхний уровень = вне строк/идентификаторов в кавычках и вне скобок.
+        """
+        depth = 0
+        quote: Optional[str] = None
+        i = 0
+        while i < pos and i < len(text):
+            ch = text[i]
+            if quote is not None:
+                if ch == quote:
+                    if i + 1 < len(text) and text[i + 1] == quote:
+                        i += 2
+                        continue
+                    if i > 0 and text[i - 1] == '\\':
+                        i += 1
+                        continue
+                    quote = None
+                i += 1
+                continue
+
+            if ch in ("'", '"', '`'):
+                quote = ch
+                i += 1
+                continue
+
+            if ch == '-' and i + 1 < len(text) and text[i + 1] == '-':
+                i = TableDDL._skip_line_comment(text, i)
+                continue
+            if ch == '/' and i + 1 < len(text) and text[i + 1] == '*':
+                i = TableDDL._skip_block_comment(text, i)
+                continue
+
+            if ch == '(':
+                depth += 1
+            elif ch == ')' and depth > 0:
+                depth -= 1
+            i += 1
+        return quote is None and depth == 0
 
     @staticmethod
     def _consume_identifier(text: str) -> Tuple[str, str]:
@@ -148,12 +334,31 @@ class TableDDL(BaseModel):
         text = text.lstrip()
         for q in ('`', '"'):
             if text.startswith(q):
-                end = text.index(q, 1)
-                return text[1:end], text[end + 1:].lstrip()
+                i = 1
+                buf: List[str] = []
+                while i < len(text):
+                    ch = text[i]
+                    if ch == q:
+                        # SQL-экранирование кавычки удвоением.
+                        if i + 1 < len(text) and text[i + 1] == q:
+                            buf.append(q)
+                            i += 2
+                            continue
+                        # Поддержка backslash-экранирования.
+                        if i > 0 and text[i - 1] == '\\':
+                            buf.append(ch)
+                            i += 1
+                            continue
+                        return ''.join(buf), text[i + 1:].lstrip()
+                    buf.append(ch)
+                    i += 1
+                raise ValueError(
+                    f"Unclosed quoted identifier at: {TableDDL._error_preview(text)!r}"
+                )
         m = re.match(r'(\w+)(.*)', text, re.DOTALL)
         if m:
             return m.group(1), m.group(2).lstrip()
-        raise ValueError(f"Expected identifier at: {text[:60]!r}")
+        raise ValueError(f"Expected identifier at: {TableDDL._error_preview(text)!r}")
 
     @classmethod
     def _consume_type(cls, text: str) -> Tuple[str, str]:
@@ -164,7 +369,7 @@ class TableDDL(BaseModel):
         text = text.lstrip()
         m = re.match(r'(\w+)(.*)', text, re.DOTALL)
         if not m:
-            raise ValueError(f"Expected type at: {text[:60]!r}")
+            raise ValueError(f"Expected type at: {TableDDL._error_preview(text)!r}")
         name, rest = m.group(1), m.group(2).lstrip()
         if rest.startswith('('):
             end = cls._find_closing_paren(rest, 0)
@@ -177,22 +382,23 @@ class TableDDL(BaseModel):
         Находит и вырезает CODEC(...) из произвольного текста.
         Возвращает (codec_string | None, text_без_codec).
         """
-        m = re.search(r'\bCODEC\s*\(', text, re.IGNORECASE)
-        if not m:
-            return None, text
-        paren_pos = text.index('(', m.start())
-        end = cls._find_closing_paren(text, paren_pos)
-        codec_str = text[m.start():end + 1]
-        cleaned = (text[:m.start()] + text[end + 1:]).strip()
-        return codec_str, cleaned
+        for m in re.finditer(r'\bCODEC\s*\(', text, re.IGNORECASE):
+            if not cls._is_top_level_pos(text, m.start()):
+                continue
+            paren_pos = m.end() - 1
+            end = cls._find_closing_paren(text, paren_pos)
+            codec_str = text[m.start():end + 1]
+            cleaned = (text[:m.start()] + text[end + 1:]).strip()
+            return codec_str, cleaned
+        return None, text
 
     # ── парсинг ──────────────────────────────────────────────────────────────
 
     @classmethod
     def from_ddl(cls, ddl: str) -> 'TableDDL':
         """Парсит сырой `CREATE TABLE` SQL в структурированный `TableDDL`."""
-        # Убираем однострочные SQL-комментарии (-- ...)
-        ddl = re.sub(r'--[^\n]*', '', ddl).strip()
+        # Убираем SQL-комментарии только вне строк.
+        ddl = cls._strip_sql_comments(ddl).strip()
 
         # 1. Заголовок CREATE TABLE
         header_re = re.compile(
@@ -291,7 +497,11 @@ class TableDDL(BaseModel):
             r'|SAMPLE\s+BY|TTL\b|SETTINGS\b|COMMENT\b)',
             re.IGNORECASE,
         )
-        positions = [(m.start(), m.group(0)) for m in clause_re.finditer(text)]
+        positions = [
+            (m.start(), m.group(0))
+            for m in clause_re.finditer(text)
+            if self._is_top_level_pos(text, m.start())
+        ]
         positions.append((len(text), None))
 
         for i, (start, kw_raw) in enumerate(positions[:-1]):
