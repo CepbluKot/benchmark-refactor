@@ -129,3 +129,23 @@ class BenchmarkResultStore(ABC):
         По умолчанию no-op: полезно для in-memory store и store без rank-колонок.
         """
         return None
+
+    def mark_top_n_variant_tables(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        winner_variant_tables: Sequence[str],
+        phase: Optional[int] = None,
+        variant_mode: Optional[str] = None,
+        phase_name: Optional[str] = None,
+    ) -> None:
+        """
+        Опционально помечает `is_top_n=1` только у переданных winner-variant-таблиц.
+
+        Нужен стратегиям, где top-N определяется не просто глобальным rank, а
+        фактическим списком вариантов, прошедших в следующую стадию.
+        """
+        return None

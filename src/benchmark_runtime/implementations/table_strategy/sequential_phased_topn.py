@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import itertools
 import logging
@@ -44,6 +44,9 @@ class _PhaseCandidate:
     variant_table: str
     variant_ddl: TableDDL
     score: Optional[float]
+    type_choices: Dict[str, str] = field(default_factory=dict)
+    codec_choices: Dict[str, Optional[str]] = field(default_factory=dict)
+    index_choices: Dict[str, _IndexColumnChoice] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -626,6 +629,33 @@ def _finalize_stage_ranking_if_supported(
         )
 
 
+def _mark_stage_top_n_winners_if_supported(
+    *,
+    store: BenchmarkResultStore,
+    benchmark_run_id: int,
+    benchmark_id: str,
+    source_database: str,
+    source_table: str,
+    phase: Optional[int],
+    variant_mode: str,
+    phase_name: Optional[str],
+    winner_variant_tables: Sequence[str],
+) -> None:
+    """Явно помечает `is_top_n` у вариантов, прошедших в следующий этап."""
+    mark_hook = getattr(store, "mark_top_n_variant_tables", None)
+    if callable(mark_hook):
+        mark_hook(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+            phase=phase,
+            variant_mode=variant_mode,
+            phase_name=phase_name,
+            winner_variant_tables=list(winner_variant_tables),
+        )
+
+
 def _resolve_stage_top_n(
     table_plan: TableBenchmarkPlan,
     stage_mode: str,
@@ -682,6 +712,38 @@ def _candidate_from_summary(
         variant_ddl=ddl,
         score=summary.score,
     )
+
+
+def _build_effective_candidate_ddl(candidate: _PhaseCandidate) -> TableDDL:
+    """
+    Возвращает DDL кандидата с применёнными per-column choices.
+
+    Для phased-стратегии это позволяет тестировать изменения по одной колонке
+    на фоне уже выбранных лучших параметров предыдущих фаз.
+    """
+    ddl = candidate.variant_ddl.copy()
+
+    for column_name, selected_type in candidate.type_choices.items():
+        column = ddl.column(column_name)
+        if column is None:
+            continue
+        column.type = selected_type
+        # При смене типа codec пересчитывается на следующих фазах отдельно.
+        column.codec = None
+
+    for column_name, selected_codec in candidate.codec_choices.items():
+        column = ddl.column(column_name)
+        if column is None:
+            continue
+        column.codec = selected_codec
+
+    for column_name, selected_index in candidate.index_choices.items():
+        _remove_indexes_for_column(ddl, column_name)
+        restored_index = selected_index.to_index_def()
+        if restored_index is not None:
+            ddl.indexes.append(restored_index.copy())
+
+    return ddl
 
 
 def _resolve_type_candidates_for_column(
@@ -977,9 +1039,20 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 table_plan.table,
             )
             return
+        _mark_stage_top_n_winners_if_supported(
+            store=store,
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=table_plan.benchmark_id,
+            source_database=table_plan.database,
+            source_table=table_plan.table,
+            phase=1,
+            variant_mode="order_by",
+            phase_name="ORDER BY",
+            winner_variant_tables=[candidate.variant_table for candidate in order_winners],
+        )
 
         # ------------------------------------------------------------------
-        # Фаза 2: TYPE
+        # Фаза 2: TYPE (one-column selection)
         # ------------------------------------------------------------------
         _log_stage_banner(
             stage_name="ТИПЫ ДАННЫХ (phase 2)",
@@ -990,7 +1063,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
         )
         type_winners: list[_PhaseCandidate] = []
         for parent in order_winners:
-            base_ddl = parent.variant_ddl.copy()
+            base_ddl = _build_effective_candidate_ddl(parent)
             jobs: list[VariantJob] = []
             context_by_variant_table: dict[str, _TypeJobContext] = {}
 
@@ -1011,9 +1084,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                     tested_column.codec = None
                     column_meta = ColumnVariantMeta(
                         index=0,
-                        column_choices={
-                            column.name: (tested_type, tested_column.codec)
-                        },
+                        column_choices={column.name: (tested_type, tested_column.codec)},
                     )
                     job = _build_job(
                         runner=runner,
@@ -1070,19 +1141,25 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 variant_mode="types",
                 phase_name="types",
             )
-            options_by_column: dict[str, list[tuple[float, str]]] = {}
+
+            options_by_column: dict[str, list[tuple[float, tuple[str, str]]]] = {}
             for variant_table, summary in summaries.items():
                 context = context_by_variant_table.get(variant_table)
                 if context is None or summary.score is None:
                     continue
+                score_value = float(summary.score)
                 options_by_column.setdefault(context.column_name, []).append(
-                    (float(summary.score), context.tested_type)
+                    (score_value, (context.tested_type, variant_table))
                 )
+
             if not options_by_column:
                 type_winners.append(parent)
                 continue
 
-            limited_options_by_column: dict[str, list[tuple[float, str]]] = {}
+            limited_options_by_column: dict[
+                str,
+                list[tuple[float, tuple[str, str]]],
+            ] = {}
             for column_name, options in options_by_column.items():
                 deduped = _dedupe_stage_options(
                     options,
@@ -1095,91 +1172,39 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 type_winners.append(parent)
                 continue
 
-            unique_merged_choice_candidates = _build_top_choice_maps(
+            merged_choice_candidates = _build_top_choice_maps(
                 limited_options_by_column,
                 limit=max_winners_per_parent_types,
             )
-            if not unique_merged_choice_candidates:
+            if not merged_choice_candidates:
                 type_winners.append(parent)
                 continue
 
-            validation_jobs: list[VariantJob] = []
-            validation_fallback_ddls_by_table: dict[str, TableDDL] = {}
-            for _, choice_map in unique_merged_choice_candidates:
-                validation_ddl = base_ddl.copy()
-                for column_name, tested_type in choice_map.items():
-                    column = validation_ddl.column(column_name)
-                    if column is None:
-                        continue
-                    column.type = tested_type
-                    column.codec = None
-                validation_job = _build_job(
-                    runner=runner,
-                    table_plan=table_plan,
-                    raw_query_plan=raw_query_plan,
-                    variant_ddl=validation_ddl,
-                    variant_mode="types_validation",
-                    phase_name="types_validation",
-                    total_variants=max(1, len(unique_merged_choice_candidates)),
-                    benchmark_run_id=benchmark_run_id,
-                    benchmark_started_at=benchmark_started_at,
-                    source_benchmark=source_benchmark,
-                    global_index_counter=global_index_counter,
-                    parent_variant_table=parent.variant_table,
+            for merged_score, choice_map in merged_choice_candidates:
+                updated_type_choices = dict(parent.type_choices)
+                updated_codec_choices = dict(parent.codec_choices)
+                representative_variant_table = parent.variant_table
+                for column_name, (selected_type, option_variant_table) in sorted(
+                    choice_map.items()
+                ):
+                    updated_type_choices[column_name] = selected_type
+                    updated_codec_choices.pop(column_name, None)
+                    representative_variant_table = option_variant_table
+                phase_score = (
+                    float(merged_score) / float(max(1, len(choice_map)))
+                    if choice_map
+                    else parent.score
                 )
-                validation_jobs.append(validation_job)
-                validation_fallback_ddls_by_table[validation_job.variant_table] = (
-                    validation_ddl.copy()
-                )
-            validation_scope = (
-                f"phase2 types validation: {table_plan.benchmark_id} "
-                f"{table_plan.database}.{table_plan.table} parent={parent.variant_table}"
-            )
-            _dispatch_stage_jobs(
-                runner=runner,
-                jobs=validation_jobs,
-                stage_scope_name=validation_scope,
-                stage_label=validation_scope,
-            )
-            validation_summaries = _wait_for_stage_summaries(
-                store=store,
-                benchmark_run_id=benchmark_run_id,
-                benchmark_id=table_plan.benchmark_id,
-                source_database=table_plan.database,
-                source_table=table_plan.table,
-                variant_mode="types_validation",
-                expected_variant_tables=[job.variant_table for job in validation_jobs],
-            )
-            _finalize_stage_ranking_if_supported(
-                store=store,
-                benchmark_run_id=benchmark_run_id,
-                benchmark_id=table_plan.benchmark_id,
-                source_database=table_plan.database,
-                source_table=table_plan.table,
-                phase=2,
-                variant_mode="types_validation",
-                phase_name="types_validation",
-            )
-            ranked_validation_candidates = _sorted_candidates(
-                [
-                    candidate
-                    for candidate in (
-                        _candidate_from_summary(
-                            summary,
-                            fallback_ddl=validation_fallback_ddls_by_table.get(
-                                variant_table
-                            ),
-                        )
-                        for variant_table, summary in validation_summaries.items()
+                type_winners.append(
+                    _PhaseCandidate(
+                        variant_table=representative_variant_table,
+                        variant_ddl=parent.variant_ddl.copy(),
+                        score=phase_score,
+                        type_choices=updated_type_choices,
+                        codec_choices=updated_codec_choices,
+                        index_choices=dict(parent.index_choices),
                     )
-                    if candidate is not None
-                ]
-            )
-            if not ranked_validation_candidates:
-                type_winners.append(parent)
-                continue
-            for candidate in ranked_validation_candidates[:max_winners_per_parent_types]:
-                type_winners.append(candidate)
+                )
 
         type_winners = _sorted_candidates(type_winners)[:top_n_types]
         if not type_winners:
@@ -1192,9 +1217,20 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 table_plan.table,
             )
             return
+        _mark_stage_top_n_winners_if_supported(
+            store=store,
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=table_plan.benchmark_id,
+            source_database=table_plan.database,
+            source_table=table_plan.table,
+            phase=2,
+            variant_mode="types",
+            phase_name="types",
+            winner_variant_tables=[candidate.variant_table for candidate in type_winners],
+        )
 
         # ------------------------------------------------------------------
-        # Фаза 3: CODEC
+        # Фаза 3: CODEC (one-column selection)
         # ------------------------------------------------------------------
         _log_stage_banner(
             stage_name="КОДЕКИ (phase 3)",
@@ -1205,7 +1241,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
         )
         codec_winners: list[_PhaseCandidate] = []
         for parent in type_winners:
-            base_ddl = parent.variant_ddl.copy()
+            base_ddl = _build_effective_candidate_ddl(parent)
             jobs: list[VariantJob] = []
             context_by_variant_table: dict[str, _CodecJobContext] = {}
 
@@ -1226,9 +1262,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                     tested_column.codec = tested_codec
                     column_meta = ColumnVariantMeta(
                         index=0,
-                        column_choices={
-                            column.name: (tested_column.type, tested_codec)
-                        },
+                        column_choices={column.name: (tested_column.type, tested_codec)},
                     )
                     job = _build_job(
                         runner=runner,
@@ -1285,13 +1319,15 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 variant_mode="codecs",
                 phase_name="codecs",
             )
-            options_by_column: dict[str, list[tuple[float, Optional[str]]]] = {}
+
+            options_by_column: dict[str, list[tuple[float, tuple[Optional[str], str]]]] = {}
             for variant_table, summary in summaries.items():
                 context = context_by_variant_table.get(variant_table)
                 if context is None or summary.score is None:
                     continue
+                score_value = float(summary.score)
                 options_by_column.setdefault(context.column_name, []).append(
-                    (float(summary.score), context.tested_codec)
+                    (score_value, (context.tested_codec, variant_table))
                 )
             if not options_by_column:
                 codec_winners.append(parent)
@@ -1299,7 +1335,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
 
             limited_options_by_column: dict[
                 str,
-                list[tuple[float, Optional[str]]],
+                list[tuple[float, tuple[Optional[str], str]]],
             ] = {}
             for column_name, options in options_by_column.items():
                 deduped = _dedupe_stage_options(
@@ -1313,90 +1349,37 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 codec_winners.append(parent)
                 continue
 
-            unique_merged_choice_candidates = _build_top_choice_maps(
+            merged_choice_candidates = _build_top_choice_maps(
                 limited_options_by_column,
                 limit=max_winners_per_parent_codecs,
             )
-            if not unique_merged_choice_candidates:
+            if not merged_choice_candidates:
                 codec_winners.append(parent)
                 continue
 
-            validation_jobs: list[VariantJob] = []
-            validation_fallback_ddls_by_table: dict[str, TableDDL] = {}
-            for _, choice_map in unique_merged_choice_candidates:
-                validation_ddl = base_ddl.copy()
-                for column_name, tested_codec in choice_map.items():
-                    column = validation_ddl.column(column_name)
-                    if column is None:
-                        continue
-                    column.codec = tested_codec
-                validation_job = _build_job(
-                    runner=runner,
-                    table_plan=table_plan,
-                    raw_query_plan=raw_query_plan,
-                    variant_ddl=validation_ddl,
-                    variant_mode="codecs_validation",
-                    phase_name="codecs_validation",
-                    total_variants=max(1, len(unique_merged_choice_candidates)),
-                    benchmark_run_id=benchmark_run_id,
-                    benchmark_started_at=benchmark_started_at,
-                    source_benchmark=source_benchmark,
-                    global_index_counter=global_index_counter,
-                    parent_variant_table=parent.variant_table,
+            for merged_score, choice_map in merged_choice_candidates:
+                updated_codec_choices = dict(parent.codec_choices)
+                representative_variant_table = parent.variant_table
+                for column_name, (selected_codec, option_variant_table) in sorted(
+                    choice_map.items()
+                ):
+                    updated_codec_choices[column_name] = selected_codec
+                    representative_variant_table = option_variant_table
+                phase_score = (
+                    float(merged_score) / float(max(1, len(choice_map)))
+                    if choice_map
+                    else parent.score
                 )
-                validation_jobs.append(validation_job)
-                validation_fallback_ddls_by_table[validation_job.variant_table] = (
-                    validation_ddl.copy()
-                )
-            validation_scope = (
-                f"phase3 codecs validation: {table_plan.benchmark_id} "
-                f"{table_plan.database}.{table_plan.table} parent={parent.variant_table}"
-            )
-            _dispatch_stage_jobs(
-                runner=runner,
-                jobs=validation_jobs,
-                stage_scope_name=validation_scope,
-                stage_label=validation_scope,
-            )
-            validation_summaries = _wait_for_stage_summaries(
-                store=store,
-                benchmark_run_id=benchmark_run_id,
-                benchmark_id=table_plan.benchmark_id,
-                source_database=table_plan.database,
-                source_table=table_plan.table,
-                variant_mode="codecs_validation",
-                expected_variant_tables=[job.variant_table for job in validation_jobs],
-            )
-            _finalize_stage_ranking_if_supported(
-                store=store,
-                benchmark_run_id=benchmark_run_id,
-                benchmark_id=table_plan.benchmark_id,
-                source_database=table_plan.database,
-                source_table=table_plan.table,
-                phase=3,
-                variant_mode="codecs_validation",
-                phase_name="codecs_validation",
-            )
-            ranked_validation_candidates = _sorted_candidates(
-                [
-                    candidate
-                    for candidate in (
-                        _candidate_from_summary(
-                            summary,
-                            fallback_ddl=validation_fallback_ddls_by_table.get(
-                                variant_table
-                            ),
-                        )
-                        for variant_table, summary in validation_summaries.items()
+                codec_winners.append(
+                    _PhaseCandidate(
+                        variant_table=representative_variant_table,
+                        variant_ddl=parent.variant_ddl.copy(),
+                        score=phase_score,
+                        type_choices=dict(parent.type_choices),
+                        codec_choices=updated_codec_choices,
+                        index_choices=dict(parent.index_choices),
                     )
-                    if candidate is not None
-                ]
-            )
-            if not ranked_validation_candidates:
-                codec_winners.append(parent)
-                continue
-            for candidate in ranked_validation_candidates[:max_winners_per_parent_codecs]:
-                codec_winners.append(candidate)
+                )
 
         codec_winners = _sorted_candidates(codec_winners)[:top_n_codecs]
         if not codec_winners:
@@ -1409,9 +1392,20 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 table_plan.table,
             )
             return
+        _mark_stage_top_n_winners_if_supported(
+            store=store,
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=table_plan.benchmark_id,
+            source_database=table_plan.database,
+            source_table=table_plan.table,
+            phase=3,
+            variant_mode="codecs",
+            phase_name="codecs",
+            winner_variant_tables=[candidate.variant_table for candidate in codec_winners],
+        )
 
         # ------------------------------------------------------------------
-        # Фаза 4: INDEX
+        # Фаза 4: INDEX (one-column selection)
         # ------------------------------------------------------------------
         _log_stage_banner(
             stage_name="DATA SKIPPING ИНДЕКСЫ (phase 4)",
@@ -1422,7 +1416,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
         )
         index_winners: list[_PhaseCandidate] = []
         for parent in codec_winners:
-            base_ddl = parent.variant_ddl.copy()
+            base_ddl = _build_effective_candidate_ddl(parent)
             order_by_components = {
                 _normalize_identifier(component)
                 for component in _parse_order_by_components(base_ddl.order_by)
@@ -1531,16 +1525,15 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 phase_name="indexes",
             )
 
-            options_by_column: dict[str, list[tuple[float, _IndexColumnChoice]]] = {}
+            options_by_column: dict[str, list[tuple[float, tuple[_IndexColumnChoice, str]]]] = {}
             for variant_table, summary in summaries.items():
                 context = context_by_variant_table.get(variant_table)
                 if context is None or summary.score is None:
                     continue
+                score_value = float(summary.score)
+                column_choice = _IndexColumnChoice.from_context(context)
                 options_by_column.setdefault(context.column_name, []).append(
-                    (
-                        float(summary.score),
-                        _IndexColumnChoice.from_context(context),
-                    )
+                    (score_value, (column_choice, variant_table))
                 )
             if not options_by_column:
                 index_winners.append(parent)
@@ -1548,7 +1541,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
 
             limited_options_by_column: dict[
                 str,
-                list[tuple[float, _IndexColumnChoice]],
+                list[tuple[float, tuple[_IndexColumnChoice, str]]],
             ] = {}
             for column_name, options in options_by_column.items():
                 deduped = _dedupe_stage_options(
@@ -1570,123 +1563,29 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 index_winners.append(parent)
                 continue
 
-            validation_jobs: list[VariantJob] = []
-            validation_fallback_ddls_by_table: dict[str, TableDDL] = {}
-            for _, merged_choice_map in merged_choice_candidates:
-                assembled_ddl = base_ddl.copy()
-                preferred_granularity_candidates: list[int] = []
-                granularity_constraints: list[set[int]] = []
-                for column_name, index_choice in merged_choice_map.items():
-                    _remove_indexes_for_column(assembled_ddl, column_name)
-                    restored_index_def = index_choice.to_index_def()
-                    if restored_index_def is not None:
-                        assembled_ddl.indexes.append(restored_index_def.copy())
-                    if index_choice.preferred_table_index_granularity is not None:
-                        preferred_granularity_candidates.append(
-                            int(index_choice.preferred_table_index_granularity)
-                        )
-                    if index_choice.allowed_table_index_granularity_values:
-                        granularity_constraints.append(
-                            {int(value) for value in index_choice.allowed_table_index_granularity_values}
-                        )
-
-                table_granularity_candidates = list(table_plan.index_granularity_values or [])
-                if table_granularity_candidates and granularity_constraints:
-                    allowed = set(table_granularity_candidates)
-                    for constraint in granularity_constraints:
-                        allowed &= constraint
-                    table_granularity_candidates = [
-                        value for value in table_granularity_candidates if value in allowed
-                    ]
-
-                if not table_granularity_candidates and granularity_constraints:
-                    intersection = set.intersection(*granularity_constraints)
-                    table_granularity_candidates = sorted(intersection) if intersection else []
-
-                if not table_granularity_candidates:
-                    deduped_preferred: list[int] = []
-                    seen_preferred: set[int] = set()
-                    for value in preferred_granularity_candidates:
-                        if value in seen_preferred:
-                            continue
-                        seen_preferred.add(value)
-                        deduped_preferred.append(value)
-                    table_granularity_candidates = deduped_preferred
-
-                if not table_granularity_candidates:
-                    table_granularity_candidates = [None]
-
-                for table_granularity in table_granularity_candidates:
-                    validation_ddl = assembled_ddl.copy()
-                    if table_granularity is not None:
-                        validation_ddl.set_index_granularity(int(table_granularity))
-                    validation_job = _build_job(
-                        runner=runner,
-                        table_plan=table_plan,
-                        raw_query_plan=raw_query_plan,
-                        variant_ddl=validation_ddl,
-                        variant_mode="indexes_validation",
-                        phase_name="indexes_validation",
-                        total_variants=max(1, len(table_granularity_candidates)),
-                        benchmark_run_id=benchmark_run_id,
-                        benchmark_started_at=benchmark_started_at,
-                        source_benchmark=source_benchmark,
-                        global_index_counter=global_index_counter,
-                        parent_variant_table=parent.variant_table,
+            for merged_score, choice_map in merged_choice_candidates:
+                updated_index_choices = dict(parent.index_choices)
+                representative_variant_table = parent.variant_table
+                for column_name, (selected_index_choice, option_variant_table) in sorted(
+                    choice_map.items()
+                ):
+                    updated_index_choices[column_name] = selected_index_choice
+                    representative_variant_table = option_variant_table
+                phase_score = (
+                    float(merged_score) / float(max(1, len(choice_map)))
+                    if choice_map
+                    else parent.score
+                )
+                index_winners.append(
+                    _PhaseCandidate(
+                        variant_table=representative_variant_table,
+                        variant_ddl=parent.variant_ddl.copy(),
+                        score=phase_score,
+                        type_choices=dict(parent.type_choices),
+                        codec_choices=dict(parent.codec_choices),
+                        index_choices=updated_index_choices,
                     )
-                    validation_jobs.append(validation_job)
-                    validation_fallback_ddls_by_table[validation_job.variant_table] = (
-                        validation_ddl.copy()
-                    )
-
-            validation_scope = (
-                f"phase4 indexes validation: {table_plan.benchmark_id} "
-                f"{table_plan.database}.{table_plan.table} parent={parent.variant_table}"
-            )
-            _dispatch_stage_jobs(
-                runner=runner,
-                jobs=validation_jobs,
-                stage_scope_name=validation_scope,
-                stage_label=validation_scope,
-            )
-            validation_summaries = _wait_for_stage_summaries(
-                store=store,
-                benchmark_run_id=benchmark_run_id,
-                benchmark_id=table_plan.benchmark_id,
-                source_database=table_plan.database,
-                source_table=table_plan.table,
-                variant_mode="indexes_validation",
-                expected_variant_tables=[job.variant_table for job in validation_jobs],
-            )
-            _finalize_stage_ranking_if_supported(
-                store=store,
-                benchmark_run_id=benchmark_run_id,
-                benchmark_id=table_plan.benchmark_id,
-                source_database=table_plan.database,
-                source_table=table_plan.table,
-                phase=4,
-                variant_mode="indexes_validation",
-                phase_name="indexes_validation",
-            )
-            ranked_validation_candidates = _sorted_candidates(
-                [
-                    candidate
-                    for candidate in (
-                        _candidate_from_summary(
-                            summary,
-                            fallback_ddl=validation_fallback_ddls_by_table.get(variant_table),
-                        )
-                        for variant_table, summary in validation_summaries.items()
-                    )
-                    if candidate is not None
-                ]
-            )
-            if not ranked_validation_candidates:
-                continue
-            for candidate in ranked_validation_candidates[
-                :max_winners_per_parent_indexes
-            ]:
-                index_winners.append(candidate)
+                )
 
         index_winners = _sorted_candidates(index_winners)[:top_n_indexes]
         if not index_winners:
@@ -1699,6 +1598,17 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 table_plan.table,
             )
             return
+        _mark_stage_top_n_winners_if_supported(
+            store=store,
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=table_plan.benchmark_id,
+            source_database=table_plan.database,
+            source_table=table_plan.table,
+            phase=4,
+            variant_mode="indexes",
+            phase_name="indexes",
+            winner_variant_tables=[candidate.variant_table for candidate in index_winners],
+        )
 
         # ------------------------------------------------------------------
         # Фаза 5: финальная валидация
@@ -1714,22 +1624,68 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
         fallback_ddls_by_table: dict[str, TableDDL] = {}
         final_candidates_source = index_winners[:top_n_final_validation]
         for candidate in final_candidates_source:
-            job = _build_job(
-                runner=runner,
-                table_plan=table_plan,
-                raw_query_plan=raw_query_plan,
-                variant_ddl=candidate.variant_ddl.copy(),
-                variant_mode="final_validation",
-                phase_name="final_validation",
-                total_variants=len(final_candidates_source),
-                benchmark_run_id=benchmark_run_id,
-                benchmark_started_at=benchmark_started_at,
-                source_benchmark=source_benchmark,
-                global_index_counter=global_index_counter,
-                parent_variant_table=candidate.variant_table,
-            )
-            final_jobs.append(job)
-            fallback_ddls_by_table[job.variant_table] = candidate.variant_ddl.copy()
+            assembled_ddl = _build_effective_candidate_ddl(candidate)
+            preferred_granularity_candidates: list[int] = []
+            granularity_constraints: list[set[int]] = []
+            for index_choice in candidate.index_choices.values():
+                if index_choice.preferred_table_index_granularity is not None:
+                    preferred_granularity_candidates.append(
+                        int(index_choice.preferred_table_index_granularity)
+                    )
+                if index_choice.allowed_table_index_granularity_values:
+                    granularity_constraints.append(
+                        {
+                            int(value)
+                            for value in index_choice.allowed_table_index_granularity_values
+                        }
+                    )
+
+            table_granularity_candidates = list(table_plan.index_granularity_values or [])
+            if table_granularity_candidates and granularity_constraints:
+                allowed = set(table_granularity_candidates)
+                for constraint in granularity_constraints:
+                    allowed &= constraint
+                table_granularity_candidates = [
+                    value for value in table_granularity_candidates if value in allowed
+                ]
+
+            if not table_granularity_candidates and granularity_constraints:
+                intersection = set.intersection(*granularity_constraints)
+                table_granularity_candidates = sorted(intersection) if intersection else []
+
+            if not table_granularity_candidates:
+                deduped_preferred: list[int] = []
+                seen_preferred: set[int] = set()
+                for value in preferred_granularity_candidates:
+                    if value in seen_preferred:
+                        continue
+                    seen_preferred.add(value)
+                    deduped_preferred.append(value)
+                table_granularity_candidates = deduped_preferred
+
+            if not table_granularity_candidates:
+                table_granularity_candidates = [None]
+
+            for table_granularity in table_granularity_candidates:
+                final_ddl = assembled_ddl.copy()
+                if table_granularity is not None:
+                    final_ddl.set_index_granularity(int(table_granularity))
+                job = _build_job(
+                    runner=runner,
+                    table_plan=table_plan,
+                    raw_query_plan=raw_query_plan,
+                    variant_ddl=final_ddl,
+                    variant_mode="final_validation",
+                    phase_name="final_validation",
+                    total_variants=max(1, len(table_granularity_candidates)),
+                    benchmark_run_id=benchmark_run_id,
+                    benchmark_started_at=benchmark_started_at,
+                    source_benchmark=source_benchmark,
+                    global_index_counter=global_index_counter,
+                    parent_variant_table=candidate.variant_table,
+                )
+                final_jobs.append(job)
+                fallback_ddls_by_table[job.variant_table] = final_ddl.copy()
 
         final_scope = (
             f"phase5 final: {table_plan.benchmark_id} "
@@ -1779,6 +1735,20 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 table_plan.table,
             )
             return
+        _mark_stage_top_n_winners_if_supported(
+            store=store,
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=table_plan.benchmark_id,
+            source_database=table_plan.database,
+            source_table=table_plan.table,
+            phase=5,
+            variant_mode="final_validation",
+            phase_name="final_validation",
+            winner_variant_tables=[
+                candidate.variant_table
+                for candidate in final_ranked[:max(1, top_n_final_validation)]
+            ],
+        )
         winner = final_ranked[0]
         logger.info(
             "SequentialPhasedTopN: победитель найден "

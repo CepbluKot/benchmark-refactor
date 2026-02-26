@@ -33,6 +33,7 @@ from src.models import BenchmarkRootConfig, ConnectionConfig
 from settings import get_settings
 
 logger = logging.getLogger(__name__)
+_PHASED_STRATEGIES = {"sequential_phased_topn_strategy"}
 
 
 def _safe_git_output(args: List[str]) -> str:
@@ -146,6 +147,25 @@ def _log_benchmark_selection(
             ", ".join(missing_ids),
         )
     logger.info("===========================")
+
+
+def _resolve_legacy_table_need(
+    config: BenchmarkRootConfig,
+    requested_benchmark_ids: Optional[List[str]],
+) -> bool:
+    """
+    Возвращает True, если нужно создавать legacy result-table.
+
+    Если все выбранные benchmark'и относятся к phased-стратегиям,
+    legacy-таблица не нужна.
+    """
+    selected = config.benchmarks
+    if requested_benchmark_ids:
+        allowed = set(requested_benchmark_ids)
+        selected = [bench for bench in config.benchmarks if bench.id in allowed]
+    if not selected:
+        return True
+    return any((bench.strategy or "").strip() not in _PHASED_STRATEGIES for bench in selected)
 
 
 def _configure_logging(level_name: str) -> None:
@@ -292,6 +312,10 @@ def run_from_settings() -> int:
     legacy_result_table = app_settings.resolved_legacy_result_table
     phased_result_table = app_settings.resolved_phased_result_table
     phased_runs_table = app_settings.resolved_phased_runs_table
+    create_legacy_table = _resolve_legacy_table_need(
+        config=config,
+        requested_benchmark_ids=benchmark_ids,
+    )
     logger.info(
         "Result store connection: connection_id=%s, legacy_target=%s.%s, phased_target=%s.%s, phased_runs=%s.%s",
         result_connection.id,
@@ -302,6 +326,10 @@ def run_from_settings() -> int:
         app_settings.result_database,
         phased_runs_table,
     )
+    if not create_legacy_table:
+        logger.info(
+            "Legacy result-table отключена: все выбранные benchmark'и используют phased-стратегию"
+        )
     result_store = ClickHouseBenchmarkResultStore(
         connection=result_connection,
         database=app_settings.result_database,
@@ -310,6 +338,7 @@ def run_from_settings() -> int:
         legacy_table=legacy_result_table,
         phased_table=phased_result_table,
         phased_runs_table=phased_runs_table,
+        create_legacy_table=create_legacy_table,
         create_table_if_missing=True,
     )
     _log_build_metadata(

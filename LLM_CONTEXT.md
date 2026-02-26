@@ -170,9 +170,9 @@
    - таблица `BENCH_LEGACY_RESULT_TABLE` (fallback: `BENCH_RESULT_TABLE`) хранит variant-результаты старого пайплайна.
 
 3. Таблица run-level метаданных (`benchmark_runs` по умолчанию):
-   - run-level метаданные: `id`, `started_at`, `finished_at`;
-   - источник: `source_db_name`, `source_table_name`, `source_table_ddl`, `total_rows`;
-   - конфиг/контекст: `benchmark_queries`, `score_weights`, `top_n_winners`, `config_json`.
+   - run-level метаданные: `id`, `benchmark_run_id`, `benchmark_id`, `started_at`, `finished_at`, `updated_at`;
+   - источник: `source_db_name`, `source_table_name`;
+   - top-N контекст: `top_n_winners`, `sequential_top_n_limits_json`.
 
 4. Таблица variant-результатов (`benchmark_results`/`benchmark_results__phased` по умолчанию):
    - идентификация/lineage: `id`, `benchmark_run_id`, `parent_id`, `phase`, `phase_name`;
@@ -181,6 +181,9 @@
    - агрегированные JSON-метрики: `size_bytes_total`, `size_bytes_by_column_json`,
      `size_bytes_indexes_json`, `select_metrics_json`, `insert_metrics_json`;
    - ранжирование: `score`, `rank_in_phase`, `is_top_n`.
+   - для phased-ранжирования есть fail-safe:
+     если после явного mark winners число `is_top_n=1` не совпало с ожидаемым top-N,
+     store автоматически пересчитывает `rank_in_phase`/`is_top_n` по `score`.
 
 5. Для backward compatibility также сохраняются legacy/расширенные поля
    (`variant_params`, `index_params`, combined insert/select/compression/indexes и `extra_json`).
@@ -354,19 +357,24 @@ Baseline исходного DDL для них уже выполнен runner-о�
 `SequentialPhasedTopNTableExecutionStrategy` (`src/benchmark_runtime/implementations/table_strategy/sequential_phased_topn.py`):
 
 1. Фаза `order_by`: перебор кандидатов ORDER BY и отбор top-N.
-2. Фаза `types`: независимая оптимизация типов по колонкам + валидация собранного кандидата.
-3. Фаза `codecs`: независимая оптимизация кодеков по колонкам + валидация.
-4. Фаза `indexes`: независимая оптимизация skip-индексов по колонкам + валидация.
+2. Фаза `types`: one-column оптимизация типов, формирование top-N merged-кандидатов
+   на одного parent (ограничение `max_winners_per_parent_limits.types`).
+3. Фаза `codecs`: one-column оптимизация кодеков, top-N merged-кандидаты
+   на одного parent (`max_winners_per_parent_limits.codecs`).
+4. Фаза `indexes`: one-column оптимизация skip-индексов, top-N merged-кандидаты
+   на одного parent (`max_winners_per_parent_limits.indexes`).
 5. Фаза `final_validation`: финальный прогон top-N и выбор победителя.
-6. Между фазами стратегия читает результаты через `result_store.list_variant_summaries(...)`.
-7. Для конфигурации ORDER BY-фазы добавлены поля:
+6. Merge выбранных type/codec/index choices в эффективный DDL выполняется только
+   в `final_validation`.
+7. Между фазами стратегия читает результаты через `result_store.list_variant_summaries(...)`.
+8. Для конфигурации ORDER BY-фазы добавлены поля:
    - `order_by_first`
    - `order_by_candidates`
    - и rules-блок:
      - `order_by_rules.first_column`
      - `order_by_rules.candidates`
      - `order_by_rules.auto_generate_candidates`
-8. Для index-фазы поддержан микс перебора:
+9. Для index-фазы поддержан микс перебора:
    - index-level `granularity` (в т.ч. массив `granularity`);
    - `SETTINGS index_granularity` через глобальные/локальные `index_granularity_values`
      и/или index-level `index_granularity_values`.
@@ -386,18 +394,19 @@ Baseline исходного DDL для них уже выполнен runner-о�
 7. `insert_operations_count`
 8. `sequential_types_top_n_for_indexes`
 9. `sequential_top_n_limits` (phase-level top-N: `order_by/types/codecs/indexes/final_validation`)
-10. `insert_rows_per_operation_limit`
-11. `source_insert_rows_per_operation_limit` (legacy fallback baseline-лимита)
-12. `source_insert_rows_per_operation_limits`
-13. `insert_rows_per_operation_limits`
-14. `max_benchmarks_limits`
-15. `max_type_benchmarks` (legacy)
-16. `max_index_benchmarks` (legacy)
-17. `index_granularity_values` (global-перебор `SETTINGS index_granularity`)
-18. `column_rules_mode`, `index_rules_mode`
-19. `queries`
-20. `scoring`
-21. `table_rules[]` (локальные override, включая `strategy` и `test_database`)
+10. `max_winners_per_parent_limits`
+11. `insert_rows_per_operation_limit`
+12. `source_insert_rows_per_operation_limit` (legacy fallback baseline-лимита)
+13. `source_insert_rows_per_operation_limits`
+14. `insert_rows_per_operation_limits`
+15. `max_benchmarks_limits`
+16. `max_type_benchmarks` (legacy)
+17. `max_index_benchmarks` (legacy)
+18. `index_granularity_values` (global-перебор `SETTINGS index_granularity`)
+19. `column_rules_mode`, `index_rules_mode`
+20. `queries`
+21. `scoring`
+22. `table_rules[]` (локальные override, включая `strategy` и `test_database`)
 
 Правило по `databases`/`tables`:
 1. Если `tables` задан map-форматом (`{db: "*"|[tables]}`), `databases`
@@ -656,16 +665,17 @@ Baseline исходного DDL для них уже выполнен runner-о�
 4. `insert_operations_count`
 5. `sequential_types_top_n_for_indexes`
 6. `sequential_top_n_limits`
-7. `insert_rows_per_operation_limit`
-8. `source_insert_rows_per_operation_limit`
-9. `source_insert_rows_per_operation_limits`
-10. `insert_rows_per_operation_limits`
-11. `max_benchmarks_limits`
-12. `max_type_benchmarks` / `max_index_benchmarks` (legacy)
-13. `index_granularity_values`
-14. `strategy`
-15. `test_database`
-16. `scoring`
+7. `max_winners_per_parent_limits`
+8. `insert_rows_per_operation_limit`
+9. `source_insert_rows_per_operation_limit`
+10. `source_insert_rows_per_operation_limits`
+11. `insert_rows_per_operation_limits`
+12. `max_benchmarks_limits`
+13. `max_type_benchmarks` / `max_index_benchmarks` (legacy)
+14. `index_granularity_values`
+15. `strategy`
+16. `test_database`
+17. `scoring`
 
 ## 11) Entry points
 
@@ -693,7 +703,7 @@ Baseline исходного DDL для них уже выполнен runner-о�
 ./venv/bin/python -m pytest -q
 ```
 
-На текущем состоянии проекта: `199 passed, 11 subtests passed`.
+На текущем состоянии проекта: `251 passed, 19 subtests passed`.
 
 ## 13) Как расширять проект корректно
 

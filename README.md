@@ -79,7 +79,7 @@ Legacy select-агрегаты в таблице результатов удал
 10. `BenchmarkExecutionAdapter`/воркер считает `score` по `scoring` (встроенная формула или expression).
 11. `BenchmarkExecutionAdapter`/воркер сохраняет результат в `BenchmarkResultStore`.
 
-Если режим `sequential`:
+Если режим `sequential_topn_strategy`:
 1. Сначала гоняются варианты `types`.
 2. По score выбираются top-N (`sequential_types_top_n_for_indexes`).
 3. Только для top-N запускаются варианты `indexes`.
@@ -223,8 +223,12 @@ JSON-секции или `benchmark.project.json`.
 
 Для `sequential_phased_topn_strategy` runner делает 5 этапов:
 `order_by -> types -> codecs -> indexes -> final_validation`.
-Между этапами передаётся top-N победителей (`sequential_top_n`), а внутри фаз
-`types/codecs/indexes` используется независимая оптимизация по колонкам.
+Между этапами передаётся top-N победителей (`sequential_top_n_limits`/`sequential_top_n`).
+Фазы `types/codecs/indexes` работают в one-column режиме:
+- внутри одного parent строятся кандидаты по колонкам;
+- собираются top-N merged-кандидаты (ограничение `max_winners_per_parent_limits`);
+- в следующий этап проходит stage top-N.
+Итоговый merge выбранных типов/кодеков/индексов выполняется в `final_validation`.
 На index-этапе финальная валидация теперь миксует:
 - `granularity` конкретного skip-индекса (в т.ч. через массив `granularity`)
 - `SETTINGS index_granularity` (через benchmark/table `index_granularity_values`
@@ -260,12 +264,15 @@ Runner не пишет результаты в store. Сохранение вы�
 Физическое хранение в ClickHouse теперь разведено по стратегиям:
 - legacy-стратегии (`types_strategy`, `indexes_strategy`, `combined_strategy`, `sequential_topn_strategy`) пишут в таблицу `BENCH_LEGACY_RESULT_TABLE` (fallback: `BENCH_RESULT_TABLE`);
 - phased-стратегия (`sequential_phased_topn_strategy`) пишет в `BENCH_PHASED_RESULT_TABLE` + run-level таблицу `BENCH_PHASED_RUNS_TABLE`.
+  В run-level таблице сохраняется актуальный top-N контекст (`top_n_winners`, `sequential_top_n_limits_json`).
 Если `BENCH_PHASED_RESULT_TABLE` не задан, используется `${BENCH_RESULT_TABLE}__phased`.
 Дополнительно сохраняются legacy/расширенные поля (`variant_params`, `index_params`, combined метрики), чтобы не ломать текущие стратегии и тесты.
 `variant_params` содержит всю параметризацию варианта; для phased top-N туда также пишется `parent_variant_table`.
 per-query select-метрики хранятся в JSON-map `query_id -> metrics` и дублируются в `select_metrics_json`.
 SQL-строки (`*_ddl`, `*_query`, SQL внутри JSON) перед записью форматируются.
 `score_calculation_json` сохраняется рядом со `score`.
+Для phased-ранжирования `is_top_n` выставляется по winners фазы; если фактически помечено меньше
+ожидаемого top-N, store автоматически делает fallback-перерасчёт `rank_in_phase`/`is_top_n` по `score`.
 
 Примеры аналитических SQL по новой схеме:
 Для phased-стратегии используй таблицу из `BENCH_PHASED_RESULT_TABLE`
@@ -824,6 +831,7 @@ print(run_id)
 - `global_rules`, `table_rules`
 - `scoring`
 - `insert_operations_count`, `sequential_types_top_n_for_indexes`
+- `max_winners_per_parent_limits`
 - `insert_rows_per_operation_limit`, `insert_rows_per_operation_limits`
 - `source_insert_rows_per_operation_limit`, `source_insert_rows_per_operation_limits`
 - `max_benchmarks_limits` (опциональные лимиты числа variant jobs по стадиям)
@@ -850,6 +858,8 @@ print(run_id)
 - `source_insert_rows_per_operation_limits`: baseline-лимит строк по mode (например, `sequential`).
 - `source_insert_rows_per_operation_limit`: legacy fallback baseline-лимита.
 - `sequential_types_top_n_for_indexes`: сколько лучших вариантов из stage `types` отдать в stage `indexes`.
+- `max_winners_per_parent_limits`: сколько merged-кандидатов максимум формировать
+  внутри одного parent на фазах `types`/`codecs`/`indexes`.
 - `max_benchmarks_limits`: лимиты количества variant jobs по mode (`types/indexes/...`).
 - `index_granularity_values`: список значений для `SETTINGS index_granularity`.
   Для `indexes`/`combined`/sequential-index-stage участвует в декартовом произведении
@@ -1012,7 +1022,10 @@ print(run_id)
   - `order_by_candidates` — колонки-кандидаты, которые добавляются после `order_by_first`.
   - `sequential_top_n_limits` — top-N победителей по фазам
     (`order_by`, `types`, `codecs`, `indexes`, `final_validation`).
-    Если для фазы лимит не задан, используется общий `sequential_types_top_n_for_indexes`.
+    Если для фазы лимит не задан, используется общий `sequential_top_n`
+    (в конфиге: `sequential_types_top_n_for_indexes`).
+  - `max_winners_per_parent_limits` — лимиты числа merged-кандидатов на одного parent
+    по фазам (`types`, `codecs`, `indexes`).
 - новый rules-блок (рекомендуется):
   - `global_rules.order_by_rules` / `table_rules[].rules.order_by_rules`
     с полями `first_column`, `candidates`, `auto_generate_candidates`.
@@ -1050,8 +1063,10 @@ print(run_id)
 4. JSON parse error (`Expecting value`, `Expecting property name`).
 Обычно это лишняя запятая или комментарий в JSON.
 
-5. В `sequential` нет этапа индексов.
-Проверь, что есть `index_rules`, `sequential_types_top_n_for_indexes > 0`, и адаптер возвращает `score`.
+5. В `sequential`/`sequential_phased_topn` нет этапа индексов.
+Проверь, что есть `index_rules`, лимиты top-N > 0
+(`sequential_types_top_n_for_indexes` и/или `sequential_top_n_limits.indexes`),
+и адаптер возвращает `score`.
 
 6. Включён `global_bank_only`, но нет доступного bank.
 Либо укажи `global_rules.rule_bank`, либо настрой `default_rule_banks` для своего DBMS.

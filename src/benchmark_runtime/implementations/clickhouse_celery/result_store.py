@@ -127,6 +127,14 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "source_table_select_bytes_per_second_measurements_percentiles",
         "source_table_select_bytes_per_second_measurements_percentiles_readable",
     )
+    _RUNS_LEGACY_UNUSED_COLUMNS: tuple[str, ...] = (
+        "source_table_ddl",
+        "total_rows",
+        "data_path",
+        "benchmark_queries",
+        "score_weights",
+        "config_json",
+    )
 
     _INSERT_COLUMNS: list[str] = [
         "benchmark_run_id",
@@ -222,6 +230,11 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "size_bytes_total",
         "size_bytes_by_column_json",
         "size_bytes_indexes_json",
+        "tested_table_consumed_compressed_size_bytes_with_indexes",
+        "tested_table_consumed_compressed_size_bytes_with_indexes_readable",
+        "source_table_consumed_compressed_size_bytes_overall",
+        "source_table_consumed_compressed_size_bytes_overall_readable",
+        "tested_table_compression_overall_coef",
         "select_metrics_json",
         "insert_metrics_json",
         "score_calculation_json",
@@ -269,6 +282,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         legacy_table: Optional[str] = None,
         phased_table: Optional[str] = None,
         phased_runs_table: Optional[str] = None,
+        create_legacy_table: bool = True,
         *,
         create_table_if_missing: bool = True,
     ) -> None:
@@ -280,6 +294,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         self._legacy_table = legacy_table or table
         self._phased_table = phased_table or table
         self._phased_runs_table = phased_runs_table or runs_table
+        self._create_legacy_table = bool(create_legacy_table)
         # Backward-compat properties for legacy call-sites/tests.
         self._table = self._phased_table
         self._runs_table = self._phased_runs_table
@@ -342,24 +357,34 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `finished_at` Nullable(DateTime64(3, 'UTC')),
                 `source_db_name` String,
                 `source_table_name` String,
-                `source_table_ddl` Nullable(String),
-                `total_rows` Nullable(Int64),
-                `data_path` Nullable(String),
-                `benchmark_queries` Nullable(String),
-                `score_weights` Nullable(String),
                 `top_n_winners` Nullable(Int32),
-                `config_json` Nullable(String),
+                `sequential_top_n_limits_json` Nullable(String),
                 `updated_at` DateTime64(3, 'UTC')
             )
             ENGINE = ReplacingMergeTree(updated_at)
             ORDER BY (id)
             """
         )
-        if self._legacy_table == self._phased_table:
+        self._execute(
+            f"""
+            ALTER TABLE `{self._database}`.`{self._phased_runs_table}`
+                ADD COLUMN IF NOT EXISTS `sequential_top_n_limits_json` Nullable(String)
+            """
+        )
+        for column_name in self._RUNS_LEGACY_UNUSED_COLUMNS:
+            self._execute(
+                f"""
+                ALTER TABLE `{self._database}`.`{self._phased_runs_table}`
+                    DROP COLUMN IF EXISTS `{column_name}`
+                """
+            )
+
+        if self._legacy_table == self._phased_table and self._create_legacy_table:
             self._ensure_results_table_schema(self._phased_table)
             return
         self._ensure_phased_results_table_schema(self._phased_table)
-        self._ensure_results_table_schema(self._legacy_table)
+        if self._create_legacy_table:
+            self._ensure_results_table_schema(self._legacy_table)
 
     def _ensure_phased_results_table_schema(self, table_name: str) -> None:
         """Создаёт/мигрирует таблицу phased-стратегии (новая компактная схема)."""
@@ -386,6 +411,11 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `size_bytes_total` Nullable(Float64),
                 `size_bytes_by_column_json` Nullable(String),
                 `size_bytes_indexes_json` Nullable(String),
+                `tested_table_consumed_compressed_size_bytes_with_indexes` Nullable(Float64),
+                `tested_table_consumed_compressed_size_bytes_with_indexes_readable` Nullable(String),
+                `source_table_consumed_compressed_size_bytes_overall` Nullable(Float64),
+                `source_table_consumed_compressed_size_bytes_overall_readable` Nullable(String),
+                `tested_table_compression_overall_coef` Nullable(Float64),
                 `select_metrics_json` Nullable(String),
                 `insert_metrics_json` Nullable(String),
                 `score_calculation_json` Nullable(String),
@@ -409,6 +439,11 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `size_bytes_total` Nullable(Float64),
                 ADD COLUMN IF NOT EXISTS `size_bytes_by_column_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `size_bytes_indexes_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes` Nullable(Float64),
+                ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes_readable` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `source_table_consumed_compressed_size_bytes_overall` Nullable(Float64),
+                ADD COLUMN IF NOT EXISTS `source_table_consumed_compressed_size_bytes_overall_readable` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_compression_overall_coef` Nullable(Float64),
                 ADD COLUMN IF NOT EXISTS `select_metrics_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `insert_metrics_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `score_calculation_json` Nullable(String),
@@ -574,21 +609,15 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             source_database=table_plan.database,
             source_table=table_plan.table,
         )
-        benchmark_queries_payload = [
-            {
-                "query_id": query.query_id,
-                "query": query.query,
-                "cache_mode": query.cache_mode,
-                "select_operations_count": query.select_operations_count,
-                "warmup_queries": list(query.warmup_queries),
-            }
-            for query in benchmark_queries
-        ]
-        scoring_payload = {
-            "mode": scoring.mode,
-            "expression": scoring.expression,
-            "on_error_score": scoring.on_error_score,
-        }
+        del source_table_ddl, benchmark_queries, total_rows, scoring
+        top_n_limits_json: Optional[str] = None
+        if table_plan.sequential_top_n_limits is not None:
+            top_n_limits_json = json.dumps(
+                table_plan.sequential_top_n_limits.model_dump(mode="json"),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
         self._insert_run_row(
             run_record_id=run_record_id,
             benchmark_run_id=benchmark_run_id,
@@ -597,29 +626,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             finished_at=None,
             source_db_name=table_plan.database,
             source_table_name=table_plan.table,
-            source_table_ddl=source_table_ddl,
-            total_rows=total_rows,
-            data_path=None,
-            benchmark_queries_json=json.dumps(
-                benchmark_queries_payload,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            ),
-            score_weights_json=json.dumps(
-                scoring_payload,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            ),
             top_n_winners=int(table_plan.sequential_top_n),
-            config_json=json.dumps(
-                table_plan.model_dump(mode="json"),
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-                default=str,
-            ),
+            sequential_top_n_limits_json=top_n_limits_json,
         )
 
     def register_benchmark_run_finish(
@@ -646,13 +654,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 started_at,
                 source_db_name,
                 source_table_name,
-                source_table_ddl,
-                total_rows,
-                data_path,
-                benchmark_queries,
-                score_weights,
                 top_n_winners,
-                config_json
+                sequential_top_n_limits_json
             FROM `{self._database}`.`{self._runs_table}`
             WHERE id = %(id)s
             ORDER BY updated_at DESC
@@ -667,13 +670,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 existing_started_at,
                 existing_source_db,
                 existing_source_table,
-                existing_source_ddl,
-                existing_total_rows,
-                existing_data_path,
-                existing_queries_json,
-                existing_score_weights_json,
                 existing_top_n,
-                existing_config_json,
+                existing_limits_json,
             ) = latest[0]
         else:
             existing_run_id = benchmark_run_id
@@ -681,13 +679,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             existing_started_at = benchmark_finished_at
             existing_source_db = table_plan.database
             existing_source_table = table_plan.table
-            existing_source_ddl = None
-            existing_total_rows = None
-            existing_data_path = None
-            existing_queries_json = None
-            existing_score_weights_json = None
             existing_top_n = int(table_plan.sequential_top_n)
-            existing_config_json = None
+            existing_limits_json = None
 
         self._insert_run_row(
             run_record_id=run_record_id,
@@ -697,25 +690,10 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             finished_at=benchmark_finished_at,
             source_db_name=str(existing_source_db),
             source_table_name=str(existing_source_table),
-            source_table_ddl=(
-                str(existing_source_ddl) if existing_source_ddl is not None else None
-            ),
-            total_rows=(
-                int(existing_total_rows)
-                if existing_total_rows is not None
-                else None
-            ),
-            data_path=str(existing_data_path) if existing_data_path is not None else None,
-            benchmark_queries_json=(
-                str(existing_queries_json) if existing_queries_json is not None else None
-            ),
-            score_weights_json=(
-                str(existing_score_weights_json)
-                if existing_score_weights_json is not None
-                else None
-            ),
             top_n_winners=int(existing_top_n) if existing_top_n is not None else None,
-            config_json=str(existing_config_json) if existing_config_json is not None else None,
+            sequential_top_n_limits_json=(
+                str(existing_limits_json) if existing_limits_json is not None else None
+            ),
         )
 
     def _insert_run_row(
@@ -728,13 +706,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         finished_at: Optional[datetime],
         source_db_name: str,
         source_table_name: str,
-        source_table_ddl: Optional[str],
-        total_rows: Optional[int],
-        data_path: Optional[str],
-        benchmark_queries_json: Optional[str],
-        score_weights_json: Optional[str],
         top_n_winners: Optional[int],
-        config_json: Optional[str],
+        sequential_top_n_limits_json: Optional[str],
     ) -> None:
         """Пишет snapshot run-контекста в `benchmark_runs` (upsert через ReplacingMergeTree)."""
         started_at_ch = self._to_naive_utc_datetime(started_at)
@@ -748,13 +721,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             finished_at_ch,
             str(source_db_name),
             str(source_table_name),
-            source_table_ddl,
-            int(total_rows) if total_rows is not None else None,
-            data_path,
-            benchmark_queries_json,
-            score_weights_json,
             int(top_n_winners) if top_n_winners is not None else None,
-            config_json,
+            sequential_top_n_limits_json,
             updated_at_ch,
         )
         self._client.insert(
@@ -768,13 +736,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 "finished_at",
                 "source_db_name",
                 "source_table_name",
-                "source_table_ddl",
-                "total_rows",
-                "data_path",
-                "benchmark_queries",
-                "score_weights",
                 "top_n_winners",
-                "config_json",
+                "sequential_top_n_limits_json",
                 "updated_at",
             ],
         )
@@ -1495,7 +1458,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         """Возвращает top-N победителей для указанной фазы (fallback=1)."""
         rows = self._execute(
             f"""
-            SELECT top_n_winners, config_json
+            SELECT top_n_winners, sequential_top_n_limits_json
             FROM `{self._database}`.`{self._phased_runs_table}`
             WHERE benchmark_run_id = %(benchmark_run_id)s
               AND benchmark_id = %(benchmark_id)s
@@ -1514,7 +1477,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         if not rows:
             return 1
         top_n_winners_raw = rows[0][0]
-        config_json_raw = rows[0][1] if len(rows[0]) > 1 else None
+        limits_json_raw = rows[0][1] if len(rows[0]) > 1 else None
         default_top_n = 1
         try:
             if top_n_winners_raw is not None:
@@ -1522,16 +1485,16 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         except Exception:
             default_top_n = 1
 
-        if not isinstance(config_json_raw, str) or not config_json_raw.strip():
+        if not isinstance(limits_json_raw, str) or not limits_json_raw.strip():
             return default_top_n
         try:
-            parsed_config = json.loads(config_json_raw)
+            parsed_limits = json.loads(limits_json_raw)
         except Exception:
             return default_top_n
-        if not isinstance(parsed_config, dict):
+        if not isinstance(parsed_limits, dict):
             return default_top_n
 
-        raw_limits = parsed_config.get("sequential_top_n_limits")
+        raw_limits = parsed_limits.get("sequential_top_n_limits", parsed_limits)
         if not isinstance(raw_limits, dict):
             return default_top_n
 
@@ -1609,28 +1572,15 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         """Пересчитывает `rank_in_phase`/`is_top_n` для выбранной phase."""
         if phase is None and not variant_mode and not phase_name:
             return
-        scope_conditions = [
-            "benchmark_run_id = %(benchmark_run_id)s",
-            "benchmark_id = %(benchmark_id)s",
-            "source_db_name = %(source_database)s",
-            "source_table_name = %(source_table)s",
-        ]
-        scope_params: Dict[str, Any] = {
-            "benchmark_run_id": benchmark_run_id,
-            "benchmark_id": benchmark_id,
-            "source_database": source_database,
-            "source_table": source_table,
-        }
-        if phase is not None:
-            scope_conditions.append("phase = %(phase)s")
-            scope_params["phase"] = int(phase)
-        if variant_mode is not None:
-            scope_conditions.append("variant_mode = %(variant_mode)s")
-            scope_params["variant_mode"] = str(variant_mode)
-        elif phase_name is not None:
-            scope_conditions.append("phase_name = %(phase_name)s")
-            scope_params["phase_name"] = str(phase_name)
-        scope_where_clause = " AND\n              ".join(scope_conditions)
+        scope_where_clause, scope_params = self._build_phase_scope_clause(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+            phase=phase,
+            variant_mode=variant_mode,
+            phase_name=phase_name,
+        )
 
         rows = self._execute(
             f"""
@@ -1679,6 +1629,41 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 },
             )
 
+    @staticmethod
+    def _build_phase_scope_clause(
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        phase: Optional[int],
+        variant_mode: Optional[str],
+        phase_name: Optional[str],
+    ) -> tuple[str, Dict[str, Any]]:
+        """Строит WHERE-клаузу и параметры для phase-scope операций."""
+        scope_conditions = [
+            "benchmark_run_id = %(benchmark_run_id)s",
+            "benchmark_id = %(benchmark_id)s",
+            "source_db_name = %(source_database)s",
+            "source_table_name = %(source_table)s",
+        ]
+        scope_params: Dict[str, Any] = {
+            "benchmark_run_id": benchmark_run_id,
+            "benchmark_id": benchmark_id,
+            "source_database": source_database,
+            "source_table": source_table,
+        }
+        if phase is not None:
+            scope_conditions.append("phase = %(phase)s")
+            scope_params["phase"] = int(phase)
+        if variant_mode is not None:
+            scope_conditions.append("variant_mode = %(variant_mode)s")
+            scope_params["variant_mode"] = str(variant_mode)
+        elif phase_name is not None:
+            scope_conditions.append("phase_name = %(phase_name)s")
+            scope_params["phase_name"] = str(phase_name)
+        return " AND\n              ".join(scope_conditions), scope_params
+
     def recalculate_phase_ranking(
         self,
         *,
@@ -1700,6 +1685,135 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             variant_mode=variant_mode,
             phase_name=phase_name,
         )
+
+    def mark_top_n_variant_tables(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        winner_variant_tables: Sequence[str],
+        phase: Optional[int] = None,
+        variant_mode: Optional[str] = None,
+        phase_name: Optional[str] = None,
+    ) -> None:
+        """
+        Явно выставляет флаг `is_top_n=1` только у переданных победителей фазы.
+
+        Используется стратегиями, где top-N формируется как результат
+        поэтапного отбора кандидатов для перехода в следующую фазу.
+        """
+        if phase is None and not variant_mode and not phase_name:
+            return
+        scope_where_clause, scope_params = self._build_phase_scope_clause(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+            phase=phase,
+            variant_mode=variant_mode,
+            phase_name=phase_name,
+        )
+
+        # Сначала сбрасываем флаг в scope, затем проставляем только у победителей.
+        self._execute(
+            f"""
+            ALTER TABLE `{self._database}`.`{self._table}`
+            UPDATE is_top_n = 0
+            WHERE {scope_where_clause}
+            SETTINGS mutations_sync = 1
+            """,
+            scope_params,
+        )
+
+        unique_variant_tables: list[str] = []
+        seen_variant_tables: set[str] = set()
+        for variant_table in winner_variant_tables:
+            normalized = str(variant_table or "").strip()
+            if not normalized or normalized in seen_variant_tables:
+                continue
+            seen_variant_tables.add(normalized)
+            unique_variant_tables.append(normalized)
+
+        for variant_table in unique_variant_tables:
+            self._execute(
+                f"""
+                ALTER TABLE `{self._database}`.`{self._table}`
+                UPDATE is_top_n = 1
+                WHERE {scope_where_clause}
+                  AND variant_table = %(winner_variant_table)s
+                SETTINGS mutations_sync = 1
+                """,
+                {
+                    **scope_params,
+                    "winner_variant_table": variant_table,
+                },
+            )
+
+        # Fail-safe: если winners переданы, но ни одна строка в scope не помечена,
+        # откатываемся на ranking-based top-N, чтобы не оставлять фазу без winner-флага.
+        if unique_variant_tables:
+            scope_rows_data = self._execute(
+                f"""
+                SELECT count()
+                FROM `{self._database}`.`{self._table}`
+                WHERE {scope_where_clause}
+                """,
+                scope_params,
+            )
+            scope_rows = (
+                int(scope_rows_data[0][0])
+                if scope_rows_data and scope_rows_data[0] and scope_rows_data[0][0] is not None
+                else 0
+            )
+            marked_rows_data = self._execute(
+                f"""
+                SELECT count()
+                FROM `{self._database}`.`{self._table}`
+                WHERE {scope_where_clause}
+                  AND is_top_n = 1
+                """,
+                scope_params,
+            )
+            marked_rows = (
+                int(marked_rows_data[0][0])
+                if marked_rows_data and marked_rows_data[0] and marked_rows_data[0][0] is not None
+                else 0
+            )
+            expected_marked_rows = min(
+                scope_rows,
+                self._resolve_top_n_winners(
+                    benchmark_run_id=benchmark_run_id,
+                    benchmark_id=benchmark_id,
+                    source_database=source_database,
+                    source_table=source_table,
+                    phase=phase,
+                    variant_mode=variant_mode,
+                    phase_name=phase_name,
+                ),
+            )
+            if scope_rows > 0 and marked_rows < expected_marked_rows:
+                logger.warning(
+                    "mark_top_n_variant_tables: winners не совпали со scope "
+                    "(run_id=%s, benchmark=%s, table=%s.%s, phase=%s, mode=%s); "
+                    "fallback на recalculate_phase_ranking",
+                    benchmark_run_id,
+                    benchmark_id,
+                    source_database,
+                    source_table,
+                    phase,
+                    variant_mode or phase_name,
+                )
+                self._recalculate_phase_ranking(
+                    benchmark_run_id=benchmark_run_id,
+                    benchmark_id=benchmark_id,
+                    source_database=source_database,
+                    source_table=source_table,
+                    phase=phase,
+                    variant_mode=variant_mode,
+                    phase_name=phase_name,
+                )
 
     @staticmethod
     def _build_run_record_id(
@@ -1750,6 +1864,11 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             else:
                 self._insert_phased_record(record)
             return
+        if not self._create_legacy_table:
+            raise ValueError(
+                "legacy result table отключена (create_legacy_table=False), "
+                "но получен результат non-phased strategy"
+            )
         self._insert_record(
             record=record,
             table_name=self._legacy_table,
@@ -1867,6 +1986,20 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         score_calculation_json = self._pretty_json_string_or_as_is(
             record.score_calculation_json
         )
+        tested_size_with_indexes = record.tested_table_consumed_compressed_size_bytes_with_indexes
+        if tested_size_with_indexes is None:
+            tested_size_with_indexes = record.size_bytes_total
+        source_size_overall = record.source_table_consumed_compressed_size_bytes_overall
+        compression_coef = record.tested_table_compression_overall_coef
+        if compression_coef is None:
+            try:
+                source_size_numeric = float(source_size_overall or 0.0)
+                tested_size_numeric = float(tested_size_with_indexes or 0.0)
+            except Exception:
+                source_size_numeric = 0.0
+                tested_size_numeric = 0.0
+            if source_size_numeric > 0 and tested_size_numeric > 0:
+                compression_coef = source_size_numeric / tested_size_numeric
 
         return {
             "benchmark_run_id": int(record.benchmark_run_id),
@@ -1888,6 +2021,15 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             "size_bytes_total": record.size_bytes_total,
             "size_bytes_by_column_json": size_bytes_by_column_json,
             "size_bytes_indexes_json": size_bytes_indexes_json,
+            "tested_table_consumed_compressed_size_bytes_with_indexes": tested_size_with_indexes,
+            "tested_table_consumed_compressed_size_bytes_with_indexes_readable": (
+                record.tested_table_consumed_compressed_size_bytes_with_indexes_readable
+            ),
+            "source_table_consumed_compressed_size_bytes_overall": source_size_overall,
+            "source_table_consumed_compressed_size_bytes_overall_readable": (
+                record.source_table_consumed_compressed_size_bytes_overall_readable
+            ),
+            "tested_table_compression_overall_coef": compression_coef,
             "select_metrics_json": select_metrics_json,
             "insert_metrics_json": insert_metrics_json,
             "score_calculation_json": score_calculation_json,

@@ -55,6 +55,12 @@ _BASELINE_TABLE_MARKER = "__source_baseline__"
 _COLD_SELECT_SETTINGS_ASSIGNMENTS = (
     "use_uncompressed_cache = 0",
 )
+_PHASED_STRATEGIES = ("sequential_phased_topn_strategy",)
+
+
+def _is_phased_strategy(strategy: str) -> bool:
+    """Проверяет, что benchmark strategy относится к phased-линейке."""
+    return str(strategy or "").strip() in _PHASED_STRATEGIES
 
 
 def _resolve_worker_start_benchmark_run_id() -> str:
@@ -2651,6 +2657,7 @@ def _store_source_benchmark_result_if_configured(
         legacy_table=payload.result_table_legacy,
         phased_table=payload.result_table_phased,
         phased_runs_table=payload.result_runs_table_phased,
+        create_legacy_table=not _is_phased_strategy(payload.benchmark_strategy),
         create_table_if_missing=True,
     )
     try:
@@ -3117,6 +3124,7 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
         legacy_table=payload.result_table_legacy,
         phased_table=payload.result_table_phased,
         phased_runs_table=payload.result_runs_table_phased,
+        create_legacy_table=not _is_phased_strategy(payload.benchmark_strategy),
         create_table_if_missing=True,
     )
 

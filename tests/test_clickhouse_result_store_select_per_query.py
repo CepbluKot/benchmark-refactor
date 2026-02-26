@@ -57,17 +57,17 @@ class _RankingStore(_CapturingStore):
         self.update_calls: List[Dict[str, Any]] = []
         self.select_calls: List[Dict[str, Any]] = []
         self._rank_rows_by_mode: Dict[str, List[tuple[str, Optional[float]]]] = {}
+        self._scope_rows_by_mode: Dict[str, int] = {}
+        self._marked_rows_by_mode: Dict[str, int] = {}
         self._run_row_top_n = 1
-        self._run_row_config_json = json.dumps(
+        self._run_row_limits_json = json.dumps(
             {
-                "sequential_top_n_limits": {
-                    "order_by": 4,
-                    "types": 3,
-                    "codecs": 2,
-                    "indexes": 2,
-                    "final_validation": 1,
-                    "sequential": 1,
-                }
+                "order_by": 4,
+                "types": 3,
+                "codecs": 2,
+                "indexes": 2,
+                "final_validation": 1,
+                "sequential": 1,
             }
         )
         super().__init__()
@@ -79,10 +79,27 @@ class _RankingStore(_CapturingStore):
     ) -> None:
         self._rank_rows_by_mode[variant_mode] = list(rows)
 
+    def set_scope_counts(
+        self,
+        *,
+        variant_mode: str,
+        scope_rows: int,
+        marked_rows: int,
+    ) -> None:
+        self._scope_rows_by_mode[variant_mode] = int(scope_rows)
+        self._marked_rows_by_mode[variant_mode] = int(marked_rows)
+
     def _execute(self, query: str, params: Optional[Any] = None):
         normalized = " ".join(query.split()).lower()
-        if "select top_n_winners, config_json" in normalized:
-            return [[self._run_row_top_n, self._run_row_config_json]]
+        if "select top_n_winners, sequential_top_n_limits_json" in normalized:
+            return [[self._run_row_top_n, self._run_row_limits_json]]
+        if "select count()" in normalized:
+            mode = ""
+            if isinstance(params, dict):
+                mode = str(params.get("variant_mode") or "")
+            if "and is_top_n = 1" in normalized:
+                return [[self._marked_rows_by_mode.get(mode, 0)]]
+            return [[self._scope_rows_by_mode.get(mode, 0)]]
         if "select id, score" in normalized:
             mode = ""
             if isinstance(params, dict):
@@ -405,6 +422,98 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
 
         self.assertEqual(top_n_types_validation, 3)
         self.assertEqual(top_n_order_by_banner, 4)
+
+    def test_mark_top_n_variant_tables_sets_flag_only_for_winners(self) -> None:
+        store = _RankingStore()
+        store.set_scope_counts(variant_mode="codecs_validation", scope_rows=2, marked_rows=2)
+
+        store.mark_top_n_variant_tables(
+            benchmark_run_id=77,
+            benchmark_id="bench_rank",
+            source_database="analytics",
+            source_table="events",
+            phase=3,
+            variant_mode="codecs_validation",
+            phase_name="codecs_validation",
+            winner_variant_tables=["v_2", "v_4", "v_2"],
+        )
+
+        # 1 mutation на reset + 2 mutations на уникальных winners.
+        self.assertEqual(len(store.update_calls), 3)
+        self.assertNotIn("winner_variant_table", store.update_calls[0])
+        self.assertEqual(store.update_calls[1]["winner_variant_table"], "v_2")
+        self.assertEqual(store.update_calls[2]["winner_variant_table"], "v_4")
+        self.assertTrue(
+            all(call.get("variant_mode") == "codecs_validation" for call in store.update_calls)
+        )
+
+    def test_mark_top_n_variant_tables_fallbacks_to_recalc_when_no_rows_marked(self) -> None:
+        store = _RankingStore()
+        store.set_scope_counts(variant_mode="codecs_validation", scope_rows=3, marked_rows=0)
+        store.set_rank_rows(
+            "codecs_validation",
+            [
+                ("v_1", 10.0),
+                ("v_2", 9.0),
+                ("v_3", 8.0),
+            ],
+        )
+        store._run_row_top_n = 2
+        store._run_row_limits_json = json.dumps({"codecs": 2, "sequential": 1})
+
+        store.mark_top_n_variant_tables(
+            benchmark_run_id=77,
+            benchmark_id="bench_rank",
+            source_database="analytics",
+            source_table="events",
+            phase=3,
+            variant_mode="codecs_validation",
+            phase_name="codecs_validation",
+            winner_variant_tables=["missing_variant"],
+        )
+
+        # После reset + winner-update должен сработать fallback recalc с rank updates.
+        rank_updates = [call for call in store.update_calls if "rank_in_phase" in call]
+        self.assertTrue(rank_updates)
+        self.assertEqual(
+            [int(call["rank_in_phase"]) for call in rank_updates],
+            [1, 2, 3],
+        )
+
+    def test_mark_top_n_variant_tables_fallbacks_to_recalc_when_marked_rows_less_than_expected(
+        self,
+    ) -> None:
+        store = _RankingStore()
+        store.set_scope_counts(variant_mode="types_validation", scope_rows=4, marked_rows=1)
+        store.set_rank_rows(
+            "types_validation",
+            [
+                ("v_1", 11.0),
+                ("v_2", 10.0),
+                ("v_3", 9.0),
+                ("v_4", 8.0),
+            ],
+        )
+        store._run_row_top_n = 3
+        store._run_row_limits_json = json.dumps({"types": 3, "sequential": 1})
+
+        store.mark_top_n_variant_tables(
+            benchmark_run_id=77,
+            benchmark_id="bench_rank",
+            source_database="analytics",
+            source_table="events",
+            phase=2,
+            variant_mode="types_validation",
+            phase_name="types_validation",
+            winner_variant_tables=["v_1"],
+        )
+
+        rank_updates = [call for call in store.update_calls if "rank_in_phase" in call]
+        self.assertTrue(rank_updates)
+        self.assertEqual(
+            [bool(call["is_top_n"]) for call in rank_updates],
+            [True, True, True, False],
+        )
 
 
 if __name__ == "__main__":

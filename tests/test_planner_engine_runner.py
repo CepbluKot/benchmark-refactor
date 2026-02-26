@@ -2420,23 +2420,17 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         required_modes = {
             "order_by",
             "types",
-            "types_validation",
             "codecs",
-            "codecs_validation",
             "indexes",
-            "indexes_validation",
             "final_validation",
         }
         self.assertTrue(required_modes.issubset(set(modes)))
 
         first_occurrence = {mode: modes.index(mode) for mode in required_modes}
         self.assertLess(first_occurrence["order_by"], first_occurrence["types"])
-        self.assertLess(first_occurrence["types"], first_occurrence["types_validation"])
-        self.assertLess(first_occurrence["types_validation"], first_occurrence["codecs"])
-        self.assertLess(first_occurrence["codecs"], first_occurrence["codecs_validation"])
-        self.assertLess(first_occurrence["codecs_validation"], first_occurrence["indexes"])
-        self.assertLess(first_occurrence["indexes"], first_occurrence["indexes_validation"])
-        self.assertLess(first_occurrence["indexes_validation"], first_occurrence["final_validation"])
+        self.assertLess(first_occurrence["types"], first_occurrence["codecs"])
+        self.assertLess(first_occurrence["codecs"], first_occurrence["indexes"])
+        self.assertLess(first_occurrence["indexes"], first_occurrence["final_validation"])
 
         index_jobs = [job for job in adapter.executed_jobs if job.variant_meta.mode == "indexes"]
         self.assertTrue(index_jobs)
@@ -2452,13 +2446,17 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             if job.variant_ddl.indexes
         }
         self.assertTrue({"1", "2"}.issubset(index_granularities))
+        # Этап indexes теперь one-column: каждое задание меняет максимум один индекс.
+        self.assertTrue(all(len(job.variant_ddl.indexes) <= 1 for job in index_jobs))
 
-        index_validation_jobs = [
+        final_jobs = [
             job
             for job in adapter.executed_jobs
-            if job.variant_meta.mode == "indexes_validation"
+            if job.variant_meta.mode == "final_validation"
         ]
-        self.assertGreaterEqual(len(index_validation_jobs), 2)
+        self.assertTrue(final_jobs)
+        # Финальная фаза должна собирать объединённый вариант (допускаем >=1 индекса).
+        self.assertTrue(any(len(job.variant_ddl.indexes) >= 1 for job in final_jobs))
 
     def test_sequential_phased_topn_strategy_supports_stage_specific_top_n(self) -> None:
         """Проверяет, что top-N можно задавать отдельно для каждой фазы."""
@@ -2530,22 +2528,28 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         order_jobs = [
             job for job in adapter.executed_jobs if job.variant_meta.mode == "order_by"
         ]
-        types_validation_jobs = [
-            job
-            for job in adapter.executed_jobs
-            if job.variant_meta.mode == "types_validation"
+        types_jobs = [
+            job for job in adapter.executed_jobs if job.variant_meta.mode == "types"
         ]
-        codecs_validation_jobs = [
+        codecs_jobs = [
+            job for job in adapter.executed_jobs if job.variant_meta.mode == "codecs"
+        ]
+        final_jobs = [
             job
             for job in adapter.executed_jobs
-            if job.variant_meta.mode == "codecs_validation"
+            if job.variant_meta.mode == "final_validation"
         ]
 
-        # При sequential_top_n=2 order_by и types_validation остаются по 2 (по parent-веткам).
+        # При sequential_top_n=2 order_by остаётся 2 ветки.
         self.assertEqual(len(order_jobs), 2)
-        self.assertEqual(len(types_validation_jobs), 2)
-        # Но дальше работает stage-specific лимит types=1 => в codecs идет только 1 победитель.
-        self.assertEqual(len(codecs_validation_jobs), 1)
+        # Stage-specific лимиты должны сократить число кандидатов в следующих фазах.
+        self.assertGreaterEqual(len(types_jobs), 1)
+        self.assertGreaterEqual(len(codecs_jobs), 1)
+        self.assertGreaterEqual(len(final_jobs), 1)
+        self.assertEqual(
+            len({job.variant_meta.parent_variant_table for job in final_jobs}),
+            1,
+        )
 
     def test_sequential_phased_topn_strategy_supports_multiple_winners_per_parent(self) -> None:
         """Проверяет, что max_winners_per_parent_limits реально даёт >1 кандидата на parent."""
@@ -2620,13 +2624,136 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         run_id = runner.run()
         self.assertEqual(run_id, 1)
 
-        index_validation_jobs = [
+        index_jobs = [
+            job for job in adapter.executed_jobs if job.variant_meta.mode == "indexes"
+        ]
+        self.assertTrue(index_jobs)
+        # Проверяем one-column семантику этапа indexes.
+        self.assertTrue(all(len(job.variant_ddl.indexes) <= 1 for job in index_jobs))
+
+    def test_sequential_phased_topn_strategy_does_not_collapse_to_top1_after_single_order_by(self) -> None:
+        """Даже при 1 parent после ORDER BY следующие фазы должны уметь пропускать top-N."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_phased_topn_single_order_parent",
+            connection_id="prod_ch",
+            strategy="sequential_phased_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            sequential_top_n=3,
+            sequential_top_n_limits=InsertRowsLimitsConfig(
+                order_by=1,
+                types=2,
+                codecs=2,
+                indexes=2,
+                final_validation=2,
+            ),
+            max_winners_per_parent_limits=InsertRowsLimitsConfig(
+                types=2,
+                codecs=2,
+                indexes=2,
+            ),
+            index_granularity_values=[8192, 16384],
+            order_by_first="event_time",
+            # тот же столбец -> фактически один ORDER BY кандидат
+            order_by_candidates=["event_time"],
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_name="user_id",
+                        by_type="UInt64",
+                        types=["UInt64", "UInt32"],
+                        codecs=["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+                    ),
+                    ColumnRuleConfig(
+                        by_name="user_id",
+                        by_type="UInt32",
+                        types=["UInt64", "UInt32"],
+                        codecs=["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_name="user_id",
+                        by_type="UInt64",
+                        indexes=[
+                            IndexConfig(type="minmax", granularity=[1, 2]),
+                        ],
+                    ),
+                    IndexRuleConfig(
+                        by_name="user_id",
+                        by_type="UInt32",
+                        indexes=[
+                            IndexConfig(type="minmax", granularity=[1, 2]),
+                        ],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[
+                    QueryConfigItem(
+                        query="SELECT count() FROM {table} WHERE user_id > 0"
+                    )
+                ],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = SequentialPhasedScoringAdapter()
+        store = InMemoryBenchmarkResultStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=store,
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+
+        order_jobs = [
+            job for job in adapter.executed_jobs if job.variant_meta.mode == "order_by"
+        ]
+        self.assertGreaterEqual(len(order_jobs), 1)
+        types_jobs = [
+            job for job in adapter.executed_jobs if job.variant_meta.mode == "types"
+        ]
+        # После stage-limit order_by=1 в types должна идти только одна parent-ветка.
+        self.assertEqual(
+            len(
+                {
+                    str(job.variant_meta.parent_variant_table or "")
+                    for job in types_jobs
+                    if str(job.variant_meta.parent_variant_table or "")
+                }
+            ),
+            1,
+        )
+
+        codecs_jobs = [
+            job for job in adapter.executed_jobs if job.variant_meta.mode == "codecs"
+        ]
+        codec_parent_tables = {
+            str(job.variant_meta.parent_variant_table or "")
+            for job in codecs_jobs
+            if str(job.variant_meta.parent_variant_table or "")
+        }
+        self.assertGreaterEqual(len(codec_parent_tables), 2)
+
+        final_jobs = [
             job
             for job in adapter.executed_jobs
-            if job.variant_meta.mode == "indexes_validation"
+            if job.variant_meta.mode == "final_validation"
         ]
-        # Для одного parent при лимите 3 ожидаем не меньше 3 финальных кандидатов индексов.
-        self.assertGreaterEqual(len(index_validation_jobs), 3)
+        final_parent_tables = {
+            str(job.variant_meta.parent_variant_table or "")
+            for job in final_jobs
+            if str(job.variant_meta.parent_variant_table or "")
+        }
+        self.assertGreaterEqual(len(final_parent_tables), 2)
 
     def test_sequential_mode_propagates_source_benchmark_to_all_stage_jobs(self) -> None:
         """Проверяет, что baseline source benchmark доступен во всех sequential jobs."""

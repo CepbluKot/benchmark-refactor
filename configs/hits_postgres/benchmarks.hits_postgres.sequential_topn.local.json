@@ -100,6 +100,21 @@
                 ]
               }
             ]
+          },
+
+          {
+            "by_name": "country",
+            "by_type": "String",
+            "auto_generate_indexes": false,
+            "indexes": [
+              {
+                "type": "tokenbf_v1(32768, 3, 0)",
+                "granularity": [1, 8],
+                "index_granularity_values": [
+                  8192, 16384
+                ]
+              }
+            ]
           }
         ]
       },
@@ -110,26 +125,196 @@
         "mode": "manual",
         "test_queries": [
           {
-            "query_id": "q_url_like_error",
-            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%error%'",
+            "query_id": "q_url_like_help_delivery",
+            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%help/delivery%'",
             "cache_mode": "cold",
             "select_operations_count": 10
           },
           {
-            "query_id": "q_url_like_nonexistent",
-            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%very_oooooong_non_existing_marker_42%'",
+            "query_id": "q_url_like_catalog_search",
+            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%catalog/search?q=phone%'",
             "cache_mode": "cold",
             "select_operations_count": 10
           },
           {
-            "query_id": "q_url_prefix_api",
-            "query": "SELECT count() FROM {table} WHERE page_url LIKE '/api/%'",
+            "query_id": "q_url_like_catalog_item",
+            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%catalog/item/%'",
             "cache_mode": "cold",
             "select_operations_count": 10
           },
           {
-            "query_id": "q_url_like_error_path_segment",
-            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%/error/%'",
+            "query_id": "q_url_like_blog_post",
+            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%blog/post/new-features%'",
+            "cache_mode": "cold",
+            "select_operations_count": 10
+          },
+          {
+            "query_id": "q_country_eq_ru",
+            "query": "SELECT count() FROM {table} WHERE country = 'RU'",
+            "cache_mode": "cold",
+            "select_operations_count": 10
+          },
+          {
+            "query_id": "q_country_in_main",
+            "query": "SELECT count() FROM {table} WHERE country IN ('RU', 'US', 'DE', 'GB')",
+            "cache_mode": "cold",
+            "select_operations_count": 10
+          },
+          {
+            "query_id": "q_country_group_by",
+            "query": "SELECT country, count() FROM {table} WHERE country IN ('RU', 'US', 'DE', 'GB', 'KZ', 'CN', 'OTHER') GROUP BY country ORDER BY count() DESC",
+            "cache_mode": "cold",
+            "select_operations_count": 10
+          }
+        ]
+      }
+    },
+    {
+      "id": "bench_messages_sequential_topn",
+      "connection_id": "local_ch_hits",
+      "strategy": "sequential_phased_topn_strategy",
+      "column_rules_mode": "inline_only",
+      "index_rules_mode": "inline_only",
+      "column_order_mode": "compressed_size_desc",
+      "order_by_first": "msg",
+      "order_by_candidates": [
+        "msg"
+      ],
+      "tables": {
+        "default": [
+          "messages"
+        ]
+      },
+      "test_database": "benchmark_tmp",
+      "insert_operations_count": 10,
+      "sequential_top_n_limits": {
+        "order_by": 3,
+        "types": 3,
+        "codecs": 3,
+        "indexes": 3,
+        "final_validation": 3
+      },
+      "max_winners_per_parent_limits": {
+        "types": 3,
+        "codecs": 3,
+        "indexes": 3
+      },
+      "scoring": {
+        "mode": "expression",
+        "expression": "pow(safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0), 0.9) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.1)",
+        "on_error_score": -1.0
+      },
+      "max_benchmarks_limits": {
+        "order_by": 10,
+        "types": 10,
+        "codecs": 10,
+        "indexes": 120,
+        "indexes_validation": 120,
+        "final_validation": 10,
+        "sequential": 20
+      },
+      "source_insert_rows_per_operation_limits": {
+        "sequential": 100000
+      },
+      "insert_rows_per_operation_limits": {
+        "types": 100000,
+        "indexes": 100000,
+        "sequential": 100000
+      },
+      "global_rules": {
+        "order_by_rules": {
+          "first_column": "msg",
+          "candidates": [
+            "msg"
+          ],
+          "auto_generate_candidates": false
+        },
+        "column_rules": [
+          {
+            "by_name": "msg",
+            "by_type": "String",
+            "auto_generate_alternatives": true,
+            "auto_compressions_datatype": "String",
+            "types": [
+              "String",
+              "LowCardinality(String)"
+            ]
+          },
+          {
+            "by_name": "msg",
+            "by_type": "LowCardinality(String)",
+            "auto_generate_alternatives": true,
+            "auto_compressions_datatype": "String",
+            "types": [
+              "String",
+              "LowCardinality(String)"
+            ]
+          }
+        ],
+        "index_rules": [
+          {
+            "by_name": "msg",
+            "by_type": "String",
+            "auto_generate_indexes": false,
+            "indexes": [
+              {
+                "type": "tokenbf_v1(32768, 3, 0)",
+                "granularity": [
+                  2,
+                  4
+                ],
+                "index_granularity_values": [
+                  8192,
+                  16384
+                ]
+              }
+            ]
+          },
+          {
+            "by_name": "msg",
+            "by_type": "LowCardinality(String)",
+            "auto_generate_indexes": false,
+            "indexes": [
+              {
+                "type": "tokenbf_v1(32768, 3, 0)",
+                "granularity": [
+                  2,
+                  4
+                ],
+                "index_granularity_values": [
+                  8192,
+                  16384
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "table_rules": [],
+      "queries": {
+        "mode": "manual",
+        "test_queries": [
+          {
+            "query_id": "q_msg_like_packet_responder",
+            "query": "SELECT count() FROM {table} WHERE msg LIKE '%PacketResponder%'",
+            "cache_mode": "cold",
+            "select_operations_count": 10
+          },
+          {
+            "query_id": "q_msg_like_datanode",
+            "query": "SELECT count() FROM {table} WHERE msg LIKE '%dfs.DataNode%'",
+            "cache_mode": "cold",
+            "select_operations_count": 10
+          },
+          {
+            "query_id": "q_msg_like_block",
+            "query": "SELECT count() FROM {table} WHERE msg LIKE '%blk_%'",
+            "cache_mode": "cold",
+            "select_operations_count": 10
+          },
+          {
+            "query_id": "q_msg_like_info",
+            "query": "SELECT count() FROM {table} WHERE msg LIKE '%INFO%'",
             "cache_mode": "cold",
             "select_operations_count": 10
           }
