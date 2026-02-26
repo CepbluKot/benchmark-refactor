@@ -6,7 +6,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -18,7 +18,11 @@ from src.naming import parse_variant_name
 from ...contracts.result_store import BenchmarkResultStore
 from ...types import (
     BenchmarkVariantResult,
+    Query,
+    ScoringConfig,
+    StoredVariantSummary,
     StoredBenchmarkResult,
+    TableBenchmarkPlan,
     TopTypeVariant,
     VariantJob,
     build_variant_params,
@@ -54,6 +58,29 @@ class ClickHouseConnectionParams(BaseModel):
 
 class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
     """Хранилище результатов в ClickHouse с поддержкой top-N для sequential stage2."""
+
+    _PHASE_BY_VARIANT_MODE: dict[str, int] = {
+        "source_baseline": 0,
+        "order_by": 1,
+        "types": 2,
+        "types_validation": 2,
+        "codecs": 3,
+        "codecs_validation": 3,
+        "indexes": 4,
+        "indexes_validation": 4,
+        "final_validation": 5,
+    }
+    _PHASE_NAME_BY_VARIANT_MODE: dict[str, str] = {
+        "source_baseline": "source_baseline",
+        "order_by": "order_by",
+        "types": "types",
+        "types_validation": "types_validation",
+        "codecs": "codecs",
+        "codecs_validation": "codecs_validation",
+        "indexes": "indexes",
+        "indexes_validation": "indexes_validation",
+        "final_validation": "final_validation",
+    }
 
     _LEGACY_DUPLICATE_SIZE_COLUMNS: tuple[str, ...] = (
         "tested_table_total_size_bytes_with_indexes",
@@ -104,9 +131,15 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "benchmark_started_at",
         "benchmark_id",
         "id",
+        "parent_id",
+        "phase",
+        "phase_name",
+        "started_at",
+        "finished_at",
         "source_db_name",
         "source_table_name",
         "tested_table_ddl",
+        "variant_params_json",
         "source_table_ddl",
         "is_source_table_copy",
         "index_params",
@@ -135,6 +168,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "source_table_insert_metrics_json",
         "tested_table_select_test_query",
         "source_table_select_test_query",
+        "select_metrics_json",
         "tested_table_select_metrics_by_query_json",
         "source_table_select_metrics_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
@@ -150,23 +184,34 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_compression_by_each_column_coef",
         "source_table_n_rows_in_size_test",
         "tested_table_n_rows_in_size_test",
+        "size_bytes_total",
+        "size_bytes_by_column_json",
+        "size_bytes_indexes_json",
         "tested_table_cols_sizes",
         "tested_table_indexes_sizes",
         "tested_table_indexes_sizes_percent_from_col_size",
+        "insert_metrics_json",
         "extra_json",
         "variant_table",
         "variant_mode",
         "variant_params",
+        "rank_in_phase",
+        "is_top_n",
         "score_calculation_json",
         "score",
     ]
     _PRETTY_JSON_STRING_COLUMNS: tuple[str, ...] = (
         "index_params",
+        "variant_params_json",
         "tested_table_select_metrics_by_query_json",
         "source_table_select_metrics_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
+        "select_metrics_json",
         "tested_table_insert_metrics_json",
         "source_table_insert_metrics_json",
+        "insert_metrics_json",
+        "size_bytes_by_column_json",
+        "size_bytes_indexes_json",
         "tested_table_consumed_compressed_size_bytes_by_each_column",
         "source_table_consumed_compressed_size_bytes_by_each_column",
         "tested_table_compression_by_each_column_coef",
@@ -180,6 +225,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "source_table_select_test_query",
     )
     _SQL_JSON_COLUMNS: tuple[str, ...] = (
+        "select_metrics_json",
         "tested_table_select_metrics_by_query_json",
         "source_table_select_metrics_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
@@ -189,7 +235,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         self,
         connection: ConnectionConfig | ClickHouseConnectionParams,
         database: str = "benchmark_results",
-        table: str = "combined_benchmark_results",
+        table: str = "benchmark_results",
+        runs_table: str = "benchmark_runs",
         *,
         create_table_if_missing: bool = True,
     ) -> None:
@@ -199,6 +246,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             self._connection = connection
         self._database = database
         self._table = table
+        self._runs_table = runs_table
         self._client = self._build_client()
 
         if create_table_if_missing:
@@ -213,6 +261,11 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
     def table(self) -> str:
         """Имя таблицы результатов."""
         return self._table
+
+    @property
+    def runs_table(self) -> str:
+        """Имя таблицы run-level метаданных."""
+        return self._runs_table
 
     def close(self) -> None:
         """Закрывает ClickHouse клиент (idempotent)."""
@@ -229,15 +282,45 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         self._execute(f"CREATE DATABASE IF NOT EXISTS `{self._database}`")
         self._execute(
             f"""
+            CREATE TABLE IF NOT EXISTS `{self._database}`.`{self._runs_table}`
+            (
+                `id` String,
+                `benchmark_run_id` Int32,
+                `benchmark_id` String,
+                `started_at` Nullable(DateTime64(3, 'UTC')),
+                `finished_at` Nullable(DateTime64(3, 'UTC')),
+                `source_db_name` String,
+                `source_table_name` String,
+                `source_table_ddl` Nullable(String),
+                `total_rows` Nullable(Int64),
+                `data_path` Nullable(String),
+                `benchmark_queries` Nullable(String),
+                `score_weights` Nullable(String),
+                `top_n_winners` Nullable(Int32),
+                `config_json` Nullable(String),
+                `updated_at` DateTime64(3, 'UTC')
+            )
+            ENGINE = ReplacingMergeTree(updated_at)
+            ORDER BY (id)
+            """
+        )
+        self._execute(
+            f"""
             CREATE TABLE IF NOT EXISTS `{self._database}`.`{self._table}`
             (
                 `benchmark_run_id` Int32,
                 `benchmark_started_at` DateTime64(3, 'UTC'),
                 `benchmark_id` String,
                 `id` String,
+                `parent_id` Nullable(String),
+                `phase` Nullable(Int32),
+                `phase_name` Nullable(String),
+                `started_at` DateTime64(3, 'UTC'),
+                `finished_at` Nullable(DateTime64(3, 'UTC')),
                 `source_db_name` String,
                 `source_table_name` String,
                 `tested_table_ddl` String,
+                `variant_params_json` Nullable(String),
                 `source_table_ddl` Nullable(String),
                 `is_source_table_copy` Nullable(Bool),
                 `index_params` Nullable(String),
@@ -264,8 +347,10 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `source_table_insert_bytes_per_second_measurements_percentiles_readable` Array(String),
                 `tested_table_insert_metrics_json` Nullable(String),
                 `source_table_insert_metrics_json` Nullable(String),
+                `insert_metrics_json` Nullable(String),
                 `tested_table_select_test_query` Nullable(String),
                 `source_table_select_test_query` Nullable(String),
+                `select_metrics_json` Nullable(String),
                 `tested_table_select_metrics_by_query_json` Nullable(String),
                 `source_table_select_metrics_by_query_json` Nullable(String),
                 `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json` Nullable(String),
@@ -281,6 +366,9 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `tested_table_compression_by_each_column_coef` Nullable(String),
                 `source_table_n_rows_in_size_test` Nullable(Int64),
                 `tested_table_n_rows_in_size_test` Nullable(Int64),
+                `size_bytes_total` Nullable(Float64),
+                `size_bytes_by_column_json` Nullable(String),
+                `size_bytes_indexes_json` Nullable(String),
                 `tested_table_cols_sizes` Nullable(String),
                 `tested_table_indexes_sizes` Nullable(String),
                 `tested_table_indexes_sizes_percent_from_col_size` Nullable(String),
@@ -288,6 +376,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `variant_table` String,
                 `variant_mode` String,
                 `variant_params` String,
+                `rank_in_phase` Nullable(Int32),
+                `is_top_n` Bool DEFAULT 0,
                 `score_calculation_json` Nullable(String),
                 `score` Nullable(Float64)
             )
@@ -305,9 +395,22 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_insert_metrics_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `source_table_insert_metrics_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `insert_metrics_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `select_metrics_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes` Nullable(Float64),
                 ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes_readable` Nullable(String),
-                ADD COLUMN IF NOT EXISTS `score_calculation_json` Nullable(String)
+                ADD COLUMN IF NOT EXISTS `score_calculation_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `parent_id` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `phase` Nullable(Int32),
+                ADD COLUMN IF NOT EXISTS `phase_name` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `started_at` Nullable(DateTime64(3, 'UTC')),
+                ADD COLUMN IF NOT EXISTS `finished_at` Nullable(DateTime64(3, 'UTC')),
+                ADD COLUMN IF NOT EXISTS `variant_params_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `size_bytes_total` Nullable(Float64),
+                ADD COLUMN IF NOT EXISTS `size_bytes_by_column_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `size_bytes_indexes_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `rank_in_phase` Nullable(Int32),
+                ADD COLUMN IF NOT EXISTS `is_top_n` Bool DEFAULT 0
             """
         )
         # Удаляем дублирующие legacy-поля размеров (дублируют consumed_compressed_*_with_indexes).
@@ -335,6 +438,227 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                     DROP COLUMN IF EXISTS `{column_name}`
                 """
             )
+
+    def register_benchmark_run_start(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_started_at: datetime,
+        table_plan: TableBenchmarkPlan,
+        source_table_ddl: str,
+        benchmark_queries: Sequence[Query],
+        total_rows: Optional[int],
+        scoring: ScoringConfig,
+    ) -> None:
+        """Регистрирует старт run-контекста (per benchmark/table) в `benchmark_runs`."""
+        run_record_id = self._build_run_record_id(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=table_plan.benchmark_id,
+            source_database=table_plan.database,
+            source_table=table_plan.table,
+        )
+        benchmark_queries_payload = [
+            {
+                "query_id": query.query_id,
+                "query": query.query,
+                "cache_mode": query.cache_mode,
+                "select_operations_count": query.select_operations_count,
+                "warmup_queries": list(query.warmup_queries),
+            }
+            for query in benchmark_queries
+        ]
+        scoring_payload = {
+            "mode": scoring.mode,
+            "expression": scoring.expression,
+            "on_error_score": scoring.on_error_score,
+        }
+        self._insert_run_row(
+            run_record_id=run_record_id,
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=table_plan.benchmark_id,
+            started_at=benchmark_started_at,
+            finished_at=None,
+            source_db_name=table_plan.database,
+            source_table_name=table_plan.table,
+            source_table_ddl=source_table_ddl,
+            total_rows=total_rows,
+            data_path=None,
+            benchmark_queries_json=json.dumps(
+                benchmark_queries_payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            score_weights_json=json.dumps(
+                scoring_payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            top_n_winners=int(table_plan.sequential_top_n),
+            config_json=json.dumps(
+                table_plan.model_dump(mode="json"),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                default=str,
+            ),
+        )
+
+    def register_benchmark_run_finish(
+        self,
+        *,
+        benchmark_run_id: int,
+        table_plan: TableBenchmarkPlan,
+        benchmark_finished_at: datetime,
+    ) -> None:
+        """Фиксирует `finished_at` для run-контекста в `benchmark_runs`."""
+        run_record_id = self._build_run_record_id(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=table_plan.benchmark_id,
+            source_database=table_plan.database,
+            source_table=table_plan.table,
+        )
+        latest = self._execute(
+            f"""
+            SELECT
+                benchmark_run_id,
+                benchmark_id,
+                started_at,
+                source_db_name,
+                source_table_name,
+                source_table_ddl,
+                total_rows,
+                data_path,
+                benchmark_queries,
+                score_weights,
+                top_n_winners,
+                config_json
+            FROM `{self._database}`.`{self._runs_table}`
+            WHERE id = %(id)s
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            {"id": run_record_id},
+        )
+        if latest:
+            (
+                existing_run_id,
+                existing_benchmark_id,
+                existing_started_at,
+                existing_source_db,
+                existing_source_table,
+                existing_source_ddl,
+                existing_total_rows,
+                existing_data_path,
+                existing_queries_json,
+                existing_score_weights_json,
+                existing_top_n,
+                existing_config_json,
+            ) = latest[0]
+        else:
+            existing_run_id = benchmark_run_id
+            existing_benchmark_id = table_plan.benchmark_id
+            existing_started_at = benchmark_finished_at
+            existing_source_db = table_plan.database
+            existing_source_table = table_plan.table
+            existing_source_ddl = None
+            existing_total_rows = None
+            existing_data_path = None
+            existing_queries_json = None
+            existing_score_weights_json = None
+            existing_top_n = int(table_plan.sequential_top_n)
+            existing_config_json = None
+
+        self._insert_run_row(
+            run_record_id=run_record_id,
+            benchmark_run_id=int(existing_run_id),
+            benchmark_id=str(existing_benchmark_id),
+            started_at=self._to_aware_utc_datetime(existing_started_at),
+            finished_at=benchmark_finished_at,
+            source_db_name=str(existing_source_db),
+            source_table_name=str(existing_source_table),
+            source_table_ddl=(
+                str(existing_source_ddl) if existing_source_ddl is not None else None
+            ),
+            total_rows=(
+                int(existing_total_rows)
+                if existing_total_rows is not None
+                else None
+            ),
+            data_path=str(existing_data_path) if existing_data_path is not None else None,
+            benchmark_queries_json=(
+                str(existing_queries_json) if existing_queries_json is not None else None
+            ),
+            score_weights_json=(
+                str(existing_score_weights_json)
+                if existing_score_weights_json is not None
+                else None
+            ),
+            top_n_winners=int(existing_top_n) if existing_top_n is not None else None,
+            config_json=str(existing_config_json) if existing_config_json is not None else None,
+        )
+
+    def _insert_run_row(
+        self,
+        *,
+        run_record_id: str,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        started_at: datetime,
+        finished_at: Optional[datetime],
+        source_db_name: str,
+        source_table_name: str,
+        source_table_ddl: Optional[str],
+        total_rows: Optional[int],
+        data_path: Optional[str],
+        benchmark_queries_json: Optional[str],
+        score_weights_json: Optional[str],
+        top_n_winners: Optional[int],
+        config_json: Optional[str],
+    ) -> None:
+        """Пишет snapshot run-контекста в `benchmark_runs` (upsert через ReplacingMergeTree)."""
+        started_at_ch = self._to_naive_utc_datetime(started_at)
+        finished_at_ch = self._to_naive_utc_datetime(finished_at)
+        updated_at_ch = self._to_naive_utc_datetime(datetime.now(timezone.utc))
+        row = (
+            run_record_id,
+            int(benchmark_run_id),
+            str(benchmark_id),
+            started_at_ch,
+            finished_at_ch,
+            str(source_db_name),
+            str(source_table_name),
+            source_table_ddl,
+            int(total_rows) if total_rows is not None else None,
+            data_path,
+            benchmark_queries_json,
+            score_weights_json,
+            int(top_n_winners) if top_n_winners is not None else None,
+            config_json,
+            updated_at_ch,
+        )
+        self._client.insert(
+            table=f"{self._database}.{self._runs_table}",
+            data=[row],
+            column_names=[
+                "id",
+                "benchmark_run_id",
+                "benchmark_id",
+                "started_at",
+                "finished_at",
+                "source_db_name",
+                "source_table_name",
+                "source_table_ddl",
+                "total_rows",
+                "data_path",
+                "benchmark_queries",
+                "score_weights",
+                "top_n_winners",
+                "config_json",
+                "updated_at",
+            ],
+        )
 
     def store_result(
         self,
@@ -406,46 +730,145 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         top_n: int,
     ) -> List[TopTypeVariant]:
         """Возвращает top-N type-вариантов, отсортированных по score."""
-        if top_n <= 0:
-            return []
+        return self.get_top_variants(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+            top_n=top_n,
+            variant_modes=["types"],
+        )
 
+    def list_variant_summaries(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        variant_modes: Optional[Sequence[str]] = None,
+    ) -> List[StoredVariantSummary]:
+        """Возвращает summary результатов вариантов с фильтрацией по mode."""
         rows = self._execute(
             f"""
             SELECT
                 variant_table,
                 tested_table_ddl,
+                variant_mode,
+                variant_params,
                 score
             FROM `{self._database}`.`{self._table}`
             WHERE benchmark_run_id = %(benchmark_run_id)s
               AND benchmark_id = %(benchmark_id)s
               AND source_db_name = %(source_database)s
               AND source_table_name = %(source_table)s
-              AND variant_mode = 'types'
-            ORDER BY isNull(score) ASC, score DESC, variant_table ASC
-            LIMIT %(top_n)s
             """,
             {
                 "benchmark_run_id": benchmark_run_id,
                 "benchmark_id": benchmark_id,
                 "source_database": source_database,
                 "source_table": source_table,
-                "top_n": top_n,
             },
         )
 
+        mode_filter = {
+            str(mode).strip()
+            for mode in (variant_modes or [])
+            if str(mode).strip()
+        }
+        summaries: list[StoredVariantSummary] = []
+        for row in rows:
+            if len(row) == 5:
+                (
+                    variant_table,
+                    tested_table_ddl,
+                    variant_mode,
+                    variant_params_raw,
+                    score,
+                ) = row
+            elif len(row) == 3:
+                # Backward-compatible path для тестовых/fake-store ответов.
+                variant_table, tested_table_ddl, score = row
+                variant_mode = "types"
+                variant_params_raw = "{}"
+            else:
+                logger.warning(
+                    "ClickHouseBenchmarkResultStore: неожиданная ширина row=%d в list_variant_summaries",
+                    len(row),
+                )
+                continue
+            mode_value = str(variant_mode or "")
+            if mode_filter and mode_value not in mode_filter:
+                continue
+
+            variant_params: dict[str, Any] = {}
+            if isinstance(variant_params_raw, str) and variant_params_raw.strip():
+                try:
+                    parsed_params = json.loads(variant_params_raw)
+                    if isinstance(parsed_params, dict):
+                        variant_params = parsed_params
+                except Exception:
+                    logger.warning(
+                        "ClickHouseBenchmarkResultStore: не удалось распарсить variant_params JSON "
+                        "(variant=%s, mode=%s)",
+                        variant_table,
+                        mode_value,
+                    )
+
+            summaries.append(
+                StoredVariantSummary(
+                    variant_table=str(variant_table),
+                    tested_table_ddl=str(tested_table_ddl),
+                    variant_mode=mode_value,
+                    score=float(score) if score is not None else None,
+                    variant_params=variant_params,
+                )
+            )
+        return summaries
+
+    def get_top_variants(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        top_n: int,
+        variant_modes: Sequence[str],
+    ) -> List[TopTypeVariant]:
+        """Возвращает top-N вариантов по score для указанных mode."""
+        if top_n <= 0:
+            return []
+
+        summaries = self.list_variant_summaries(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+            variant_modes=variant_modes,
+        )
+        ranked = sorted(
+            summaries,
+            key=lambda summary: (
+                summary.score is None,
+                -(summary.score if summary.score is not None else 0.0),
+                summary.variant_table,
+            ),
+        )
+
         top_variants: list[TopTypeVariant] = []
-        for variant_table, tested_table_ddl, score in rows:
-            parsed_name = parse_variant_name(variant_table)
+        for summary in ranked[:top_n]:
+            parsed_name = parse_variant_name(summary.variant_table)
             variant_index = parsed_name[2] if parsed_name else 0
             try:
-                variant_ddl = TableDDL.from_ddl(tested_table_ddl)
+                variant_ddl = TableDDL.from_ddl(summary.tested_table_ddl)
             except Exception:
                 logger.exception(
                     "ClickHouseBenchmarkResultStore: не удалось распарсить tested_table_ddl "
                     "(benchmark=%s, table=%s, variant=%s)",
                     benchmark_id,
                     f"{source_database}.{source_table}",
-                    variant_table,
+                    summary.variant_table,
                 )
                 continue
 
@@ -453,7 +876,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 TopTypeVariant(
                     variant_index=variant_index,
                     variant_ddl=variant_ddl,
-                    score=float(score) if score is not None else None,
+                    score=summary.score,
                 )
             )
         return top_variants
@@ -483,15 +906,116 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         result: BenchmarkVariantResult,
     ) -> StoredBenchmarkResult:
         tested_table_ddl = result.tested_table_ddl or tested_table_ddl_fallback
+        phase, resolved_phase_name = self._resolve_phase_metadata(variant_mode)
+        if isinstance(variant_params, dict):
+            phase_name_from_params = variant_params.get("phase_name")
+            if phase_name_from_params is not None and str(phase_name_from_params).strip():
+                resolved_phase_name = str(phase_name_from_params).strip()
+        parent_variant_table = self._extract_parent_variant_table(variant_params)
+        parent_id: Optional[str] = None
+        if parent_variant_table:
+            parent_id = self._resolve_parent_result_id(
+                benchmark_run_id=benchmark_run_id,
+                benchmark_id=benchmark_id,
+                source_database=source_database,
+                source_table=source_table,
+                parent_variant_table=parent_variant_table,
+            )
+
+        tested_insert_metrics_json = (
+            result.tested_table_insert_metrics_json
+            or self._build_insert_metrics_json(
+                time_ms_measurements=result.tested_table_insert_time_ms_measurements,
+                time_ms_percentiles=result.tested_table_insert_time_ms_measurements_percentiles,
+                time_ms_speedup_percentiles=(
+                    result.tested_table_insert_time_ms_measurements_percentiles_speed_up_coefs
+                ),
+                rows_per_second_measurements=(
+                    result.tested_table_insert_rows_per_second_measurements
+                ),
+                rows_per_second_percentiles=(
+                    result.tested_table_insert_rows_per_second_measurements_percentiles
+                ),
+                bytes_per_second_measurements=(
+                    result.tested_table_insert_bytes_per_second_measurements
+                ),
+                bytes_per_second_measurements_readable=(
+                    result.tested_table_insert_bytes_per_second_measurements_readable
+                ),
+                bytes_per_second_percentiles=(
+                    result.tested_table_insert_bytes_per_second_measurements_percentiles
+                ),
+                bytes_per_second_percentiles_readable=(
+                    result.tested_table_insert_bytes_per_second_measurements_percentiles_readable
+                ),
+            )
+        )
+        source_insert_metrics_json = (
+            result.source_table_insert_metrics_json
+            or self._build_insert_metrics_json(
+                time_ms_measurements=result.source_table_insert_time_ms_measurements,
+                time_ms_percentiles=result.source_table_insert_time_ms_measurements_percentiles,
+                time_ms_speedup_percentiles=[],
+                rows_per_second_measurements=(
+                    result.source_table_insert_rows_per_second_measurements
+                ),
+                rows_per_second_percentiles=(
+                    result.source_table_insert_rows_per_second_measurements_percentiles
+                ),
+                bytes_per_second_measurements=(
+                    result.source_table_insert_bytes_per_second_measurements
+                ),
+                bytes_per_second_measurements_readable=(
+                    result.source_table_insert_bytes_per_second_measurements_readable
+                ),
+                bytes_per_second_percentiles=(
+                    result.source_table_insert_bytes_per_second_measurements_percentiles
+                ),
+                bytes_per_second_percentiles_readable=(
+                    result.source_table_insert_bytes_per_second_measurements_percentiles_readable
+                ),
+            )
+        )
+        tested_select_metrics_json = self._to_query_keyed_json_map(
+            result.tested_table_select_metrics_by_query_json
+        )
+        source_select_metrics_json = self._to_query_keyed_json_map(
+            result.source_table_select_metrics_by_query_json
+        )
+        tested_select_speedup_by_query_json = self._to_query_keyed_json_map(
+            result.tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json
+        )
+        size_bytes_total = (
+            result.tested_table_consumed_compressed_size_bytes_with_indexes
+            if result.tested_table_consumed_compressed_size_bytes_with_indexes is not None
+            else result.tested_table_consumed_compressed_size_bytes_overall
+        )
+        size_bytes_by_column_json = (
+            result.tested_table_consumed_compressed_size_bytes_by_each_column
+            or result.tested_table_cols_sizes
+        )
+        size_bytes_indexes_json = result.tested_table_indexes_sizes
 
         return StoredBenchmarkResult(
             benchmark_run_id=benchmark_run_id,
             benchmark_started_at=benchmark_started_at,
             benchmark_id=benchmark_id,
             id=result.id or str(uuid4()),
+            parent_id=parent_id,
+            phase=phase,
+            phase_name=resolved_phase_name,
+            started_at=benchmark_started_at,
+            finished_at=datetime.now(timezone.utc),
             source_db_name=source_database,
             source_table_name=source_table,
             tested_table_ddl=tested_table_ddl,
+            variant_params_json=json.dumps(
+                variant_params,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                default=str,
+            ),
             source_table_ddl=result.source_table_ddl or source_table_ddl_fallback,
             is_source_table_copy=result.is_source_table_copy,
             index_params=result.index_params,
@@ -550,74 +1074,16 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             source_table_insert_bytes_per_second_measurements_percentiles_readable=list(
                 result.source_table_insert_bytes_per_second_measurements_percentiles_readable
             ),
-            tested_table_insert_metrics_json=(
-                result.tested_table_insert_metrics_json
-                or self._build_insert_metrics_json(
-                    time_ms_measurements=result.tested_table_insert_time_ms_measurements,
-                    time_ms_percentiles=result.tested_table_insert_time_ms_measurements_percentiles,
-                    time_ms_speedup_percentiles=(
-                        result.tested_table_insert_time_ms_measurements_percentiles_speed_up_coefs
-                    ),
-                    rows_per_second_measurements=(
-                        result.tested_table_insert_rows_per_second_measurements
-                    ),
-                    rows_per_second_percentiles=(
-                        result.tested_table_insert_rows_per_second_measurements_percentiles
-                    ),
-                    bytes_per_second_measurements=(
-                        result.tested_table_insert_bytes_per_second_measurements
-                    ),
-                    bytes_per_second_measurements_readable=(
-                        result.tested_table_insert_bytes_per_second_measurements_readable
-                    ),
-                    bytes_per_second_percentiles=(
-                        result.tested_table_insert_bytes_per_second_measurements_percentiles
-                    ),
-                    bytes_per_second_percentiles_readable=(
-                        result.tested_table_insert_bytes_per_second_measurements_percentiles_readable
-                    ),
-                )
-            ),
-            source_table_insert_metrics_json=(
-                result.source_table_insert_metrics_json
-                or self._build_insert_metrics_json(
-                    time_ms_measurements=result.source_table_insert_time_ms_measurements,
-                    time_ms_percentiles=result.source_table_insert_time_ms_measurements_percentiles,
-                    time_ms_speedup_percentiles=[],
-                    rows_per_second_measurements=(
-                        result.source_table_insert_rows_per_second_measurements
-                    ),
-                    rows_per_second_percentiles=(
-                        result.source_table_insert_rows_per_second_measurements_percentiles
-                    ),
-                    bytes_per_second_measurements=(
-                        result.source_table_insert_bytes_per_second_measurements
-                    ),
-                    bytes_per_second_measurements_readable=(
-                        result.source_table_insert_bytes_per_second_measurements_readable
-                    ),
-                    bytes_per_second_percentiles=(
-                        result.source_table_insert_bytes_per_second_measurements_percentiles
-                    ),
-                    bytes_per_second_percentiles_readable=(
-                        result.source_table_insert_bytes_per_second_measurements_percentiles_readable
-                    ),
-                )
-            ),
+            tested_table_insert_metrics_json=tested_insert_metrics_json,
+            source_table_insert_metrics_json=source_insert_metrics_json,
+            insert_metrics_json=tested_insert_metrics_json,
             tested_table_select_test_query=result.tested_table_select_test_query,
             source_table_select_test_query=result.source_table_select_test_query,
-            # Храним per-query summary в основной таблице как JSON-map:
-            #   query_id -> per-query metrics.
-            tested_table_select_metrics_by_query_json=self._to_query_keyed_json_map(
-                result.tested_table_select_metrics_by_query_json
-            ),
-            source_table_select_metrics_by_query_json=self._to_query_keyed_json_map(
-                result.source_table_select_metrics_by_query_json
-            ),
+            select_metrics_json=tested_select_metrics_json,
+            tested_table_select_metrics_by_query_json=tested_select_metrics_json,
+            source_table_select_metrics_by_query_json=source_select_metrics_json,
             tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json=(
-                self._to_query_keyed_json_map(
-                    result.tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json
-                )
+                tested_select_speedup_by_query_json
             ),
             tested_table_consumed_compressed_size_bytes_by_each_column=(
                 result.tested_table_consumed_compressed_size_bytes_by_each_column
@@ -649,6 +1115,9 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             ),
             source_table_n_rows_in_size_test=result.source_table_n_rows_in_size_test,
             tested_table_n_rows_in_size_test=result.tested_table_n_rows_in_size_test,
+            size_bytes_total=size_bytes_total,
+            size_bytes_by_column_json=size_bytes_by_column_json,
+            size_bytes_indexes_json=size_bytes_indexes_json,
             tested_table_cols_sizes=result.tested_table_cols_sizes,
             tested_table_indexes_sizes=result.tested_table_indexes_sizes,
             tested_table_indexes_sizes_percent_from_col_size=(
@@ -658,6 +1127,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             variant_table=variant_table,
             variant_mode=variant_mode,
             variant_params=variant_params,
+            rank_in_phase=None,
+            is_top_n=False,
             score_calculation_json=result.score_calculation_json,
             score=result.score,
         )
@@ -776,6 +1247,204 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             return default
         return normalized
 
+    @classmethod
+    def _resolve_phase_metadata(cls, variant_mode: str) -> tuple[Optional[int], Optional[str]]:
+        """Определяет phase/phase_name по `variant_mode`."""
+        normalized_mode = str(variant_mode or "").strip()
+        if not normalized_mode:
+            return None, None
+        phase = cls._PHASE_BY_VARIANT_MODE.get(normalized_mode)
+        phase_name = cls._PHASE_NAME_BY_VARIANT_MODE.get(normalized_mode, normalized_mode)
+        return phase, phase_name
+
+    @staticmethod
+    def _extract_parent_variant_table(variant_params: Dict[str, Any]) -> Optional[str]:
+        """Пытается извлечь parent variant table из `variant_params`."""
+        if not isinstance(variant_params, dict):
+            return None
+        for key in ("parent_variant_table", "parent_variant", "parent_table"):
+            value = variant_params.get(key)
+            if value is None:
+                continue
+            normalized = str(value).strip()
+            if normalized:
+                return normalized
+        return None
+
+    def _resolve_parent_result_id(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        parent_variant_table: str,
+    ) -> Optional[str]:
+        """Ищет `id` parent-результата по `parent_variant_table` в рамках того же run/table."""
+        rows = self._execute(
+            f"""
+            SELECT id
+            FROM `{self._database}`.`{self._table}`
+            WHERE benchmark_run_id = %(benchmark_run_id)s
+              AND benchmark_id = %(benchmark_id)s
+              AND source_db_name = %(source_database)s
+              AND source_table_name = %(source_table)s
+              AND variant_table = %(parent_variant_table)s
+            ORDER BY finished_at DESC, benchmark_started_at DESC, id DESC
+            LIMIT 1
+            """,
+            {
+                "benchmark_run_id": benchmark_run_id,
+                "benchmark_id": benchmark_id,
+                "source_database": source_database,
+                "source_table": source_table,
+                "parent_variant_table": parent_variant_table,
+            },
+        )
+        if not rows:
+            return None
+        value = rows[0][0]
+        return str(value) if value is not None else None
+
+    def _resolve_top_n_winners(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+    ) -> int:
+        """Возвращает top_n_winners из benchmark_runs (fallback=1)."""
+        rows = self._execute(
+            f"""
+            SELECT top_n_winners
+            FROM `{self._database}`.`{self._runs_table}`
+            WHERE benchmark_run_id = %(benchmark_run_id)s
+              AND benchmark_id = %(benchmark_id)s
+              AND source_db_name = %(source_database)s
+              AND source_table_name = %(source_table)s
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            {
+                "benchmark_run_id": benchmark_run_id,
+                "benchmark_id": benchmark_id,
+                "source_database": source_database,
+                "source_table": source_table,
+            },
+        )
+        if not rows or rows[0][0] is None:
+            return 1
+        try:
+            value = int(rows[0][0])
+        except Exception:
+            return 1
+        return max(1, value)
+
+    def _recalculate_phase_ranking(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        phase: int,
+    ) -> None:
+        """Пересчитывает `rank_in_phase`/`is_top_n` для выбранной phase."""
+        rows = self._execute(
+            f"""
+            SELECT id, score
+            FROM `{self._database}`.`{self._table}`
+            WHERE benchmark_run_id = %(benchmark_run_id)s
+              AND benchmark_id = %(benchmark_id)s
+              AND source_db_name = %(source_database)s
+              AND source_table_name = %(source_table)s
+              AND phase = %(phase)s
+            """,
+            {
+                "benchmark_run_id": benchmark_run_id,
+                "benchmark_id": benchmark_id,
+                "source_database": source_database,
+                "source_table": source_table,
+                "phase": int(phase),
+            },
+        )
+        if not rows:
+            return
+
+        top_n_winners = self._resolve_top_n_winners(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+        )
+        ranked_rows = sorted(
+            rows,
+            key=lambda row: (
+                row[1] is None,
+                -(float(row[1]) if row[1] is not None else 0.0),
+                str(row[0]),
+            ),
+        )
+        for rank_index, (row_id, _) in enumerate(ranked_rows, start=1):
+            self._execute(
+                f"""
+                ALTER TABLE `{self._database}`.`{self._table}`
+                UPDATE
+                    rank_in_phase = %(rank_in_phase)s,
+                    is_top_n = %(is_top_n)s
+                WHERE benchmark_run_id = %(benchmark_run_id)s
+                  AND benchmark_id = %(benchmark_id)s
+                  AND source_db_name = %(source_database)s
+                  AND source_table_name = %(source_table)s
+                  AND phase = %(phase)s
+                  AND id = %(id)s
+                SETTINGS mutations_sync = 1
+                """,
+                {
+                    "rank_in_phase": rank_index,
+                    "is_top_n": rank_index <= top_n_winners,
+                    "benchmark_run_id": benchmark_run_id,
+                    "benchmark_id": benchmark_id,
+                    "source_database": source_database,
+                    "source_table": source_table,
+                    "phase": int(phase),
+                    "id": str(row_id),
+                },
+            )
+
+    @staticmethod
+    def _build_run_record_id(
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+    ) -> str:
+        """Строит стабильный идентификатор строки benchmark_runs."""
+        return (
+            f"{benchmark_run_id}:{benchmark_id}:"
+            f"{source_database}.{source_table}"
+        )
+
+    @staticmethod
+    def _to_naive_utc_datetime(value: Optional[datetime]) -> Optional[datetime]:
+        """Приводит datetime к naive UTC для ClickHouse DateTime64."""
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+    @staticmethod
+    def _to_aware_utc_datetime(value: Any) -> datetime:
+        """Нормализует дату/время из ClickHouse к aware UTC datetime."""
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+        return datetime.now(timezone.utc)
+
     def _insert_record(self, record: StoredBenchmarkResult) -> None:
         row_map = self._record_to_clickhouse_map(record)
         row = tuple(row_map[column] for column in self._INSERT_COLUMNS)
@@ -784,15 +1453,25 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             data=[row],
             column_names=self._INSERT_COLUMNS,
         )
+        if record.phase is not None:
+            self._recalculate_phase_ranking(
+                benchmark_run_id=record.benchmark_run_id,
+                benchmark_id=record.benchmark_id,
+                source_database=record.source_db_name,
+                source_table=record.source_table_name,
+                phase=int(record.phase),
+            )
 
     def _record_to_clickhouse_map(self, record: StoredBenchmarkResult) -> Dict[str, Any]:
-        started_at_utc = record.benchmark_started_at
-        if started_at_utc.tzinfo is not None:
-            started_at_utc = started_at_utc.astimezone(timezone.utc).replace(tzinfo=None)
+        benchmark_started_at_utc = self._to_naive_utc_datetime(record.benchmark_started_at)
+        started_at_utc = self._to_naive_utc_datetime(record.started_at)
+        finished_at_utc = self._to_naive_utc_datetime(record.finished_at)
 
         row_map = {
             **record.model_dump(),
-            "benchmark_started_at": started_at_utc,
+            "benchmark_started_at": benchmark_started_at_utc,
+            "started_at": started_at_utc,
+            "finished_at": finished_at_utc,
             "variant_params": json.dumps(
                 record.variant_params,
                 ensure_ascii=False,

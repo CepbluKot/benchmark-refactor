@@ -30,6 +30,7 @@
 2. `indexes_strategy`
 3. `combined_strategy`
 4. `sequential_topn_strategy`
+5. `sequential_phased_topn_strategy`
 
 Маппинг в `src/models.py`:
 
@@ -37,6 +38,7 @@
 2. `indexes_strategy -> indexes`
 3. `combined_strategy -> combined`
 4. `sequential_topn_strategy -> sequential`
+5. `sequential_phased_topn_strategy -> sequential`
 
 ## 3) Архитектура выполнения (planner -> engine -> runner)
 
@@ -157,47 +159,62 @@
 `VariantJob` содержит:
 1. `scoring` — стратегия вычисления variant score (`builtin`/`expression`), уже с учётом table-level override.
 
-Ключевой формат хранения (`StoredBenchmarkResult`):
+Хранение результатов в ClickHouse:
 
-1. run-метаданные: `benchmark_run_id`, `benchmark_started_at`, `benchmark_id`.
-2. таблица/вариант: `source_db_name`, `source_table_name`, `variant_table`, `variant_mode`.
-3. параметры варианта: `variant_params` (нормализованный JSON-словарь из `VariantMeta`).
-4. `index_params` оставлен как legacy nullable-колонка; новые данные параметров индексов/типов хранятся в `variant_params`.
-5. DDL-снимки: `tested_table_ddl` (обязательный), `source_table_ddl` (опциональный).
-6. метрики размера:
-   - `tested_table_consumed_compressed_size_bytes_overall` (данные без индексов),
-   - `tested_table_consumed_compressed_size_bytes_with_indexes` (данные + размеры skip-индексов).
-7. extended combined-метрики: insert/select/compression/indexes поля + `extra_json`.
-8. per-query select-метрики хранятся в основной таблице в JSON-полях
-   `tested_table_select_metrics_by_query_json`,
-   `source_table_select_metrics_by_query_json`,
-   `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json`
-   в формате map `query_id -> metrics`.
-9. legacy select-агрегаты удалены из ClickHouse-схемы результатов:
-   `tested_table_select_time_ms_measurements`,
-   `source_table_select_time_ms_measurements`,
-   `tested_table_select_time_ms_measurements_percentiles`,
-   `source_table_select_time_ms_measurements_percentiles`,
-   `tested_table_select_time_ms_measurements_percentiles_speed_up_coefs`,
-   `tested_table_select_rows_per_second_measurements`,
-   `source_table_select_rows_per_second_measurements`,
-   `tested_table_select_rows_per_second_measurements_percentiles`,
-   `source_table_select_rows_per_second_measurements_percentiles`,
-   `tested_table_select_bytes_per_second_measurements`,
-   `tested_table_select_bytes_per_second_measurements_readable`,
-   `source_table_select_bytes_per_second_measurements`,
-   `source_table_select_bytes_per_second_measurements_readable`,
-   `tested_table_select_bytes_per_second_measurements_percentiles`,
-   `tested_table_select_bytes_per_second_measurements_percentiles_readable`,
-   `source_table_select_bytes_per_second_measurements_percentiles`,
-   `source_table_select_bytes_per_second_measurements_percentiles_readable`.
-   `ClickHouseBenchmarkResultStore.ensure_schema()` делает `DROP COLUMN IF EXISTS`
-   для этих колонок на уже существующей таблице.
-10. SQL-значения перед сохранением форматируются:
+1. Таблица `benchmark_runs`:
+   - run-level метаданные: `id`, `started_at`, `finished_at`;
+   - источник: `source_db_name`, `source_table_name`, `source_table_ddl`, `total_rows`;
+   - конфиг/контекст: `benchmark_queries`, `score_weights`, `top_n_winners`, `config_json`.
+
+2. Таблица `benchmark_results`:
+   - идентификация/lineage: `id`, `benchmark_run_id`, `parent_id`, `phase`, `phase_name`;
+   - время выполнения: `started_at`, `finished_at`;
+   - вариант: `variant_params_json`, `tested_table_ddl`;
+   - агрегированные JSON-метрики: `size_bytes_total`, `size_bytes_by_column_json`,
+     `size_bytes_indexes_json`, `select_metrics_json`, `insert_metrics_json`;
+   - ранжирование: `score`, `rank_in_phase`, `is_top_n`.
+
+3. Для backward compatibility также сохраняются legacy/расширенные поля
+   (`variant_params`, `index_params`, combined insert/select/compression/indexes и `extra_json`).
+
+4. per-query select-метрики хранятся как map `query_id -> metrics` и доступны как
+   `tested_table_select_metrics_by_query_json`, `source_table_select_metrics_by_query_json`,
+   `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json`.
+
+5. SQL-значения перед сохранением форматируются:
    - scalar-поля `*_ddl`, `*_query`;
    - query-поля внутри JSON-метрик (`query`, `source_query`, `warmup_queries`).
-11. итог: `score` и `score_calculation_json` (детали формулы/контекста/статуса расчёта);
-   для top-N DDL восстанавливается из `tested_table_ddl`.
+
+6. итоговые значения: `score` и `score_calculation_json`.
+
+Примеры аналитики по новой схеме:
+
+```sql
+-- Финальный DDL победителя
+SELECT tested_table_ddl
+FROM benchmark_results
+WHERE benchmark_run_id = 123
+  AND phase = 5
+  AND rank_in_phase = 1
+```
+
+```sql
+-- Lineage победителя по parent_id
+WITH RECURSIVE lineage AS (
+    SELECT *
+    FROM benchmark_results
+    WHERE benchmark_run_id = 123
+      AND phase = 5
+      AND rank_in_phase = 1
+    UNION ALL
+    SELECT r.*
+    FROM benchmark_results r
+    JOIN lineage l ON r.id = l.parent_id
+)
+SELECT phase, phase_name, score, size_bytes_total, variant_params_json
+FROM lineage
+ORDER BY phase
+```
 
 В `src/benchmark_runtime/types.py` есть helper `build_variant_params(...)`,
 который собирает стабильные параметры текущего варианта из `VariantMeta`.
@@ -216,8 +233,8 @@
 5. Снимает baseline insert-метрики через `_measure_insert(...)`.
 6. Снимает baseline select-метрики через `_measure_select_queries(...)` с режимами:
    - `cache_mode=warm`: query-level warmup и серия замеров;
-   - `cache_mode=cold`: перед каждым замером сбрасывает
-     `SYSTEM DROP MARK CACHE` и `SYSTEM DROP UNCOMPRESSED CACHE`.
+   - `cache_mode=cold`: перед каждым замером запрос дополняется
+     `SETTINGS use_uncompressed_cache = 0`.
 7. Дополнительно сохраняет per-query source select-метрики (`source_table_select_metrics_by_query`).
 8. Возвращает baseline-метрики в `SourceBenchmarkResult.metrics`.
 9. Всегда удаляет временную baseline-таблицу в `finally`.
@@ -321,6 +338,28 @@ Baseline исходного DDL для них уже выполнен runner-о�
 2. `sequential_types_top_n_for_indexes > 0`.
 3. store должен корректно вернуть top type-варианты.
 
+### 6.3 Sequential phased top-N стратегия
+
+`SequentialPhasedTopNTableExecutionStrategy` (`src/benchmark_runtime/implementations/table_strategy/sequential_phased_topn.py`):
+
+1. Фаза `order_by`: перебор кандидатов ORDER BY и отбор top-N.
+2. Фаза `types`: независимая оптимизация типов по колонкам + валидация собранного кандидата.
+3. Фаза `codecs`: независимая оптимизация кодеков по колонкам + валидация.
+4. Фаза `indexes`: независимая оптимизация skip-индексов по колонкам + валидация.
+5. Фаза `final_validation`: финальный прогон top-N и выбор победителя.
+6. Между фазами стратегия читает результаты через `result_store.list_variant_summaries(...)`.
+7. Для конфигурации ORDER BY-фазы добавлены поля:
+   - `order_by_first`
+   - `order_by_candidates`
+   - и rules-блок:
+     - `order_by_rules.first_column`
+     - `order_by_rules.candidates`
+     - `order_by_rules.auto_generate_candidates`
+8. Для index-фазы поддержан микс перебора:
+   - index-level `granularity` (в т.ч. массив `granularity`);
+   - `SETTINGS index_granularity` через глобальные/локальные `index_granularity_values`
+     и/или index-level `index_granularity_values`.
+
 ## 7) JSON-конфиг и валидация
 
 Контракт описан в `src/models.py`.
@@ -348,6 +387,12 @@ Baseline исходного DDL для них уже выполнен runner-о�
 19. `scoring`
 20. `table_rules[]` (локальные override, включая `strategy` и `test_database`)
 
+Правило по `databases`/`tables`:
+1. Если `tables` задан map-форматом (`{db: "*"|[tables]}`), `databases`
+   обычно не задают, чтобы не дублировать селектор.
+2. Если оба поля заданы, они должны быть консистентны:
+   каждый ключ `tables` должен входить в `databases`.
+
 Дополнительно для `queries.test_queries[]`:
 1. `query` — SQL-шаблон (поддерживаются `{table}` и `{benchmark_id}`).
 2. `query_id` — стабильный идентификатор запроса (если не задан, генерируется автоматически).
@@ -360,6 +405,17 @@ Baseline исходного DDL для них уже выполнен runner-о�
 Дополнительно для `column_rules[]`:
 1. `auto_generate_alternatives` (`false` по умолчанию) — включает legacy-автогенерацию type+codec.
 2. `auto_compressions_datatype` (опционально) — hint datatype для preprocessings.
+
+Дополнительно для `codec_rules[]`:
+1. Отдельный блок только для codec-альтернатив (`by_type`/`by_name`).
+2. Поддерживает `auto_generate_alternatives` и `auto_compressions_datatype`.
+3. На этапе resolve автоматически merge-ится с `column_rules[]` по matcher-ключу.
+
+Дополнительно для `order_by_rules`:
+1. `first_column` — фиксированная первая колонка ORDER BY.
+2. `candidates` — явные кандидаты для ORDER BY хвоста.
+3. `auto_generate_candidates` (`true` по умолчанию) — включает авто-добавление
+   кандидатов из исходного ORDER BY и из WHERE-фильтров query-плана.
 
 Дополнительно для `index_rules[]`:
 1. `auto_generate_indexes` (`false` по умолчанию) — включает автогенерацию skip-индексов по типу.
@@ -570,6 +626,9 @@ Baseline исходного DDL для них уже выполнен runner-о�
 
 1. `databases`: `"*"` или список.
 2. `tables`: `"*"`, список, или map `{db: "*"|[tables]}`.
+3. Если `tables` — map, `databases` можно опустить (предпочтительно, без дублей).
+4. Если `databases` и `tables` заданы вместе, map-ключи `tables`
+   не должны выходить за `databases`.
 
 `TableSelector`:
 

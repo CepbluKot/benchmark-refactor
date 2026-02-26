@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import heapq
 import logging
 import os
 from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
@@ -44,6 +43,7 @@ from src.benchmark_runtime.table_strategy import (
     CombinedTableExecutionStrategy,
     DefaultTableExecutionStrategy,
     IndexesTableExecutionStrategy,
+    SequentialPhasedTopNTableExecutionStrategy,
     SequentialTopNTableExecutionStrategy,
     TableExecutionStrategy,
     TypesTableExecutionStrategy,
@@ -435,6 +435,27 @@ class BenchmarkPlanner:
                     benchmark=benchmark,
                     table_rule=table_rule,
                 )
+                order_by_first = (
+                    table_rule.order_by_first
+                    if table_rule and table_rule.order_by_first is not None
+                    else benchmark.order_by_first
+                )
+                order_by_candidates = (
+                    list(table_rule.order_by_candidates)
+                    if table_rule and table_rule.order_by_candidates is not None
+                    else (
+                        list(benchmark.order_by_candidates)
+                        if benchmark.order_by_candidates is not None
+                        else None
+                    )
+                )
+                if order_by_first is None:
+                    order_by_first = resolved_rules.order_by_first
+                if order_by_candidates is None and resolved_rules.order_by_candidates is not None:
+                    order_by_candidates = list(resolved_rules.order_by_candidates)
+                order_by_auto_generate_candidates = (
+                    resolved_rules.order_by_auto_generate_candidates
+                )
 
                 yield TableBenchmarkPlan(
                     benchmark_id=benchmark.id,
@@ -456,6 +477,9 @@ class BenchmarkPlanner:
                     max_index_benchmarks=max_index_benchmarks,
                     index_granularity_values=index_granularity_values,
                     column_order_mode=column_order_mode,
+                    order_by_first=order_by_first,
+                    order_by_candidates=order_by_candidates,
+                    order_by_auto_generate_candidates=order_by_auto_generate_candidates,
                     scoring=scoring,
                     rules=resolved_rules,
                     queries=queries,
@@ -957,6 +981,7 @@ class BenchmarkRunner:
             "indexes_strategy": IndexesTableExecutionStrategy(),
             "combined_strategy": CombinedTableExecutionStrategy(),
             "sequential_topn_strategy": SequentialTopNTableExecutionStrategy(),
+            "sequential_phased_topn_strategy": SequentialPhasedTopNTableExecutionStrategy(),
         }
         if table_execution_strategies:
             for strategy_key, strategy in table_execution_strategies.items():
@@ -1031,9 +1056,25 @@ class BenchmarkRunner:
             run_started_at.isoformat(),
             list(benchmark_ids) if benchmark_ids else "all",
         )
-        global_progress_total = self._estimate_global_progress_target(
-            benchmark_ids=benchmark_ids
-        )
+        raw_fixed_global_progress = os.getenv("BENCH_GLOBAL_PROGRESS_FIXED_TOTAL")
+        if raw_fixed_global_progress is None or not raw_fixed_global_progress.strip():
+            fixed_global_progress_enabled = True
+        else:
+            fixed_global_progress_enabled = (
+                raw_fixed_global_progress.strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
+        global_progress_total: Optional[int] = None
+        if fixed_global_progress_enabled:
+            global_progress_total = self._estimate_global_progress_target(
+                benchmark_ids=benchmark_ids
+            )
+            logger.info(
+                "BenchmarkRunner: global progress mode=fixed (target=%d)",
+                global_progress_total,
+            )
+        else:
+            logger.info("BenchmarkRunner: global progress mode=dynamic")
         open_global_progress_hook = getattr(
             self._execution_adapter,
             "open_global_progress_scope",
@@ -1076,6 +1117,12 @@ class BenchmarkRunner:
                     benchmark_started_at=run_started_at,
                 )
                 try:
+                    self._register_benchmark_run_start_if_supported(
+                        table_plan=table_plan,
+                        benchmark_run_id=run_id,
+                        benchmark_started_at=run_started_at,
+                        source_benchmark=self._active_source_benchmark,
+                    )
                     if self._is_source_benchmark_skipped(self._active_source_benchmark):
                         logger.warning(
                             "BenchmarkRunner: table plan пропущен, baseline сообщил skip "
@@ -1102,6 +1149,10 @@ class BenchmarkRunner:
                         table_plan.table,
                     )
                 finally:
+                    self._register_benchmark_run_finish_if_supported(
+                        table_plan=table_plan,
+                        benchmark_run_id=run_id,
+                    )
                     finalize_progress_hook = getattr(
                         self._execution_adapter,
                         "finalize_progress_scope",
@@ -1193,6 +1244,93 @@ class BenchmarkRunner:
             result.score,
         )
         return result
+
+    def _register_benchmark_run_start_if_supported(
+        self,
+        *,
+        table_plan: TableBenchmarkPlan,
+        benchmark_run_id: int,
+        benchmark_started_at: datetime,
+        source_benchmark: SourceBenchmarkResult,
+    ) -> None:
+        """Регистрирует run-контекст (если store это поддерживает)."""
+        if self._result_store is None:
+            return
+        metrics = source_benchmark.metrics or {}
+        query_metrics = metrics.get("source_table_select_metrics_by_query", []) or []
+        benchmark_queries: list[Query] = []
+        for idx, payload in enumerate(query_metrics):
+            if not isinstance(payload, dict):
+                continue
+            query_text = str(payload.get("query", "")).strip()
+            if not query_text:
+                continue
+            select_operations_count: Optional[int] = None
+            raw_select_operations_count = payload.get("select_operations_count")
+            if raw_select_operations_count is not None:
+                try:
+                    select_operations_count = int(raw_select_operations_count)
+                except Exception:
+                    select_operations_count = None
+            benchmark_queries.append(
+                Query(
+                    query_id=str(payload.get("query_id") or f"query_{idx}"),
+                    query=query_text,
+                    cache_mode=str(payload.get("cache_mode") or "warm"),
+                    select_operations_count=select_operations_count,
+                    warmup_queries=[
+                        str(item)
+                        for item in (payload.get("warmup_queries") or [])
+                        if str(item).strip()
+                    ],
+                )
+            )
+        total_rows = metrics.get("total_n_rows_in_source_table")
+        normalized_total_rows = int(total_rows) if total_rows is not None else None
+        try:
+            self._result_store.register_benchmark_run_start(
+                benchmark_run_id=benchmark_run_id,
+                benchmark_started_at=benchmark_started_at,
+                table_plan=table_plan,
+                source_table_ddl=source_benchmark.source_table_ddl,
+                benchmark_queries=benchmark_queries,
+                total_rows=normalized_total_rows,
+                scoring=table_plan.scoring,
+            )
+        except Exception:
+            logger.exception(
+                "BenchmarkRunner: ошибка register_benchmark_run_start "
+                "(run_id=%d, benchmark=%s, table=%s.%s)",
+                benchmark_run_id,
+                table_plan.benchmark_id,
+                table_plan.database,
+                table_plan.table,
+            )
+
+    def _register_benchmark_run_finish_if_supported(
+        self,
+        *,
+        table_plan: TableBenchmarkPlan,
+        benchmark_run_id: int,
+    ) -> None:
+        """Фиксирует завершение run-контекста (если store это поддерживает)."""
+        if self._result_store is None:
+            return
+        try:
+            self._result_store.register_benchmark_run_finish(
+                benchmark_run_id=benchmark_run_id,
+                table_plan=table_plan,
+                benchmark_finished_at=datetime.now(timezone.utc),
+            )
+        except Exception:
+            logger.exception(
+                "BenchmarkRunner: ошибка register_benchmark_run_finish "
+                "(run_id=%d, benchmark=%s, table=%s.%s)",
+                benchmark_run_id,
+                table_plan.benchmark_id,
+                table_plan.database,
+                table_plan.table,
+            )
 
     def _require_active_source_benchmark(self) -> SourceBenchmarkResult:
         """Возвращает baseline-результат текущего table-plan или падает."""
@@ -1289,17 +1427,12 @@ class BenchmarkRunner:
 
     def _estimate_table_jobs_upper_bound(self, table_plan: TableBenchmarkPlan) -> int:
         """Считает верхнюю оценку числа variant jobs для одного table-plan."""
-        source_ddl, _ = self._engine.prepare_table_context(table_plan)
-        effective_column_order = self._engine.resolve_column_order(
-            table_plan=table_plan,
-            source_ddl=source_ddl,
-        )
         strategy_key = self._canonical_strategy_key(table_plan.strategy)
         if strategy_key == "sequential_topn_strategy":
-            return self._estimate_sequential_topn_jobs_upper_bound(
-                table_plan=table_plan,
-                source_ddl=source_ddl,
-                effective_column_order=effective_column_order,
+            return self._estimate_sequential_topn_jobs_upper_bound(table_plan=table_plan)
+        if strategy_key == "sequential_phased_topn_strategy":
+            return self._estimate_sequential_phased_topn_jobs_upper_bound(
+                table_plan=table_plan
             )
 
         variant_mode: BenchmarkMode = (
@@ -1309,43 +1442,30 @@ class BenchmarkRunner:
             table_plan=table_plan,
             variant_mode=variant_mode,
         )
-        return total_variants(
-            table=source_ddl,
-            mode=variant_mode,
-            column_rules=table_plan.rules.column_rules,
-            index_rules=table_plan.rules.index_rules,
-            column_order=effective_column_order,
-            table_index_granularity_values=table_plan.index_granularity_values,
-            max_iterations=variant_generation_limit,
-        )
+        if variant_generation_limit is None:
+            return max(0, int(table_plan.max_iterations))
+        return max(0, int(variant_generation_limit))
 
     def _estimate_sequential_topn_jobs_upper_bound(
         self,
         *,
         table_plan: TableBenchmarkPlan,
-        source_ddl: TableDDL,
-        effective_column_order: Dict[str, int],
     ) -> int:
         """
         Считает fixed upper bound для `sequential_topn_strategy`.
 
-        Стадия `types` считается точно.
-        Для стадии `indexes` берётся сумма N крупнейших веток индексов среди
-        всех type-вариантов (верхняя оценка относительно реального top-N по score).
+        Для скорости используется лимитный upper bound:
+        `types_limit + min(top_n, types_limit) * indexes_limit`.
         """
         type_generation_limit = self._engine.resolve_variant_generation_limit(
             table_plan=table_plan,
             variant_mode="types",
             job_mode="sequential",
         )
-        type_total = total_variants(
-            table=source_ddl,
-            mode="types",
-            column_rules=table_plan.rules.column_rules,
-            index_rules=table_plan.rules.index_rules,
-            column_order=effective_column_order,
-            max_iterations=type_generation_limit,
-        )
+        if type_generation_limit is None:
+            type_total = max(0, int(table_plan.max_iterations))
+        else:
+            type_total = max(0, int(type_generation_limit))
         if type_total <= 0:
             return 0
 
@@ -1358,31 +1478,59 @@ class BenchmarkRunner:
             variant_mode="indexes",
             job_mode="sequential",
         )
+        if index_generation_limit is None:
+            index_total_per_variant_upper = max(0, int(table_plan.max_iterations))
+        else:
+            index_total_per_variant_upper = max(0, int(index_generation_limit))
 
-        largest_index_counts: list[int] = []
-        for type_variant_ddl, _ in iter_variants(
-            table=source_ddl,
-            mode="types",
-            column_rules=table_plan.rules.column_rules,
-            index_rules=table_plan.rules.index_rules,
-            column_order=effective_column_order,
-            max_iterations=type_generation_limit,
-        ):
-            index_total = total_variants(
-                table=type_variant_ddl,
-                mode="indexes",
-                column_rules=table_plan.rules.column_rules,
-                index_rules=table_plan.rules.index_rules,
-                column_order=effective_column_order,
-                table_index_granularity_values=table_plan.index_granularity_values,
-                max_iterations=index_generation_limit,
+        return type_total + (top_n * index_total_per_variant_upper)
+
+    def _estimate_sequential_phased_topn_jobs_upper_bound(
+        self,
+        *,
+        table_plan: TableBenchmarkPlan,
+    ) -> int:
+        """
+        Считает fixed upper bound для `sequential_phased_topn_strategy`.
+
+        Оценка лимитная (верхняя граница), чтобы не перечислять реальные комбинации:
+          phase1(order_by)
+          + top_n * (phase2(types) + validation)
+          + top_n * (phase3(codecs) + validation)
+          + top_n * (phase4(indexes) + validation)
+          + phase5(final_validation top_n).
+        """
+        top_n = max(1, int(table_plan.sequential_top_n))
+        fallback_limit = max(1, int(table_plan.max_iterations))
+
+        def _stage_limit(variant_mode: str, default_value: int) -> int:
+            resolved = self._engine.resolve_variant_generation_limit(
+                table_plan=table_plan,
+                variant_mode=variant_mode,
+                job_mode="sequential",
             )
-            if len(largest_index_counts) < top_n:
-                heapq.heappush(largest_index_counts, index_total)
-            elif index_total > largest_index_counts[0]:
-                heapq.heapreplace(largest_index_counts, index_total)
+            if resolved is None:
+                return max(1, int(default_value))
+            return max(1, int(resolved))
 
-        return type_total + sum(largest_index_counts)
+        # ORDER BY phase имеет встроенный hard-limit 20 в самой стратегии.
+        order_by_limit = min(_stage_limit("order_by", 20), 20)
+        types_limit = _stage_limit("types", fallback_limit)
+        codecs_limit = _stage_limit("codecs", fallback_limit)
+        indexes_limit = _stage_limit("indexes", fallback_limit)
+        indexes_validation_limit = _stage_limit(
+            "indexes_validation",
+            max(1, len(table_plan.index_granularity_values or [])),
+        )
+        final_validation_limit = min(_stage_limit("final_validation", top_n), top_n)
+
+        return (
+            order_by_limit
+            + top_n * (types_limit + 1)
+            + top_n * (codecs_limit + 1)
+            + top_n * (indexes_limit + indexes_validation_limit)
+            + final_validation_limit
+        )
 
     def _validate_scoring_formulas_before_run(
         self,

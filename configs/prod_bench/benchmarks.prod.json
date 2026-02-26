@@ -7,10 +7,6 @@
       "column_rules_mode": "inline_only",
       "index_rules_mode": "inline_only",
       "column_order_mode": "compressed_size_desc",
-      "databases": [
-        "dm_core_lm",
-        "raw_lm"
-      ],
       "tables": {
         "dm_core_lm": [
           "logs_adqm",

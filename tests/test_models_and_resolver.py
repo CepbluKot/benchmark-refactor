@@ -5,10 +5,12 @@ from pydantic import ValidationError
 from src.models import (
     BenchmarkConfig,
     BenchmarkProjectConfig,
+    CodecRuleConfig,
     ColumnRuleConfig,
     InsertRowsLimitsConfig,
     IndexConfig,
     IndexRuleConfig,
+    OrderByRulesConfig,
     QueriesConfig,
     RuleBankConfig,
     RulesConfig,
@@ -598,6 +600,11 @@ class RuleResolverTests(unittest.TestCase):
                 ColumnRuleConfig(
                     by_type="UInt64",
                     types=["UInt64", "UInt32"],
+                )
+            ],
+            codec_rules=[
+                CodecRuleConfig(
+                    by_type="UInt64",
                     codecs=["CODEC(Delta(8), LZ4)"],
                 )
             ],
@@ -607,6 +614,11 @@ class RuleResolverTests(unittest.TestCase):
                     indexes=[IndexConfig(type="minmax", granularity=4)],
                 )
             ],
+            order_by_rules=OrderByRulesConfig(
+                first_column="event_time",
+                candidates=["user_id", "country"],
+                auto_generate_candidates=False,
+            ),
         )
 
     def test_resolve_uses_default_bank_by_dbms(self) -> None:
@@ -622,6 +634,9 @@ class RuleResolverTests(unittest.TestCase):
         self.assertEqual(len(resolved.column_rules), 1)
         self.assertEqual(len(resolved.index_rules), 1)
         self.assertEqual(resolved.column_order, {"user_id": 1})
+        self.assertEqual(resolved.order_by_first, "event_time")
+        self.assertEqual(resolved.order_by_candidates, ["user_id", "country"])
+        self.assertFalse(resolved.order_by_auto_generate_candidates)
 
     def test_inline_overrides_disable_default_bank_fallback(self) -> None:
         """Проверяет, что inline overrides disable default bank fallback."""
@@ -639,6 +654,9 @@ class RuleResolverTests(unittest.TestCase):
         self.assertEqual(len(resolved.column_rules), 1)
         self.assertEqual(len(resolved.index_rules), 0)
         self.assertEqual(resolved.column_order, {})
+        self.assertIsNone(resolved.order_by_first)
+        self.assertIsNone(resolved.order_by_candidates)
+        self.assertTrue(resolved.order_by_auto_generate_candidates)
 
     def test_merge_local_rules_over_global_field_by_field(self) -> None:
         """Проверяет, что merge local rules over global field by field."""
@@ -664,6 +682,7 @@ class RuleResolverTests(unittest.TestCase):
 
         self.assertEqual(merged.rule_bank, "bank_a")
         self.assertIsNotNone(merged.column_rules)
+        self.assertIsNone(merged.codec_rules)
         self.assertIsNotNone(merged.index_rules)
         self.assertEqual(merged.column_rules[0].by_type, "DateTime")
         self.assertEqual(merged.index_rules[0].by_type, "UInt64")
@@ -677,6 +696,9 @@ class RuleResolverTests(unittest.TestCase):
         self.assertEqual(resolved.column_rules, [])
         self.assertEqual(resolved.index_rules, [])
         self.assertEqual(resolved.column_order, {})
+        self.assertIsNone(resolved.order_by_first)
+        self.assertIsNone(resolved.order_by_candidates)
+        self.assertTrue(resolved.order_by_auto_generate_candidates)
 
     def test_global_bank_only_mode_ignores_inline_rules(self) -> None:
         """Проверяет, что global bank only mode ignores inline rules."""
@@ -706,8 +728,14 @@ class RuleResolverTests(unittest.TestCase):
 
         self.assertEqual(len(resolved.column_rules), 1)
         self.assertEqual(resolved.column_rules[0].by_type, "UInt64")
+        self.assertEqual(
+            resolved.column_rules[0].alternatives.codecs,
+            ["CODEC(Delta(8), LZ4)"],
+        )
         self.assertEqual(len(resolved.index_rules), 1)
         self.assertEqual(resolved.index_rules[0].by_type, "UInt64")
+        self.assertEqual(resolved.order_by_first, "event_time")
+        self.assertFalse(resolved.order_by_auto_generate_candidates)
 
     def test_global_bank_with_inline_priority_prepends_inline(self) -> None:
         """Проверяет, что global bank with inline priority prepends inline."""
@@ -737,6 +765,7 @@ class RuleResolverTests(unittest.TestCase):
 
         self.assertEqual([rule.by_type for rule in resolved.column_rules], ["DateTime", "UInt64"])
         self.assertEqual([rule.by_type for rule in resolved.index_rules], ["DateTime", "UInt64"])
+        self.assertEqual(resolved.order_by_first, "event_time")
 
     def test_inline_only_mode_uses_only_inline_rules(self) -> None:
         """Проверяет, что inline only mode uses only inline rules."""
@@ -768,6 +797,7 @@ class RuleResolverTests(unittest.TestCase):
         self.assertEqual(resolved.column_rules[0].by_type, "DateTime")
         self.assertEqual(len(resolved.index_rules), 1)
         self.assertEqual(resolved.index_rules[0].by_type, "DateTime")
+        self.assertIsNone(resolved.order_by_first)
 
     def test_global_bank_mode_raises_when_global_bank_is_missing(self) -> None:
         """Проверяет, что global bank mode raises when global bank is missing."""
@@ -827,6 +857,75 @@ class RuleResolverTests(unittest.TestCase):
         self.assertIn("Int32", alternatives.types)
         self.assertIn("CODEC(LZ4)", alternatives.codecs)
         self.assertIn("CODEC(Delta, ZSTD(1))", alternatives.codecs)
+
+    def test_codec_rules_merge_into_column_rules_by_matcher(self) -> None:
+        """Проверяет merge `codec_rules` в `column_rules` по matcher."""
+        resolver = RuleResolver(banks={})
+        rules = RulesConfig(
+            column_rules=[
+                ColumnRuleConfig(
+                    by_type="String",
+                    types=["String", "LowCardinality(String)"],
+                )
+            ],
+            codec_rules=[
+                CodecRuleConfig(
+                    by_type="String",
+                    codecs=["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+                )
+            ],
+        )
+
+        resolved = resolver.resolve(rules, dbms="clickhouse")
+        self.assertEqual(len(resolved.column_rules), 1)
+        merged_rule = resolved.column_rules[0]
+        self.assertEqual(merged_rule.by_type, "String")
+        self.assertEqual(merged_rule.alternatives.types, ["String", "LowCardinality(String)"])
+        self.assertEqual(
+            merged_rule.alternatives.codecs,
+            ["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+        )
+
+    def test_codec_rules_auto_generate_adds_codecs(self) -> None:
+        """Проверяет авто-генерацию кодеков через отдельный блок codec_rules."""
+        resolver = RuleResolver(banks={})
+        rules = RulesConfig(
+            codec_rules=[
+                CodecRuleConfig(
+                    by_type="Int32",
+                    auto_generate_alternatives=True,
+                )
+            ]
+        )
+
+        resolved = resolver.resolve(rules, dbms="clickhouse")
+        self.assertEqual(len(resolved.column_rules), 1)
+        codecs = resolved.column_rules[0].alternatives.codecs
+        self.assertIn("CODEC(LZ4)", codecs)
+        self.assertIn("CODEC(Delta, ZSTD(1))", codecs)
+
+    def test_order_by_rules_inline_override_bank_in_priority_mode(self) -> None:
+        """Проверяет частичный override order_by_rules в global_bank_with_inline_priority."""
+        resolver = RuleResolver(
+            banks={"bank_a": self._bank()},
+            default_rule_banks={"clickhouse": "bank_a"},
+        )
+        global_rules = RulesConfig(rule_bank="bank_a")
+        merged = RulesConfig(
+            order_by_rules=OrderByRulesConfig(candidates=["device_type"]),
+        )
+
+        resolved = resolver.resolve(
+            merged,
+            dbms="clickhouse",
+            column_rules_mode="global_bank_with_inline_priority",
+            index_rules_mode="global_bank_with_inline_priority",
+            global_rules=global_rules,
+        )
+
+        self.assertEqual(resolved.order_by_first, "event_time")
+        self.assertEqual(resolved.order_by_candidates, ["device_type"])
+        self.assertFalse(resolved.order_by_auto_generate_candidates)
 
     def test_auto_generate_indexes_uses_by_type_when_indexes_empty(self) -> None:
         """Проверяет fallback на by_type для авто-генерации индексов."""

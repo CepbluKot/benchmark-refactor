@@ -21,6 +21,7 @@ BenchmarkStrategy = Literal[
     "indexes_strategy",
     "combined_strategy",
     "sequential_topn_strategy",
+    "sequential_phased_topn_strategy",
 ]
 SelectQueryCacheMode = Literal["warm", "cold"]
 ScoringMode = Literal["builtin", "expression"]
@@ -40,6 +41,7 @@ STRATEGY_TO_MODE: Dict[BenchmarkStrategy, BenchmarkMode] = {
     "indexes_strategy": "indexes",
     "combined_strategy": "combined",
     "sequential_topn_strategy": "sequential",
+    "sequential_phased_topn_strategy": "sequential",
 }
 
 
@@ -242,6 +244,105 @@ class IndexRuleConfig(_Base):
         return self
 
 
+class CodecRuleConfig(_Base):
+    """
+    JSON-описание одного правила подбора только кодеков для колонки.
+
+    Поддерживает автогенерацию кодеков по legacy-логике (через datatype hint).
+    """
+
+    by_type: Optional[str] = None
+    by_name: Optional[str] = None
+    codecs: List[str] = Field(default_factory=list)
+    auto_generate_alternatives: bool = False
+    auto_compressions_datatype: Optional[str] = None
+
+    @field_validator("auto_compressions_datatype")
+    @classmethod
+    def normalize_auto_compressions_datatype(
+        cls,
+        value: Optional[str],
+    ) -> Optional[str]:
+        """Нормализует hint datatype для legacy-автогенерации кодеков."""
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("auto_compressions_datatype не должен быть пустым")
+        return cleaned
+
+    @model_validator(mode="after")
+    def check_matchers(self) -> "CodecRuleConfig":
+        """Валидирует матчеры как у column rule."""
+        if self.by_name is None and self.by_type is None:
+            raise ValueError("нужно задать хотя бы by_type или by_name")
+        if self.by_name is not None and self.by_type is None:
+            raise ValueError(
+                f"by_name={self.by_name!r} задан без by_type — укажи тип колонки явно"
+            )
+        return self
+
+
+class OrderByRulesConfig(_Base):
+    """Правила генерации кандидатов ORDER BY для phased-стратегии."""
+
+    first_column: Optional[str] = None
+    candidates: Optional[List[str]] = None
+    auto_generate_candidates: Optional[bool] = None
+
+    @field_validator("first_column")
+    @classmethod
+    def non_empty_first_column(cls, value: Optional[str]) -> Optional[str]:
+        """Проверяет, что first_column не пустой, если задан."""
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("order_by_rules.first_column не должен быть пустым")
+        return cleaned
+
+    @field_validator("candidates")
+    @classmethod
+    def normalize_candidates(
+        cls,
+        values: Optional[List[str]],
+    ) -> Optional[List[str]]:
+        """Нормализует и дедуплицирует order_by_rules.candidates."""
+        if values is None:
+            return None
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            candidate = value.strip()
+            if not candidate:
+                raise ValueError(
+                    "order_by_rules.candidates не должен содержать пустые значения"
+                )
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            cleaned.append(candidate)
+        if not cleaned:
+            raise ValueError("order_by_rules.candidates не должен быть пустым")
+        return cleaned
+
+    def merged_over(self, base: Optional["OrderByRulesConfig"]) -> "OrderByRulesConfig":
+        """Объединяет частичный inline override поверх базового блока."""
+        if base is None:
+            return self.model_copy(deep=True)
+        return OrderByRulesConfig(
+            first_column=(
+                self.first_column if self.first_column is not None else base.first_column
+            ),
+            candidates=self.candidates if self.candidates is not None else base.candidates,
+            auto_generate_candidates=(
+                self.auto_generate_candidates
+                if self.auto_generate_candidates is not None
+                else base.auto_generate_candidates
+            ),
+        )
+
+
 class RuleBankConfig(_Base):
     """
     Именованный банк правил.
@@ -250,7 +351,9 @@ class RuleBankConfig(_Base):
     """
 
     column_rules: List[ColumnRuleConfig] = Field(default_factory=list)
+    codec_rules: List[CodecRuleConfig] = Field(default_factory=list)
     index_rules: List[IndexRuleConfig] = Field(default_factory=list)
+    order_by_rules: Optional[OrderByRulesConfig] = None
     column_order: Dict[str, int] = Field(default_factory=dict)
 
 
@@ -260,19 +363,28 @@ class RulesConfig(_Base):
 
     Поддерживает два источника:
       1) ссылка на `rule_bank`;
-      2) inline-переопределения (`column_rules`, `index_rules`, `column_order`).
+      2) inline-переопределения
+         (`column_rules`, `codec_rules`, `index_rules`, `order_by_rules`, `column_order`).
     """
 
     rule_bank: Optional[str] = None
     column_rules: Optional[List[ColumnRuleConfig]] = None
+    codec_rules: Optional[List[CodecRuleConfig]] = None
     index_rules: Optional[List[IndexRuleConfig]] = None
+    order_by_rules: Optional[OrderByRulesConfig] = None
     column_order: Optional[Dict[str, int]] = None
 
     def has_inline_overrides(self) -> bool:
         """True, если задано хотя бы одно inline-поле поверх банка."""
         return any(
             value is not None
-            for value in (self.column_rules, self.index_rules, self.column_order)
+            for value in (
+                self.column_rules,
+                self.codec_rules,
+                self.index_rules,
+                self.order_by_rules,
+                self.column_order,
+            )
         )
 
     def is_empty(self) -> bool:
@@ -291,8 +403,16 @@ class RulesConfig(_Base):
             column_rules=(
                 self.column_rules if self.column_rules is not None else base.column_rules
             ),
+            codec_rules=(
+                self.codec_rules if self.codec_rules is not None else base.codec_rules
+            ),
             index_rules=(
                 self.index_rules if self.index_rules is not None else base.index_rules
+            ),
+            order_by_rules=(
+                self.order_by_rules
+                if self.order_by_rules is not None
+                else base.order_by_rules
             ),
             column_order=(
                 self.column_order if self.column_order is not None else base.column_order
@@ -510,6 +630,7 @@ class TableRuleConfig(_Base):
       - strategy;
       - queries.
       - scoring.
+      - order_by_first / order_by_candidates.
     """
 
     database: str
@@ -580,6 +701,8 @@ class TableRuleConfig(_Base):
         serialization_alias="index_granularity_values",
     )
     strategy: Optional[BenchmarkStrategy] = None
+    order_by_first: Optional[str] = None
+    order_by_candidates: Optional[List[str]] = None
 
     @field_validator("database", "table")
     @classmethod
@@ -599,6 +722,40 @@ class TableRuleConfig(_Base):
         cleaned = value.strip()
         if not cleaned:
             raise ValueError("test_database не должен быть пустым")
+        return cleaned
+
+    @field_validator("order_by_first")
+    @classmethod
+    def non_empty_order_by_first(cls, value: Optional[str]) -> Optional[str]:
+        """Проверяет, что order_by_first не пустой, если задан."""
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("order_by_first не должен быть пустым")
+        return cleaned
+
+    @field_validator("order_by_candidates")
+    @classmethod
+    def normalize_order_by_candidates(
+        cls,
+        values: Optional[List[str]],
+    ) -> Optional[List[str]]:
+        """Нормализует и дедуплицирует order_by_candidates."""
+        if values is None:
+            return None
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            candidate = value.strip()
+            if not candidate:
+                raise ValueError("order_by_candidates не должен содержать пустые значения")
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            cleaned.append(candidate)
+        if not cleaned:
+            raise ValueError("order_by_candidates не должен быть пустым")
         return cleaned
 
     @field_validator("index_granularity_values")
@@ -659,6 +816,8 @@ class BenchmarkConfig(_Base):
       - `index_granularity_values` — перебор `SETTINGS index_granularity`
         (декартово произведение с индексными вариантами).
       - `test_database` — БД для создания variant-таблиц (по умолчанию source БД).
+      - `order_by_first` / `order_by_candidates` — настройки фазы ORDER BY
+        для `sequential_phased_topn_strategy`.
     """
 
     id: str
@@ -736,6 +895,8 @@ class BenchmarkConfig(_Base):
     index_rules_mode: Optional[RuleSourceMode] = None
     queries: QueriesConfig = Field(default_factory=QueriesConfig)
     table_rules: List[TableRuleConfig] = Field(default_factory=list)
+    order_by_first: Optional[str] = None
+    order_by_candidates: Optional[List[str]] = None
 
     @field_validator("test_database")
     @classmethod
@@ -746,6 +907,40 @@ class BenchmarkConfig(_Base):
         cleaned = value.strip()
         if not cleaned:
             raise ValueError("test_database не должен быть пустым")
+        return cleaned
+
+    @field_validator("order_by_first")
+    @classmethod
+    def non_empty_order_by_first(cls, value: Optional[str]) -> Optional[str]:
+        """Проверяет, что order_by_first не пустой, если задан."""
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("order_by_first не должен быть пустым")
+        return cleaned
+
+    @field_validator("order_by_candidates")
+    @classmethod
+    def normalize_order_by_candidates(
+        cls,
+        values: Optional[List[str]],
+    ) -> Optional[List[str]]:
+        """Нормализует и дедуплицирует order_by_candidates."""
+        if values is None:
+            return None
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            candidate = value.strip()
+            if not candidate:
+                raise ValueError("order_by_candidates не должен содержать пустые значения")
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            cleaned.append(candidate)
+        if not cleaned:
+            raise ValueError("order_by_candidates не должен быть пустым")
         return cleaned
 
     @field_validator("index_granularity_values")

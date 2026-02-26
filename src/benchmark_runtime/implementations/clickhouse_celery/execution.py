@@ -50,7 +50,7 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
         connections_by_id: Dict[str, ConnectionConfig],
         result_connections_by_id: Optional[Dict[str, ConnectionConfig]] = None,
         result_database: str = "benchmark_results",
-        result_table: str = "combined_benchmark_results",
+        result_table: str = "benchmark_results",
         celery_app: Any = None,
         source_task_name: str = SOURCE_BENCHMARK_TASK_NAME,
         variant_task_name: str = VARIANT_BENCHMARK_TASK_NAME,

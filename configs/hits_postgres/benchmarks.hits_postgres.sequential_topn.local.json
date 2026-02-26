@@ -7,9 +7,6 @@
       "column_rules_mode": "inline_only",
       "index_rules_mode": "inline_only",
       "column_order_mode": "compressed_size_desc",
-      "databases": [
-        "default"
-      ],
       "tables": {
         "default": [
           "hits_postgres",

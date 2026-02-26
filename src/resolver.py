@@ -19,9 +19,11 @@ from src.datatype_alternatives import (
 from src.index_alternatives import generate_possible_indexes_by_type
 from src.index_rules import IndexAlternatives, IndexRule, IndexVariant
 from src.models import (
+    CodecRuleConfig,
     ColumnRuleConfig,
     IndexConfig,
     IndexRuleConfig,
+    OrderByRulesConfig,
     RuleBankConfig,
     RuleSourceMode,
     RulesConfig,
@@ -188,6 +190,96 @@ def _column_rule_from_config(cfg: ColumnRuleConfig) -> ColumnRule:
     )
 
 
+def _expand_auto_codec_only_alternatives(
+    cfg: CodecRuleConfig,
+    *,
+    codecs: List[str],
+) -> List[str]:
+    """
+    Добавляет legacy-автогенерацию codec альтернатив без генерации типов.
+
+    Используется для отдельного блока `codec_rules`.
+    """
+    if not cfg.auto_generate_alternatives:
+        return codecs
+
+    datatype_hint = cfg.auto_compressions_datatype or cfg.by_type
+    if datatype_hint is None:
+        return codecs
+
+    auto_compressions = generate_possible_compressions_w_preprocessings(datatype_hint)
+    generated = generate_possible_new_datatypes(
+        [datatype_hint],
+        auto_compressions,
+    )
+    auto_codecs = [_normalize_codec_clause(item.codec) for item in generated]
+    return _deduplicate_preserve_order(codecs + auto_codecs)
+
+
+def _codec_rule_as_column_rule_from_config(cfg: CodecRuleConfig) -> ColumnRule:
+    """
+    Конвертирует `CodecRuleConfig` в runtime `ColumnRule` (types остаются пустыми).
+    """
+    codecs = _expand_auto_codec_only_alternatives(
+        cfg,
+        codecs=list(cfg.codecs),
+    )
+    return ColumnRule(
+        by_type=cfg.by_type,
+        by_name=cfg.by_name,
+        alternatives=ColumnAlternatives(
+            types=[],
+            codecs=codecs,
+        ),
+    )
+
+
+def _merge_column_rules_preserve_order(
+    primary_rules: List[ColumnRule],
+    secondary_rules: List[ColumnRule],
+) -> List[ColumnRule]:
+    """
+    Объединяет списки column rules, склеивая правила с одинаковым matcher.
+
+    При совпадении `(by_type, by_name)`:
+      - типы и кодеки объединяются с дедупликацией, порядок сохраняется.
+      - позиция в списке остаётся у первого появления matcher.
+    """
+    merged: list[ColumnRule] = []
+    index_by_matcher: dict[tuple[Optional[str], Optional[str]], int] = {}
+
+    def _append_or_merge(rule: ColumnRule) -> None:
+        key = (rule.by_type, rule.by_name)
+        idx = index_by_matcher.get(key)
+        if idx is None:
+            merged.append(
+                ColumnRule(
+                    by_type=rule.by_type,
+                    by_name=rule.by_name,
+                    alternatives=ColumnAlternatives(
+                        types=list(rule.alternatives.types),
+                        codecs=list(rule.alternatives.codecs),
+                    ),
+                )
+            )
+            index_by_matcher[key] = len(merged) - 1
+            return
+
+        existing = merged[idx]
+        existing.alternatives.types = _deduplicate_preserve_order(
+            list(existing.alternatives.types) + list(rule.alternatives.types)
+        )
+        existing.alternatives.codecs = _deduplicate_preserve_order(
+            list(existing.alternatives.codecs) + list(rule.alternatives.codecs)
+        )
+
+    for rule in primary_rules:
+        _append_or_merge(rule)
+    for rule in secondary_rules:
+        _append_or_merge(rule)
+    return merged
+
+
 def _index_rule_from_config(cfg: IndexRuleConfig) -> IndexRule:
     """Конвертирует `IndexRuleConfig` в runtime `IndexRule`."""
     indexes = _expand_auto_index_alternatives(
@@ -224,12 +316,18 @@ class ResolvedRules:
         column_rules: List[ColumnRule],
         index_rules: List[IndexRule],
         column_order: Dict[str, int],
+        order_by_first: Optional[str] = None,
+        order_by_candidates: Optional[List[str]] = None,
+        order_by_auto_generate_candidates: bool = True,
         source_bank: Optional[str] = None,
     ) -> None:
         """Сохраняет уже разрешённые правила и технический `source_bank` для трассировки."""
         self.column_rules = column_rules
         self.index_rules = index_rules
         self.column_order = column_order
+        self.order_by_first = order_by_first
+        self.order_by_candidates = order_by_candidates
+        self.order_by_auto_generate_candidates = order_by_auto_generate_candidates
         self.source_bank = source_bank
 
     def __repr__(self) -> str:
@@ -239,6 +337,9 @@ class ResolvedRules:
             f"column_rules={len(self.column_rules)}, "
             f"index_rules={len(self.index_rules)}, "
             f"column_order={self.column_order}, "
+            f"order_by_first={self.order_by_first!r}, "
+            f"order_by_candidates={self.order_by_candidates!r}, "
+            f"order_by_auto_generate_candidates={self.order_by_auto_generate_candidates!r}, "
             f"source_bank={self.source_bank!r})"
         )
 
@@ -310,6 +411,18 @@ class RuleResolver:
                 column_rules = [_column_rule_from_config(r) for r in bank.column_rules]
             else:
                 column_rules = []
+            if rules_config.codec_rules is not None:
+                codec_rules = [
+                    _codec_rule_as_column_rule_from_config(r)
+                    for r in rules_config.codec_rules
+                ]
+            elif bank is not None:
+                codec_rules = [
+                    _codec_rule_as_column_rule_from_config(r) for r in bank.codec_rules
+                ]
+            else:
+                codec_rules = []
+            column_rules = _merge_column_rules_preserve_order(column_rules, codec_rules)
 
             if rules_config.index_rules is not None:
                 index_rules = [_index_rule_from_config(r) for r in rules_config.index_rules]
@@ -317,6 +430,13 @@ class RuleResolver:
                 index_rules = [_index_rule_from_config(r) for r in bank.index_rules]
             else:
                 index_rules = []
+
+            if rules_config.order_by_rules is not None:
+                resolved_order_by_rules = rules_config.order_by_rules.model_copy(deep=True)
+            elif bank is not None and bank.order_by_rules is not None:
+                resolved_order_by_rules = bank.order_by_rules.model_copy(deep=True)
+            else:
+                resolved_order_by_rules = None
 
             if rules_config.column_order is not None:
                 column_order = dict(rules_config.column_order)
@@ -330,6 +450,23 @@ class RuleResolver:
                 column_rules=column_rules,
                 index_rules=index_rules,
                 column_order=column_order,
+                order_by_first=(
+                    resolved_order_by_rules.first_column
+                    if resolved_order_by_rules is not None
+                    else None
+                ),
+                order_by_candidates=(
+                    list(resolved_order_by_rules.candidates)
+                    if resolved_order_by_rules is not None
+                    and resolved_order_by_rules.candidates is not None
+                    else None
+                ),
+                order_by_auto_generate_candidates=(
+                    resolved_order_by_rules.auto_generate_candidates
+                    if resolved_order_by_rules is not None
+                    and resolved_order_by_rules.auto_generate_candidates is not None
+                    else True
+                ),
                 source_bank=source_bank,
             )
 
@@ -347,6 +484,7 @@ class RuleResolver:
         column_rules, column_used_bank = self._resolve_column_rules(
             mode=column_rules_mode,
             inline_rules=rules_config.column_rules,
+            inline_codec_rules=rules_config.codec_rules,
             bank=bank,
         )
         index_rules, index_used_bank = self._resolve_index_rules(
@@ -365,13 +503,38 @@ class RuleResolver:
             column_order = {}
             column_order_used_bank = False
 
-        if bank_name is not None and (column_used_bank or index_used_bank or column_order_used_bank):
+        resolved_order_by_rules, order_by_used_bank = self._resolve_order_by_rules(
+            mode=column_rules_mode,
+            inline_rules=rules_config.order_by_rules,
+            bank=bank,
+        )
+
+        if bank_name is not None and (
+            column_used_bank or index_used_bank or column_order_used_bank or order_by_used_bank
+        ):
             source_bank = bank_name
 
         return ResolvedRules(
             column_rules=column_rules,
             index_rules=index_rules,
             column_order=column_order,
+            order_by_first=(
+                resolved_order_by_rules.first_column
+                if resolved_order_by_rules is not None
+                else None
+            ),
+            order_by_candidates=(
+                list(resolved_order_by_rules.candidates)
+                if resolved_order_by_rules is not None
+                and resolved_order_by_rules.candidates is not None
+                else None
+            ),
+            order_by_auto_generate_candidates=(
+                resolved_order_by_rules.auto_generate_candidates
+                if resolved_order_by_rules is not None
+                and resolved_order_by_rules.auto_generate_candidates is not None
+                else True
+            ),
             source_bank=source_bank,
         )
 
@@ -403,6 +566,7 @@ class RuleResolver:
     def _resolve_column_rules(
         mode: Optional[RuleSourceMode],
         inline_rules: Optional[List[ColumnRuleConfig]],
+        inline_codec_rules: Optional[List[CodecRuleConfig]],
         bank: Optional[RuleBankConfig],
     ) -> Tuple[List[ColumnRule], bool]:
         """Собирает итоговый список column_rules и признак использования bank."""
@@ -411,23 +575,85 @@ class RuleResolver:
             if inline_rules is not None
             else []
         )
+        inline_codec = (
+            [_codec_rule_as_column_rule_from_config(rule) for rule in inline_codec_rules]
+            if inline_codec_rules is not None
+            else []
+        )
         bank_rules = (
             [_column_rule_from_config(rule) for rule in bank.column_rules]
             if bank is not None
             else []
         )
+        bank_codec_rules = (
+            [_codec_rule_as_column_rule_from_config(rule) for rule in bank.codec_rules]
+            if bank is not None
+            else []
+        )
 
         if mode == "global_bank_only":
-            return bank_rules, bank is not None
+            return (
+                _merge_column_rules_preserve_order(bank_rules, bank_codec_rules),
+                bank is not None,
+            )
         if mode == "global_bank_with_inline_priority":
-            return inline + bank_rules, bank is not None
+            return (
+                _merge_column_rules_preserve_order(
+                    inline + bank_rules,
+                    inline_codec + bank_codec_rules,
+                ),
+                bank is not None,
+            )
+        if mode == "inline_only":
+            return _merge_column_rules_preserve_order(inline, inline_codec), False
+
+        # mode=None: default behavior (inline if задано, иначе bank).
+        if inline_rules is not None:
+            effective_columns = inline
+            used_bank_for_columns = False
+        else:
+            effective_columns = bank_rules
+            used_bank_for_columns = bank is not None
+
+        if inline_codec_rules is not None:
+            effective_codecs = inline_codec
+            used_bank_for_codecs = False
+        else:
+            effective_codecs = bank_codec_rules
+            used_bank_for_codecs = bank is not None
+
+        return (
+            _merge_column_rules_preserve_order(effective_columns, effective_codecs),
+            used_bank_for_columns or used_bank_for_codecs,
+        )
+
+    @staticmethod
+    def _resolve_order_by_rules(
+        mode: Optional[RuleSourceMode],
+        inline_rules: Optional[OrderByRulesConfig],
+        bank: Optional[RuleBankConfig],
+    ) -> Tuple[Optional[OrderByRulesConfig], bool]:
+        """Собирает итоговый order_by_rules и признак использования bank."""
+        inline = inline_rules.model_copy(deep=True) if inline_rules is not None else None
+        bank_rules = (
+            bank.order_by_rules.model_copy(deep=True)
+            if bank is not None and bank.order_by_rules is not None
+            else None
+        )
+
+        if mode == "global_bank_only":
+            return bank_rules, bank is not None and bank_rules is not None
+        if mode == "global_bank_with_inline_priority":
+            if inline is None:
+                return bank_rules, bank is not None and bank_rules is not None
+            return inline.merged_over(bank_rules), bank is not None and bank_rules is not None
         if mode == "inline_only":
             return inline, False
 
         # mode=None: default behavior (inline if задано, иначе bank).
-        if inline_rules is not None:
+        if inline is not None:
             return inline, False
-        return bank_rules, bank is not None
+        return bank_rules, bank is not None and bank_rules is not None
 
     @staticmethod
     def _resolve_index_rules(

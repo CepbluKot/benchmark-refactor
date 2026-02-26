@@ -105,7 +105,7 @@ class AppSettings(BaseSettings):
     test_database: Optional[str] = None
     result_connection_id: Optional[str] = None
     result_database: str = "benchmark_results"
-    result_table: str = "combined_benchmark_results"
+    result_table: str = "benchmark_results"
     log_level: str = "INFO"
 
     model_config = SettingsConfigDict(

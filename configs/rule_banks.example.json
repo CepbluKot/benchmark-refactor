@@ -139,6 +139,19 @@
           "codecs": ["CODEC(ZSTD(1))", "CODEC(ZSTD(3))"]
         }
       ],
+      "codec_rules": [
+        {
+          "by_type": "String",
+          "codecs": ["CODEC(LZ4)", "CODEC(ZSTD(1))", "CODEC(ZSTD(3))"],
+          "auto_generate_alternatives": true,
+          "auto_compressions_datatype": "String"
+        }
+      ],
+      "order_by_rules": {
+        "first_column": "event_time",
+        "candidates": ["user_id", "country", "device_type"],
+        "auto_generate_candidates": true
+      },
       "index_rules": [
         {
           "by_type": "UInt32",

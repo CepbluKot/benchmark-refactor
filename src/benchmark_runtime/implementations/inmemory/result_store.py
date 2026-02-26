@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional, Sequence
 from uuid import uuid4
 
 from src.naming import parse_variant_name
@@ -11,6 +11,7 @@ from src.clickhouse_ddl import TableDDL
 from ...contracts.result_store import BenchmarkResultStore
 from ...types import (
     BenchmarkVariantResult,
+    StoredVariantSummary,
     StoredBenchmarkResult,
     TopTypeVariant,
     VariantJob,
@@ -62,10 +63,12 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
                 benchmark_run_id=job.benchmark_run_id,
                 benchmark_started_at=job.benchmark_started_at,
                 benchmark_id=job.benchmark_id,
+                started_at=job.benchmark_started_at,
                 id=result.id or str(uuid4()),
                 source_db_name=job.source_database,
                 source_table_name=job.source_table,
                 tested_table_ddl=tested_table_ddl,
+                variant_params_json=None,
                 source_table_ddl=result.source_table_ddl,
                 is_source_table_copy=result.is_source_table_copy,
                 index_params=result.index_params,
@@ -188,6 +191,7 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
                 tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json=(
                     result.tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json
                 ),
+                select_metrics_json=result.tested_table_select_metrics_by_query_json,
                 tested_table_consumed_compressed_size_bytes_by_each_column=(
                     result.tested_table_consumed_compressed_size_bytes_by_each_column
                 ),
@@ -218,11 +222,22 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
                 ),
                 source_table_n_rows_in_size_test=result.source_table_n_rows_in_size_test,
                 tested_table_n_rows_in_size_test=result.tested_table_n_rows_in_size_test,
+                size_bytes_total=(
+                    result.tested_table_consumed_compressed_size_bytes_with_indexes
+                    if result.tested_table_consumed_compressed_size_bytes_with_indexes is not None
+                    else result.tested_table_consumed_compressed_size_bytes_overall
+                ),
+                size_bytes_by_column_json=(
+                    result.tested_table_consumed_compressed_size_bytes_by_each_column
+                    or result.tested_table_cols_sizes
+                ),
+                size_bytes_indexes_json=result.tested_table_indexes_sizes,
                 tested_table_cols_sizes=result.tested_table_cols_sizes,
                 tested_table_indexes_sizes=result.tested_table_indexes_sizes,
                 tested_table_indexes_sizes_percent_from_col_size=(
                     result.tested_table_indexes_sizes_percent_from_col_size
                 ),
+                insert_metrics_json=result.tested_table_insert_metrics_json,
                 extra_json=result.extra_json,
                 variant_table=job.variant_table,
                 variant_mode=variant_mode,
@@ -241,20 +256,73 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
         top_n: int,
     ) -> List[TopTypeVariant]:
         """Ranks and returns top-N type variants."""
-        if top_n <= 0:
-            return []
+        return self.get_top_variants(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+            top_n=top_n,
+            variant_modes=["types"],
+        )
 
-        candidates = [
+    def list_variant_summaries(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        variant_modes: Optional[Sequence[str]] = None,
+    ) -> List[StoredVariantSummary]:
+        """Возвращает summary записей по фильтрам run/benchmark/table/mode."""
+        mode_filter = {
+            str(mode).strip()
+            for mode in (variant_modes or [])
+            if str(mode).strip()
+        }
+        records = [
             record
             for record in self._records
             if record.benchmark_run_id == benchmark_run_id
             and record.benchmark_id == benchmark_id
             and record.source_database == source_database
             and record.source_table == source_table
-            and record.variant_mode == "types"
+            and (not mode_filter or record.variant_mode in mode_filter)
         ]
+        return [
+            StoredVariantSummary(
+                variant_table=record.variant_table,
+                tested_table_ddl=record.tested_table_ddl,
+                variant_mode=record.variant_mode,
+                score=record.score,
+                variant_params=dict(record.variant_params),
+            )
+            for record in records
+        ]
+
+    def get_top_variants(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        top_n: int,
+        variant_modes: Sequence[str],
+    ) -> List[TopTypeVariant]:
+        """Ranks and returns top-N variants for requested variant modes."""
+        if top_n <= 0:
+            return []
+
+        summaries = self.list_variant_summaries(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+            variant_modes=variant_modes,
+        )
         ranked = sorted(
-            candidates,
+            summaries,
             key=lambda record: (
                 record.score is None,
                 -(record.score if record.score is not None else 0.0),
@@ -263,11 +331,11 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
         )
         return [
             TopTypeVariant(
-                variant_index=_variant_index_from_variant_table(record.variant_table),
-                variant_ddl=TableDDL.from_ddl(record.tested_table_ddl),
-                score=record.score,
+                variant_index=_variant_index_from_variant_table(summary.variant_table),
+                variant_ddl=TableDDL.from_ddl(summary.tested_table_ddl),
+                score=summary.score,
             )
-            for record in ranked[:top_n]
+            for summary in ranked[:top_n]
         ]
 
 

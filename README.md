@@ -220,8 +220,17 @@ JSON-секции или `benchmark.project.json`.
 Один и тот же baseline-результат прокидывается во все variant jobs этой таблицы
 (`VariantJob.source_benchmark`).
 Для `sequential_topn_strategy` runner делает 2 этапа: сначала `types`, потом `indexes` только для top-N.
+
+Для `sequential_phased_topn_strategy` runner делает 5 этапов:
+`order_by -> types -> codecs -> indexes -> final_validation`.
+Между этапами передаётся top-N победителей (`sequential_top_n`), а внутри фаз
+`types/codecs/indexes` используется независимая оптимизация по колонкам.
+На index-этапе финальная валидация теперь миксует:
+- `granularity` конкретного skip-индекса (в т.ч. через массив `granularity`)
+- `SETTINGS index_granularity` (через benchmark/table `index_granularity_values`
+  и/или index-level `index_granularity_values`).
 `result_store` в `BenchmarkRunner` теперь опционален, но для top-N стратегий обязателен
-(`sequential_topn_strategy`).
+(`sequential_topn_strategy`, `sequential_phased_topn_strategy`).
 Runner не пишет результаты в store. Сохранение выполняет execution backend (обычно Celery-воркер).
 `sequential_topn_strategy` внутри себя ставит wait-барьер: ждёт, пока в store появятся все результаты type-stage,
 и только потом выбирает top-N и запускает index-stage.
@@ -248,32 +257,73 @@ Runner не пишет результаты в store. Сохранение вы�
 `VariantJob` + `BenchmarkVariantResult`.
 Что уходит:
 Сохраненные записи и выборки top type-вариантов.
-Что именно сохраняется в `StoredBenchmarkResult`:
-- run-метаданные: `benchmark_run_id`, `benchmark_started_at`, `benchmark_id`;
-- идентификация таблицы: `source_db_name`, `source_table_name`, `variant_table`;
-- параметры варианта: `variant_mode`, `variant_params`;
-- `variant_params` теперь содержит всю параметризацию варианта
-  (типы/кодеки/индексы/прочие параметры); `index_params` оставлен только как legacy nullable-колонка;
-- DDL-снимки: `tested_table_ddl` (как минимум), при наличии `source_table_ddl`;
-- размер таблицы: `tested_table_consumed_compressed_size_bytes_overall`
-  (данные без индексов) и `tested_table_consumed_compressed_size_bytes_with_indexes`
-  (данные + размеры skip-индексов);
-- метрики combined-схемы (insert/select/compression/indexes) + `extra_json` для расширений;
-- per-query select-метрики хранятся в основной таблице в JSON-полях
-  `tested_table_select_metrics_by_query_json`,
-  `source_table_select_metrics_by_query_json`,
-  `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json`
-  как map `query_id -> metrics`;
-- legacy колонки агрегированных select-метрик удалены из схемы ClickHouse
-  (например `tested_table_select_time_ms_measurements`,
-  `source_table_select_rows_per_second_measurements`,
-  `tested_table_select_bytes_per_second_measurements_percentiles`).
-  При старте runtime `ensure_schema()` автоматически выполняет `DROP COLUMN IF EXISTS`
-  для этих legacy-полей;
-- SQL-строки (`*_ddl`, `*_query`, query-поля внутри JSON-метрик) перед записью
-  автоматически нормализуются в читабельный формат;
-- итог: `score` и рядом `score_calculation_json` (как рассчитан score, с входными параметрами и финальным значением);
-  для top-N DDL берется из `tested_table_ddl`.
+Физическое хранение в ClickHouse теперь состоит из двух таблиц:
+- `benchmark_runs`: run-level метаданные (`id`, `started_at`, `finished_at`, `source_db_name`, `source_table_name`, `source_table_ddl`, `total_rows`, `benchmark_queries`, `score_weights`, `top_n_winners`, `config_json`).
+- `benchmark_results`: результаты вариантов c lineage/phase-полями (`id`, `benchmark_run_id`, `parent_id`, `phase`, `phase_name`, `started_at`, `finished_at`, `variant_params_json`, `tested_table_ddl`, `size_bytes_total`, `size_bytes_by_column_json`, `size_bytes_indexes_json`, `select_metrics_json`, `insert_metrics_json`, `score`, `rank_in_phase`, `is_top_n`).
+Дополнительно сохраняются legacy/расширенные поля (`variant_params`, `index_params`, combined метрики), чтобы не ломать текущие стратегии и тесты.
+`variant_params` содержит всю параметризацию варианта; для phased top-N туда также пишется `parent_variant_table`.
+per-query select-метрики хранятся в JSON-map `query_id -> metrics` и дублируются в `select_metrics_json`.
+SQL-строки (`*_ddl`, `*_query`, SQL внутри JSON) перед записью форматируются.
+`score_calculation_json` сохраняется рядом со `score`.
+
+Примеры аналитических SQL по новой схеме:
+
+```sql
+-- Финальный DDL победителя
+SELECT tested_table_ddl
+FROM benchmark_results
+WHERE benchmark_run_id = 123
+  AND phase = 5
+  AND rank_in_phase = 1
+```
+
+```sql
+-- Изменение score победителя по фазам (lineage)
+WITH RECURSIVE lineage AS (
+    SELECT *
+    FROM benchmark_results
+    WHERE benchmark_run_id = 123
+      AND phase = 5
+      AND rank_in_phase = 1
+    UNION ALL
+    SELECT r.*
+    FROM benchmark_results r
+    JOIN lineage l ON r.id = l.parent_id
+)
+SELECT phase, phase_name, score, size_bytes_total, variant_params_json
+FROM lineage
+ORDER BY phase
+```
+
+```sql
+-- Что дало самый большой прирост по score
+WITH RECURSIVE lineage AS (
+    SELECT *
+    FROM benchmark_results
+    WHERE benchmark_run_id = 123
+      AND phase = 5
+      AND rank_in_phase = 1
+    UNION ALL
+    SELECT r.*
+    FROM benchmark_results r
+    JOIN lineage l ON r.id = l.parent_id
+)
+SELECT
+    phase,
+    phase_name,
+    score - lag(score) OVER (ORDER BY phase) AS score_delta
+FROM lineage
+ORDER BY phase
+```
+
+```sql
+-- Сравнение кандидатов в фазе ORDER BY
+SELECT variant_params_json, score, size_bytes_total, rank_in_phase, is_top_n
+FROM benchmark_results
+WHERE benchmark_run_id = 123
+  AND phase = 1
+ORDER BY rank_in_phase
+```
 
 11. Управление run-id (`BenchmarkRunIdProvider`).
 Что это:
@@ -476,7 +526,7 @@ BENCH_TEST_DATABASE=bench_tmp
 ```bash
 BENCH_RESULT_CONNECTION_ID=prod_ch
 BENCH_RESULT_DATABASE=benchmark_results
-BENCH_RESULT_TABLE=combined_benchmark_results
+BENCH_RESULT_TABLE=benchmark_results
 ```
 
 Если `BENCH_RESULT_CONNECTION_ID` не задан, берётся первый connection из конфига.
@@ -585,7 +635,7 @@ engine = BenchmarkEngine(planner=planner)
 result_store = ClickHouseBenchmarkResultStore(
     connection=connection,
     database="benchmark_results",
-    table="combined_benchmark_results",
+    table="benchmark_results",
 )
 
 runner = BenchmarkRunner(
@@ -593,7 +643,7 @@ runner = BenchmarkRunner(
     execution_adapter=CeleryClickHouseExecutionAdapter(
         connections_by_id={c.id: c for c in config.connections},
         result_database="benchmark_results",
-        result_table="combined_benchmark_results",
+        result_table="benchmark_results",
     ),
     result_store=result_store,
 )
@@ -699,7 +749,9 @@ print(run_id)
 
 `rule_banks.<bank_id>`:
 - `column_rules`
+- `codec_rules` (опционально)
 - `index_rules`
+- `order_by_rules` (опционально)
 - `column_order`
 
 `column_rules` (каждое правило) дополнительно поддерживает:
@@ -712,6 +764,18 @@ print(run_id)
   и `generate_possible_compressions_w_preprocessings(...)`;
 - сгенерированные codec-выражения автоматически нормализуются к формату `CODEC(...)`;
 - ручные `types`/`codecs` не теряются: они объединяются с авто-сгенерированными значениями.
+
+`codec_rules`:
+- отдельный блок правил только для кодеков (по тем же matcher-полям `by_type`/`by_name`);
+- поддерживает `auto_generate_alternatives` и `auto_compressions_datatype`;
+- автоматически объединяется с `column_rules` по matcher'у
+  (`types` берутся из `column_rules`, `codecs` — из обоих блоков).
+
+`order_by_rules`:
+- `first_column` — фиксированная первая колонка ORDER BY;
+- `candidates` — список явных кандидатов для хвоста ORDER BY;
+- `auto_generate_candidates` (`bool`, default `true`) — добавлять ли авто-кандидаты
+  из исходного ORDER BY/WHERE-фильтров query-плана.
 
 `index_rules` (каждое правило) дополнительно поддерживает:
 - `auto_generate_indexes` (`bool`, default `false`) — включает автогенерацию skip-индексов по типу колонки;
@@ -754,8 +818,13 @@ print(run_id)
 - `queries`
 - `column_rules_mode`, `index_rules_mode`
 
+Правило по `databases`/`tables`:
+- если `tables` задан как map (`{"db": [...]}`), `databases` обычно не нужен и
+  считается избыточным;
+- если оба поля заданы одновременно, они должны быть консистентны
+  (`tables` не должен содержать БД вне `databases`).
+
 Коротко по новым полям:
-- `insert_operations_count`: сколько раз повторить insert/select замер.
 - `insert_operations_count`: сколько раз повторить insert-замер.
 - `queries.test_queries[].select_operations_count`: сколько раз мерить конкретный select.
 - `queries.test_queries[].cache_mode`: `warm` или `cold`.
@@ -776,8 +845,8 @@ print(run_id)
   пересечение global-списка и per-index списка (без global — только per-index).
   Если в исходном DDL уже был `SETTINGS index_granularity`, он корректно заменяется:
   в итоговом variant-DDL ключ остаётся один (без конфликтующих дублей).
-- `queries.test_queries[].cache_mode = cold`: перед каждым замером выполняется
-  `SYSTEM DROP MARK CACHE` и `SYSTEM DROP UNCOMPRESSED CACHE`.
+- `queries.test_queries[].cache_mode = cold`: перед каждым замером запрос
+  автоматически дополняется `SETTINGS use_uncompressed_cache = 0`.
 - `queries.test_queries[].cache_mode = warm`: перед серией замеров запроса выполняются
   query-level `warmup_queries`, затем делаются `select_operations_count` замеров.
 
@@ -922,6 +991,19 @@ print(run_id)
 - `indexes_strategy`
 - `combined_strategy`
 - `sequential_topn_strategy`
+- `sequential_phased_topn_strategy`
+
+Для `sequential_phased_topn_strategy` дополнительно можно задать:
+- legacy-поля:
+  - `order_by_first` — фиксированная первая колонка ORDER BY в фазе 1.
+  - `order_by_candidates` — колонки-кандидаты, которые добавляются после `order_by_first`.
+- новый rules-блок (рекомендуется):
+  - `global_rules.order_by_rules` / `table_rules[].rules.order_by_rules`
+    с полями `first_column`, `candidates`, `auto_generate_candidates`.
+- Для index-фазы:
+  - у индекса `granularity` можно задавать массивом (перебор)
+  - у индекса `index_granularity_values` можно задавать массивом
+  - и/или глобально `index_granularity_values` на benchmark/table уровне.
 
 `queries.mode`:
 - `auto`

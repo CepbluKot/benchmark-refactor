@@ -78,6 +78,9 @@ class TableBenchmarkPlan(_FrozenModel):
     max_index_benchmarks: Optional[int] = None
     index_granularity_values: Optional[List[int]] = None
     column_order_mode: Optional[ColumnOrderMode]
+    order_by_first: Optional[str] = None
+    order_by_candidates: Optional[List[str]] = None
+    order_by_auto_generate_candidates: bool = True
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     rules: ResolvedRules
     queries: QueriesConfig
@@ -309,12 +312,18 @@ class StoredBenchmarkResult(_FrozenModel):
     benchmark_run_id: int
     benchmark_started_at: datetime
     benchmark_id: str
+    started_at: datetime
+    finished_at: Optional[datetime] = None
 
     # ---------------------------  Metadata  ----------------------------
     id: str = Field(default_factory=lambda: str(uuid4()))
+    parent_id: Optional[str] = None
+    phase: Optional[int] = None
+    phase_name: Optional[str] = None
     source_db_name: str
     source_table_name: str
     tested_table_ddl: str
+    variant_params_json: Optional[str] = None
     source_table_ddl: Optional[str] = None
     is_source_table_copy: Optional[bool] = None
     index_params: Optional[str] = None
@@ -461,11 +470,20 @@ class StoredBenchmarkResult(_FrozenModel):
     tested_table_indexes_sizes: Optional[str] = None
     tested_table_indexes_sizes_percent_from_col_size: Optional[str] = None
 
+    # ---------------------------  Unified JSON Metrics  ----------------------------
+    size_bytes_total: Optional[float] = None
+    size_bytes_by_column_json: Optional[str] = None
+    size_bytes_indexes_json: Optional[str] = None
+    select_metrics_json: Optional[str] = None
+    insert_metrics_json: Optional[str] = None
+
     # ---------------------------  Additional / Compatibility  ----------------------------
     extra_json: Optional[str] = None
     variant_table: str
     variant_mode: str
     variant_params: Dict[str, Any] = Field(default_factory=dict)
+    rank_in_phase: Optional[int] = None
+    is_top_n: bool = False
     score_calculation_json: Optional[str] = None
     score: Optional[float] = None
 
@@ -486,6 +504,21 @@ class TopTypeVariant(_FrozenModel):
     variant_index: int
     variant_ddl: TableDDL
     score: Optional[float] = None
+
+
+class StoredVariantSummary(_FrozenModel):
+    """
+    Лёгкий summary сохранённого variant-результата.
+
+    Используется multi-phase стратегиями для выборки/ранжирования
+    результатов конкретной фазы без чтения полной записи метрик.
+    """
+
+    variant_table: str
+    tested_table_ddl: str
+    variant_mode: str
+    score: Optional[float] = None
+    variant_params: Dict[str, Any] = Field(default_factory=dict)
 
 
 def build_variant_params(variant_meta: VariantMeta) -> Dict[str, Any]:
@@ -524,6 +557,8 @@ def build_variant_params(variant_meta: VariantMeta) -> Dict[str, Any]:
     return {
         "mode": variant_meta.mode,
         "global_index": variant_meta.global_index,
+        "parent_variant_table": variant_meta.parent_variant_table,
+        "phase_name": variant_meta.phase_name,
         "table_index_granularity": variant_meta.table_index_granularity,
         "column_choices": column_choices,
         "index_choices": index_choices,

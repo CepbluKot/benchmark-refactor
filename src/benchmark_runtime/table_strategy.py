@@ -4,6 +4,9 @@ from .contracts.table_strategy import TableExecutionStrategy
 from .implementations.table_strategy.combined import CombinedTableExecutionStrategy
 from .implementations.table_strategy.default import DefaultTableExecutionStrategy
 from .implementations.table_strategy.indexes import IndexesTableExecutionStrategy
+from .implementations.table_strategy.sequential_phased_topn import (
+    SequentialPhasedTopNTableExecutionStrategy,
+)
 from .implementations.table_strategy.sequential_topn import (
     SequentialTopNTableExecutionStrategy,
 )
@@ -14,6 +17,7 @@ __all__ = [
     "TableExecutionStrategy",
     "DefaultTableExecutionStrategy",
     "IndexesTableExecutionStrategy",
+    "SequentialPhasedTopNTableExecutionStrategy",
     "SequentialTopNTableExecutionStrategy",
     "TypesTableExecutionStrategy",
 ]

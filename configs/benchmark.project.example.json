@@ -30,10 +30,6 @@
       "strategy": "combined_strategy",
       "column_rules_mode": "global_bank_with_inline_priority",
       "index_rules_mode": "global_bank_with_inline_priority",
-      "databases": [
-        "analytics",
-        "marketing"
-      ],
       "tables": {
         "analytics": [
           "user_events"

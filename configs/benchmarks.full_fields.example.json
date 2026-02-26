@@ -19,6 +19,15 @@
             ]
           }
         ],
+        "codec_rules": [
+          {
+            "by_type": "UInt64",
+            "codecs": [
+              "CODEC(Delta(8), LZ4)",
+              "CODEC(ZSTD(3))"
+            ]
+          }
+        ],
         "index_rules": [
           {
             "by_type": "UInt64",
@@ -34,6 +43,14 @@
             ]
           }
         ],
+        "order_by_rules": {
+          "first_column": "event_time",
+          "candidates": [
+            "user_id",
+            "revenue"
+          ],
+          "auto_generate_candidates": true
+        },
         "column_order": {
           "event_time": 1,
           "user_id": 2,
@@ -42,10 +59,6 @@
       },
       "column_order_mode": "compressed_size_desc",
       "test_database": "benchmark_tmp",
-      "databases": [
-        "analytics",
-        "marketing"
-      ],
       "tables": {
         "analytics": [
           "user_events",
@@ -108,7 +121,13 @@
                 "types": [
                   "Nullable(Decimal(18,4))",
                   "Nullable(Float64)"
-                ],
+                ]
+              }
+            ],
+            "codec_rules": [
+              {
+                "by_type": "Nullable(Decimal(18,4))",
+                "by_name": "revenue",
                 "codecs": [
                   "CODEC(ZSTD(1))",
                   "CODEC(ZSTD(5))"
@@ -127,6 +146,14 @@
                 ]
               }
             ],
+            "order_by_rules": {
+              "first_column": "event_time",
+              "candidates": [
+                "user_id",
+                "revenue"
+              ],
+              "auto_generate_candidates": false
+            },
             "column_order": {
               "revenue": 1,
               "event_time": 2,

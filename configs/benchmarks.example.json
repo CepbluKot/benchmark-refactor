@@ -8,9 +8,6 @@
       "index_rules_mode": "inline_only",
       "column_order_mode": "compressed_size_desc",
       "test_database": "benchmark_tmp",
-      "databases": [
-        "analytics"
-      ],
       "tables": {
         "analytics": [
           "user_events"
@@ -125,9 +122,6 @@
       "id": "bench_types_only_example",
       "connection_id": "prod_ch",
       "strategy": "types_strategy",
-      "databases": [
-        "analytics"
-      ],
       "tables": {
         "analytics": [
           "user_events"
@@ -153,9 +147,6 @@
       "id": "bench_indexes_only_example",
       "connection_id": "prod_ch",
       "strategy": "indexes_strategy",
-      "databases": [
-        "analytics"
-      ],
       "tables": {
         "analytics": [
           "user_events"

@@ -28,11 +28,13 @@ from src.models import (
     BenchmarkConfig,
     BenchmarkRootConfig,
     CeleryConfig,
+    CodecRuleConfig,
     ColumnRuleConfig,
     ConnectionConfig,
     InsertRowsLimitsConfig,
     IndexConfig,
     IndexRuleConfig,
+    OrderByRulesConfig,
     QueriesConfig,
     RuleBankConfig,
     RulesConfig,
@@ -190,6 +192,74 @@ class SequentialScoringAdapter(BenchmarkExecutionAdapter):
             source_table=job.source_table,
             variant_table=job.variant_table,
             variant_mode=job.variant_meta.mode,
+            score=score,
+            tested_table_indexes_sizes=str(len(job.variant_ddl.indexes)),
+        )
+        if self._store is not None:
+            self._store.store_result(job, result)
+        return result
+
+
+class SequentialPhasedScoringAdapter(BenchmarkExecutionAdapter):
+    """Синтетический adapter для теста multi-phase стратегии."""
+
+    def __init__(self) -> None:
+        self.executed_jobs: List[VariantJob] = []
+        self.source_jobs: List[SourceBenchmarkJob] = []
+        self.source_results: List[SourceBenchmarkResult] = []
+        self._store: BenchmarkResultStore | None = None
+
+    def bind_result_store(self, result_store: BenchmarkResultStore | None) -> None:
+        self._store = result_store
+
+    def execute_source_benchmark(self, job: SourceBenchmarkJob) -> SourceBenchmarkResult:
+        self.source_jobs.append(job)
+        result = SourceBenchmarkResult(
+            benchmark_run_id=job.benchmark_run_id,
+            benchmark_started_at=job.benchmark_started_at,
+            benchmark_id=job.benchmark_id,
+            source_database=job.source_database,
+            source_table=job.source_table,
+            source_table_ddl=job.source_table_ddl.to_ddl(),
+            score=1.0,
+            metrics={"status": "baseline_done"},
+        )
+        self.source_results.append(result)
+        return result
+
+    def execute_variant(self, job: VariantJob) -> BenchmarkVariantResult:
+        self.executed_jobs.append(job)
+        user_id_type = job.variant_ddl.column("user_id").type
+        mode = job.variant_meta.mode
+        order_by = job.variant_ddl.order_by or ""
+        codecs = tuple((column.name, column.codec) for column in job.variant_ddl.columns)
+        score = 0.1
+
+        if mode == "order_by":
+            score = 5.0 if "event_time" in order_by else 1.0
+        elif mode == "types":
+            score = 10.0 if user_id_type == "UInt32" else 2.0
+        elif mode == "types_validation":
+            score = 15.0 if user_id_type == "UInt32" else 3.0
+        elif mode == "codecs":
+            score = 7.0 if any(codec == "CODEC(ZSTD(1))" for _, codec in codecs) else 4.0
+        elif mode == "codecs_validation":
+            score = 20.0 if any(codec == "CODEC(ZSTD(1))" for _, codec in codecs) else 5.0
+        elif mode == "indexes":
+            score = 9.0 if len(job.variant_ddl.indexes) > 0 else 1.0
+        elif mode == "indexes_validation":
+            score = 25.0 if len(job.variant_ddl.indexes) > 0 else 2.0
+        elif mode == "final_validation":
+            score = 30.0 if len(job.variant_ddl.indexes) > 0 else 6.0
+
+        result = BenchmarkVariantResult(
+            benchmark_run_id=job.benchmark_run_id,
+            benchmark_started_at=job.benchmark_started_at,
+            benchmark_id=job.benchmark_id,
+            source_database=job.source_database,
+            source_table=job.source_table,
+            variant_table=job.variant_table,
+            variant_mode=mode,
             score=score,
             tested_table_indexes_sizes=str(len(job.variant_ddl.indexes)),
         )
@@ -503,8 +573,55 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(plan.queries.mode, "manual")
         self.assertEqual(plan.celery.workers, 9)
         self.assertEqual(plan.celery.threads_per_worker, 5)
+
+    def test_planner_takes_order_by_rules_from_resolved_rules(self) -> None:
+        """Проверяет, что planner прокидывает order_by_rules из rules-блока."""
+        benchmark = BenchmarkConfig(
+            id="bench_order_by_rules_from_rules",
+            connection_id="prod_ch",
+            strategy="sequential_phased_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(by_type="UInt64", by_name="user_id", types=["UInt64"])
+                ],
+                codec_rules=[
+                    CodecRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        codecs=["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+                    )
+                ],
+                order_by_rules=OrderByRulesConfig(
+                    first_column="event_time",
+                    candidates=["user_id", "revenue"],
+                    auto_generate_candidates=False,
+                ),
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[
+                    QueryConfigItem(query="SELECT count() FROM {table} WHERE user_id > 0")
+                ],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+
+        plans = list(planner.iter_table_plans())
+        self.assertEqual(len(plans), 1)
+        plan = plans[0]
+        self.assertEqual(plan.order_by_first, "event_time")
+        self.assertEqual(plan.order_by_candidates, ["user_id", "revenue"])
+        self.assertFalse(plan.order_by_auto_generate_candidates)
         self.assertEqual(len(plan.rules.column_rules), 1)
-        self.assertEqual(plan.rules.column_rules[0].by_type, "Nullable")
+        self.assertEqual(
+            plan.rules.column_rules[0].alternatives.codecs,
+            ["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+        )
 
     def test_planner_applies_rule_modes_from_benchmark(self) -> None:
         """Проверяет, что planner applies rule modes from benchmark."""
@@ -2208,6 +2325,112 @@ class PlannerEngineRunnerTests(unittest.TestCase):
 
         variant_tables = [job.variant_table for job in adapter.executed_jobs]
         self.assertEqual(len(variant_tables), len(set(variant_tables)))
+
+    def test_sequential_phased_topn_strategy_runs_all_phases(self) -> None:
+        """Проверяет, что sequential_phased_topn_strategy проходит все фазы."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_phased_topn",
+            connection_id="prod_ch",
+            strategy="sequential_phased_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            max_iterations=10,
+            sequential_top_n=1,
+            index_granularity_values=[8192, 16384],
+            order_by_first="event_time",
+            order_by_candidates=["user_id"],
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                        codecs=["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+                    )
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt32",
+                        by_name="user_id",
+                        indexes=[
+                            IndexConfig(
+                                type="minmax",
+                                granularity=[1, 2],
+                                index_granularity_values=[8192, 16384],
+                            )
+                        ],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[
+                    QueryConfigItem(
+                        query="SELECT count() FROM {table} WHERE user_id > 0"
+                    )
+                ],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = SequentialPhasedScoringAdapter()
+        store = InMemoryBenchmarkResultStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=store,
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        self.assertGreater(len(adapter.executed_jobs), 0)
+
+        modes = [job.variant_meta.mode for job in adapter.executed_jobs]
+        required_modes = {
+            "order_by",
+            "types",
+            "types_validation",
+            "codecs",
+            "codecs_validation",
+            "indexes",
+            "indexes_validation",
+            "final_validation",
+        }
+        self.assertTrue(required_modes.issubset(set(modes)))
+
+        first_occurrence = {mode: modes.index(mode) for mode in required_modes}
+        self.assertLess(first_occurrence["order_by"], first_occurrence["types"])
+        self.assertLess(first_occurrence["types"], first_occurrence["types_validation"])
+        self.assertLess(first_occurrence["types_validation"], first_occurrence["codecs"])
+        self.assertLess(first_occurrence["codecs"], first_occurrence["codecs_validation"])
+        self.assertLess(first_occurrence["codecs_validation"], first_occurrence["indexes"])
+        self.assertLess(first_occurrence["indexes"], first_occurrence["indexes_validation"])
+        self.assertLess(first_occurrence["indexes_validation"], first_occurrence["final_validation"])
+
+        index_jobs = [job for job in adapter.executed_jobs if job.variant_meta.mode == "indexes"]
+        self.assertTrue(index_jobs)
+        self.assertTrue(
+            any(job.variant_meta.table_index_granularity == 8192 for job in index_jobs)
+        )
+        self.assertTrue(
+            any(job.variant_meta.table_index_granularity == 16384 for job in index_jobs)
+        )
+        index_granularities = {
+            job.variant_ddl.indexes[0].granularity
+            for job in index_jobs
+            if job.variant_ddl.indexes
+        }
+        self.assertTrue({"1", "2"}.issubset(index_granularities))
+
+        index_validation_jobs = [
+            job
+            for job in adapter.executed_jobs
+            if job.variant_meta.mode == "indexes_validation"
+        ]
+        self.assertGreaterEqual(len(index_validation_jobs), 2)
 
     def test_sequential_mode_propagates_source_benchmark_to_all_stage_jobs(self) -> None:
         """Проверяет, что baseline source benchmark доступен во всех sequential jobs."""
