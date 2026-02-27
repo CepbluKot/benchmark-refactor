@@ -197,6 +197,18 @@
    - query-поля внутри JSON-метрик (`query`, `source_query`, `warmup_queries`).
 
 8. итоговые значения: `score` и `score_calculation_json`.
+9. Идемпотентность записи результата (`id`) обеспечивается в store:
+   `check -> insert` обёрнут в межпроцессный Redis lock.
+10. Redis lock настраивается env-параметрами:
+    `BENCH_RESULT_STORE_REDIS_URL` (или fallback на `BENCH_CELERY_BACKEND_URL`, если это Redis),
+    `BENCH_RESULT_STORE_REDIS_LOCK_PREFIX`,
+    `BENCH_RESULT_STORE_REDIS_LOCK_TTL_SEC`,
+    `BENCH_RESULT_STORE_REDIS_LOCK_BLOCKING_TIMEOUT_SEC`.
+    Если Redis не настроен/недоступен, store не стартует (fail-fast).
+    Пакет `redis` обязателен.
+11. Fallback на старую схему result-таблиц отключён:
+    при `create_table_if_missing=False` ожидается актуальная схема;
+    несовместимая схема приводит к ошибке insert.
 
 Примеры аналитики по новой схеме:
 Для phased-стратегии запросы ниже нужно выполнять к таблице из
@@ -281,6 +293,12 @@ ORDER BY phase
 5. Ошибочные замеры маркируются метриками `-1` (удобно фильтровать downstream).
 6. Для `TaskMonitorCelery` и wait-барьеров в sequential top-N Celery worker должен
    быть запущен с `-E` (`--events`), иначе launcher не получает task events.
+7. Result-store dedup-lock configurable через Redis env:
+   `BENCH_RESULT_STORE_REDIS_URL` (или Redis `BENCH_CELERY_BACKEND_URL`),
+   `BENCH_RESULT_STORE_REDIS_LOCK_PREFIX`,
+   `BENCH_RESULT_STORE_REDIS_LOCK_TTL_SEC`,
+   `BENCH_RESULT_STORE_REDIS_LOCK_BLOCKING_TIMEOUT_SEC`.
+   При отсутствии/недоступности Redis store падает на инициализации (без fallback).
 
 ## 5) Генерация вариантов (variant_generation + combiner фасад)
 

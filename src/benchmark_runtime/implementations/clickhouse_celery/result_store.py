@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from datetime import datetime
+from hashlib import sha256
+from threading import Lock
 from typing import Any, Dict, List, Optional, Sequence
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
@@ -31,10 +36,18 @@ from .common import json_dumps
 
 logger = logging.getLogger(__name__)
 
+_RESULTS_TIMEZONE_NAME = "Europe/Moscow"
+_RESULTS_TZ = ZoneInfo(_RESULTS_TIMEZONE_NAME)
+
 try:
     import sqlparse  # type: ignore
 except ImportError:  # pragma: no cover - опциональная зависимость для красивого SQL-format.
     sqlparse = None
+
+try:
+    import redis as redis_module  # type: ignore
+except ImportError:  # pragma: no cover - redis опционален.
+    redis_module = None
 
 
 class ClickHouseConnectionParams(BaseModel):
@@ -135,7 +148,6 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "score_weights",
         "config_json",
     )
-
     _INSERT_COLUMNS: list[str] = [
         "benchmark_run_id",
         "benchmark_started_at",
@@ -144,6 +156,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "parent_id",
         "phase",
         "phase_name",
+        "celery_task_id",
+        "celery_worker_hostname",
         "started_at",
         "finished_at",
         "source_db_name",
@@ -218,6 +232,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "parent_id",
         "phase",
         "phase_name",
+        "celery_task_id",
+        "celery_worker_hostname",
         "started_at",
         "finished_at",
         "source_db_name",
@@ -299,6 +315,21 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         self._table = self._phased_table
         self._runs_table = self._phased_runs_table
         self._client = self._build_client()
+        self._record_insert_lock = Lock()
+        self._record_lock_redis_client = None
+        self._record_lock_redis_prefix = str(
+            os.getenv("BENCH_RESULT_STORE_REDIS_LOCK_PREFIX", "bench_result_store_lock")
+        ).strip() or "bench_result_store_lock"
+        self._record_lock_redis_ttl_sec = self._parse_float_env(
+            "BENCH_RESULT_STORE_REDIS_LOCK_TTL_SEC",
+            default=300.0,
+        )
+        self._record_lock_redis_blocking_timeout_sec = self._parse_float_env(
+            "BENCH_RESULT_STORE_REDIS_LOCK_BLOCKING_TIMEOUT_SEC",
+            default=60.0,
+        )
+        self._record_lock_redis_url = self._resolve_redis_lock_url()
+        self._init_redis_lock_client()
 
         if create_table_if_missing:
             self.ensure_schema()
@@ -353,13 +384,13 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `id` String,
                 `benchmark_run_id` Int32,
                 `benchmark_id` String,
-                `started_at` Nullable(DateTime64(3, 'UTC')),
-                `finished_at` Nullable(DateTime64(3, 'UTC')),
+                `started_at` Nullable(DateTime64(3, 'Europe/Moscow')),
+                `finished_at` Nullable(DateTime64(3, 'Europe/Moscow')),
                 `source_db_name` String,
                 `source_table_name` String,
                 `top_n_winners` Nullable(Int32),
                 `sequential_top_n_limits_json` Nullable(String),
-                `updated_at` DateTime64(3, 'UTC')
+                `updated_at` DateTime64(3, 'Europe/Moscow')
             )
             ENGINE = ReplacingMergeTree(updated_at)
             ORDER BY (id)
@@ -370,6 +401,14 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             ALTER TABLE `{self._database}`.`{self._phased_runs_table}`
                 ADD COLUMN IF NOT EXISTS `sequential_top_n_limits_json` Nullable(String)
             """
+        )
+        self._ensure_datetime_columns_timezone(
+            table_name=self._phased_runs_table,
+            column_types={
+                "started_at": "Nullable(DateTime64(3, 'Europe/Moscow'))",
+                "finished_at": "Nullable(DateTime64(3, 'Europe/Moscow'))",
+                "updated_at": "DateTime64(3, 'Europe/Moscow')",
+            },
         )
         for column_name in self._RUNS_LEGACY_UNUSED_COLUMNS:
             self._execute(
@@ -393,14 +432,16 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             CREATE TABLE IF NOT EXISTS `{self._database}`.`{table_name}`
             (
                 `benchmark_run_id` Int32,
-                `benchmark_started_at` DateTime64(3, 'UTC'),
+                `benchmark_started_at` DateTime64(3, 'Europe/Moscow'),
                 `benchmark_id` String,
                 `id` String,
                 `parent_id` Nullable(String),
                 `phase` Nullable(Int32),
                 `phase_name` Nullable(String),
-                `started_at` DateTime64(3, 'UTC'),
-                `finished_at` Nullable(DateTime64(3, 'UTC')),
+                `celery_task_id` Nullable(String),
+                `celery_worker_hostname` Nullable(String),
+                `started_at` DateTime64(3, 'Europe/Moscow'),
+                `finished_at` Nullable(DateTime64(3, 'Europe/Moscow')),
                 `source_db_name` String,
                 `source_table_name` String,
                 `tested_table_ddl` String,
@@ -433,8 +474,10 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `parent_id` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `phase` Nullable(Int32),
                 ADD COLUMN IF NOT EXISTS `phase_name` Nullable(String),
-                ADD COLUMN IF NOT EXISTS `started_at` Nullable(DateTime64(3, 'UTC')),
-                ADD COLUMN IF NOT EXISTS `finished_at` Nullable(DateTime64(3, 'UTC')),
+                ADD COLUMN IF NOT EXISTS `celery_task_id` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `celery_worker_hostname` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `started_at` Nullable(DateTime64(3, 'Europe/Moscow')),
+                ADD COLUMN IF NOT EXISTS `finished_at` Nullable(DateTime64(3, 'Europe/Moscow')),
                 ADD COLUMN IF NOT EXISTS `variant_params_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `size_bytes_total` Nullable(Float64),
                 ADD COLUMN IF NOT EXISTS `size_bytes_by_column_json` Nullable(String),
@@ -451,6 +494,14 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `is_top_n` Bool DEFAULT 0
             """
         )
+        self._ensure_datetime_columns_timezone(
+            table_name=table_name,
+            column_types={
+                "benchmark_started_at": "DateTime64(3, 'Europe/Moscow')",
+                "started_at": "DateTime64(3, 'Europe/Moscow')",
+                "finished_at": "Nullable(DateTime64(3, 'Europe/Moscow'))",
+            },
+        )
 
     def _ensure_results_table_schema(self, table_name: str) -> None:
         """Создаёт/мигрирует целевую таблицу результатов."""
@@ -459,14 +510,16 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             CREATE TABLE IF NOT EXISTS `{self._database}`.`{table_name}`
             (
                 `benchmark_run_id` Int32,
-                `benchmark_started_at` DateTime64(3, 'UTC'),
+                `benchmark_started_at` DateTime64(3, 'Europe/Moscow'),
                 `benchmark_id` String,
                 `id` String,
                 `parent_id` Nullable(String),
                 `phase` Nullable(Int32),
                 `phase_name` Nullable(String),
-                `started_at` DateTime64(3, 'UTC'),
-                `finished_at` Nullable(DateTime64(3, 'UTC')),
+                `celery_task_id` Nullable(String),
+                `celery_worker_hostname` Nullable(String),
+                `started_at` DateTime64(3, 'Europe/Moscow'),
+                `finished_at` Nullable(DateTime64(3, 'Europe/Moscow')),
                 `source_db_name` String,
                 `source_table_name` String,
                 `tested_table_ddl` String,
@@ -553,8 +606,10 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `parent_id` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `phase` Nullable(Int32),
                 ADD COLUMN IF NOT EXISTS `phase_name` Nullable(String),
-                ADD COLUMN IF NOT EXISTS `started_at` Nullable(DateTime64(3, 'UTC')),
-                ADD COLUMN IF NOT EXISTS `finished_at` Nullable(DateTime64(3, 'UTC')),
+                ADD COLUMN IF NOT EXISTS `celery_task_id` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `celery_worker_hostname` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `started_at` Nullable(DateTime64(3, 'Europe/Moscow')),
+                ADD COLUMN IF NOT EXISTS `finished_at` Nullable(DateTime64(3, 'Europe/Moscow')),
                 ADD COLUMN IF NOT EXISTS `variant_params_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `size_bytes_total` Nullable(Float64),
                 ADD COLUMN IF NOT EXISTS `size_bytes_by_column_json` Nullable(String),
@@ -562,6 +617,14 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `rank_in_phase` Nullable(Int32),
                 ADD COLUMN IF NOT EXISTS `is_top_n` Bool DEFAULT 0
             """
+        )
+        self._ensure_datetime_columns_timezone(
+            table_name=table_name,
+            column_types={
+                "benchmark_started_at": "DateTime64(3, 'Europe/Moscow')",
+                "started_at": "DateTime64(3, 'Europe/Moscow')",
+                "finished_at": "Nullable(DateTime64(3, 'Europe/Moscow'))",
+            },
         )
         # Удаляем дублирующие legacy-поля размеров (дублируют consumed_compressed_*_with_indexes).
         for column_name in self._LEGACY_DUPLICATE_SIZE_COLUMNS:
@@ -588,6 +651,31 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                     DROP COLUMN IF EXISTS `{column_name}`
                 """
             )
+
+    def _ensure_datetime_columns_timezone(
+        self,
+        *,
+        table_name: str,
+        column_types: Dict[str, str],
+    ) -> None:
+        """Best-effort migration datetime колонок таблицы в Moscow timezone."""
+        for column_name, column_type in column_types.items():
+            try:
+                self._execute(
+                    f"""
+                    ALTER TABLE `{self._database}`.`{table_name}`
+                        MODIFY COLUMN `{column_name}` {column_type}
+                    """
+                )
+            except Exception as exc:
+                logger.warning(
+                    "ClickHouseBenchmarkResultStore: не удалось применить timezone "
+                    "для `%s`.`%s`.`%s` (%s)",
+                    self._database,
+                    table_name,
+                    column_name,
+                    exc,
+                )
 
     def register_benchmark_run_start(
         self,
@@ -686,7 +774,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             run_record_id=run_record_id,
             benchmark_run_id=int(existing_run_id),
             benchmark_id=str(existing_benchmark_id),
-            started_at=self._to_aware_utc_datetime(existing_started_at),
+            started_at=self._to_aware_storage_datetime(existing_started_at),
             finished_at=benchmark_finished_at,
             source_db_name=str(existing_source_db),
             source_table_name=str(existing_source_table),
@@ -710,25 +798,24 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         sequential_top_n_limits_json: Optional[str],
     ) -> None:
         """Пишет snapshot run-контекста в `benchmark_runs` (upsert через ReplacingMergeTree)."""
-        started_at_ch = self._to_naive_utc_datetime(started_at)
-        finished_at_ch = self._to_naive_utc_datetime(finished_at)
-        updated_at_ch = self._to_naive_utc_datetime(datetime.now(timezone.utc))
-        row = (
-            run_record_id,
-            int(benchmark_run_id),
-            str(benchmark_id),
-            started_at_ch,
-            finished_at_ch,
-            str(source_db_name),
-            str(source_table_name),
-            int(top_n_winners) if top_n_winners is not None else None,
-            sequential_top_n_limits_json,
-            updated_at_ch,
-        )
-        self._client.insert(
-            table=f"{self._database}.{self._runs_table}",
-            data=[row],
-            column_names=[
+        started_at_ch = self._to_naive_storage_datetime(started_at)
+        finished_at_ch = self._to_naive_storage_datetime(finished_at)
+        updated_at_ch = self._to_naive_storage_datetime(datetime.now(_RESULTS_TZ))
+        self._insert_row_map(
+            table_name=self._runs_table,
+            row_map={
+                "id": run_record_id,
+                "benchmark_run_id": int(benchmark_run_id),
+                "benchmark_id": str(benchmark_id),
+                "started_at": started_at_ch,
+                "finished_at": finished_at_ch,
+                "source_db_name": str(source_db_name),
+                "source_table_name": str(source_table_name),
+                "top_n_winners": int(top_n_winners) if top_n_winners is not None else None,
+                "sequential_top_n_limits_json": sequential_top_n_limits_json,
+                "updated_at": updated_at_ch,
+            },
+            preferred_columns=[
                 "id",
                 "benchmark_run_id",
                 "benchmark_id",
@@ -872,6 +959,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
               AND benchmark_id = %(benchmark_id)s
               AND source_db_name = %(source_database)s
               AND source_table_name = %(source_table)s
+            ORDER BY finished_at DESC, benchmark_started_at DESC, id DESC
             """,
             {
                 "benchmark_run_id": benchmark_run_id,
@@ -887,6 +975,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             if str(mode).strip()
         }
         summaries: list[StoredVariantSummary] = []
+        seen_variant_uuid_keys: set[tuple[str, str]] = set()
+        seen_variant_tables_without_uuid: set[str] = set()
         for row in rows:
             if len(row) == 5:
                 (
@@ -925,9 +1015,23 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                         mode_value,
                     )
 
+            normalized_variant_table = str(variant_table)
+            execution_uuid = ""
+            if isinstance(variant_params, dict):
+                execution_uuid = str(variant_params.get("execution_uuid") or "").strip()
+            if execution_uuid:
+                dedupe_key = (normalized_variant_table, execution_uuid)
+                if dedupe_key in seen_variant_uuid_keys:
+                    continue
+                seen_variant_uuid_keys.add(dedupe_key)
+            else:
+                if normalized_variant_table in seen_variant_tables_without_uuid:
+                    continue
+                seen_variant_tables_without_uuid.add(normalized_variant_table)
+
             summaries.append(
                 StoredVariantSummary(
-                    variant_table=str(variant_table),
+                    variant_table=normalized_variant_table,
                     tested_table_ddl=str(tested_table_ddl),
                     variant_mode=mode_value,
                     score=float(score) if score is not None else None,
@@ -1109,7 +1213,11 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         source_table_ddl_fallback: Optional[str],
         result: BenchmarkVariantResult,
     ) -> StoredBenchmarkResult:
-        tested_table_ddl = result.tested_table_ddl or tested_table_ddl_fallback
+        tested_table_ddl = self._resolve_tested_table_ddl(
+            result_tested_table_ddl=result.tested_table_ddl,
+            tested_table_ddl_fallback=tested_table_ddl_fallback,
+            expected_variant_table=variant_table,
+        )
         phase, resolved_phase_name = self._resolve_phase_metadata(variant_mode)
         if isinstance(variant_params, dict):
             phase_name_from_params = variant_params.get("phase_name")
@@ -1199,17 +1307,37 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             or result.tested_table_cols_sizes
         )
         size_bytes_indexes_json = result.tested_table_indexes_sizes
+        execution_uuid = ""
+        if isinstance(variant_params, dict):
+            execution_uuid = str(variant_params.get("execution_uuid") or "").strip()
+        celery_task_id = str(result.celery_task_id or "").strip()
+        if not celery_task_id and isinstance(variant_params, dict):
+            celery_task_id = str(variant_params.get("celery_task_id") or "").strip()
+        celery_worker_hostname = str(result.celery_worker_hostname or "").strip()
+        if not celery_worker_hostname and isinstance(variant_params, dict):
+            celery_worker_hostname = str(
+                variant_params.get("celery_worker_hostname") or ""
+            ).strip()
+        result_id = execution_uuid or str(result.id or "").strip() or str(uuid4())
+        started_at = self._to_aware_storage_datetime(
+            result.worker_started_at or benchmark_started_at
+        )
+        finished_at = self._to_aware_storage_datetime(
+            result.worker_finished_at or datetime.now(_RESULTS_TZ)
+        )
 
         return StoredBenchmarkResult(
             benchmark_run_id=benchmark_run_id,
             benchmark_started_at=benchmark_started_at,
             benchmark_id=benchmark_id,
-            id=result.id or str(uuid4()),
+            id=result_id,
             parent_id=parent_id,
             phase=phase,
             phase_name=resolved_phase_name,
-            started_at=benchmark_started_at,
-            finished_at=datetime.now(timezone.utc),
+            celery_task_id=celery_task_id or None,
+            celery_worker_hostname=celery_worker_hostname or None,
+            started_at=started_at,
+            finished_at=finished_at,
             source_db_name=source_database,
             source_table_name=source_table,
             tested_table_ddl=tested_table_ddl,
@@ -1336,6 +1464,56 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             score_calculation_json=result.score_calculation_json,
             score=result.score,
         )
+
+    @classmethod
+    def _extract_table_name_from_ddl(cls, ddl_text: str) -> Optional[str]:
+        """Извлекает имя таблицы из CREATE TABLE DDL."""
+        cleaned = str(ddl_text or "").strip()
+        if not cleaned:
+            return None
+        try:
+            parsed = TableDDL.from_ddl(cleaned)
+        except Exception:
+            return None
+        raw_name = str(parsed.name or "").strip().replace("`", "")
+        if not raw_name:
+            return None
+        if "." in raw_name:
+            return raw_name.rsplit(".", 1)[-1].strip() or None
+        return raw_name
+
+    @classmethod
+    def _resolve_tested_table_ddl(
+        cls,
+        *,
+        result_tested_table_ddl: Optional[str],
+        tested_table_ddl_fallback: str,
+        expected_variant_table: str,
+    ) -> str:
+        """
+        Возвращает корректный tested_table_ddl для записи результата.
+
+        Если воркер вернул DDL с именем таблицы, не совпадающим с `variant_table`,
+        используем fallback из payload job, чтобы избежать склейки таблиц между
+        разными source-планами.
+        """
+        fallback_ddl = str(tested_table_ddl_fallback or "").strip()
+        candidate_ddl = str(result_tested_table_ddl or "").strip()
+        if not candidate_ddl:
+            return fallback_ddl
+
+        expected_table = str(expected_variant_table or "").strip().replace("`", "")
+        candidate_table = cls._extract_table_name_from_ddl(candidate_ddl)
+        if candidate_table and expected_table and candidate_table != expected_table:
+            logger.warning(
+                "ClickHouseBenchmarkResultStore: mismatch tested_table_ddl/table "
+                "(expected=%s, got=%s). Using fallback DDL.",
+                expected_table,
+                candidate_table,
+            )
+            if fallback_ddl:
+                return fallback_ddl
+        return candidate_ddl
 
     @classmethod
     def _to_query_keyed_json_map(cls, value: Optional[str]) -> Optional[str]:
@@ -1896,22 +2074,22 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         )
 
     @staticmethod
-    def _to_naive_utc_datetime(value: Optional[datetime]) -> Optional[datetime]:
-        """Приводит datetime к naive UTC для ClickHouse DateTime64."""
+    def _to_naive_storage_datetime(value: Optional[datetime]) -> Optional[datetime]:
+        """Приводит datetime к naive storage-timezone для ClickHouse DateTime64."""
         if value is None:
             return None
         if value.tzinfo is None:
-            return value
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
+            value = value.replace(tzinfo=_RESULTS_TZ)
+        return value.astimezone(_RESULTS_TZ).replace(tzinfo=None)
 
     @staticmethod
-    def _to_aware_utc_datetime(value: Any) -> datetime:
-        """Нормализует дату/время из ClickHouse к aware UTC datetime."""
+    def _to_aware_storage_datetime(value: Any) -> datetime:
+        """Нормализует дату/время из ClickHouse к aware storage-timezone datetime."""
         if isinstance(value, datetime):
             if value.tzinfo is None:
-                return value.replace(tzinfo=timezone.utc)
-            return value.astimezone(timezone.utc)
-        return datetime.now(timezone.utc)
+                return value.replace(tzinfo=_RESULTS_TZ)
+            return value.astimezone(_RESULTS_TZ)
+        return datetime.now(_RESULTS_TZ)
 
     def _store_record_by_strategy(
         self,
@@ -1954,13 +2132,30 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         table_name: str,
         recalculate_phase_ranking: bool,
     ) -> None:
-        row_map = self._record_to_clickhouse_map(record)
-        row = tuple(row_map[column] for column in self._INSERT_COLUMNS)
-        self._client.insert(
-            table=f"{self._database}.{table_name}",
-            data=[row],
-            column_names=self._INSERT_COLUMNS,
-        )
+        with self._record_insert_lock, self._acquire_cross_process_record_lock(
+            table_name=table_name,
+            record_id=record.id,
+        ):
+            if self._record_id_exists(table_name=table_name, record_id=record.id):
+                logger.warning(
+                    "ClickHouseBenchmarkResultStore: duplicate record id=%s в `%s`.`%s` "
+                    "(run_id=%d, benchmark=%s, table=%s.%s, mode=%s) — пропускаем insert",
+                    record.id,
+                    self._database,
+                    table_name,
+                    record.benchmark_run_id,
+                    record.benchmark_id,
+                    record.source_db_name,
+                    record.source_table_name,
+                    record.variant_mode,
+                )
+                return
+            row_map = self._record_to_clickhouse_map(record)
+            self._insert_row_map(
+                table_name=table_name,
+                row_map=row_map,
+                preferred_columns=self._INSERT_COLUMNS,
+            )
         if recalculate_phase_ranking and record.phase is not None:
             self._recalculate_phase_ranking(
                 benchmark_run_id=record.benchmark_run_id,
@@ -1974,18 +2169,184 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
 
     def _insert_phased_record(self, record: StoredBenchmarkResult) -> None:
         """Сохраняет результат phased-стратегии в компактную phased-таблицу."""
-        row_map = self._record_to_phased_clickhouse_map(record)
-        row = tuple(row_map[column] for column in self._PHASED_INSERT_COLUMNS)
-        self._client.insert(
-            table=f"{self._database}.{self._phased_table}",
-            data=[row],
-            column_names=self._PHASED_INSERT_COLUMNS,
+        with self._record_insert_lock, self._acquire_cross_process_record_lock(
+            table_name=self._phased_table,
+            record_id=record.id,
+        ):
+            if self._record_id_exists(table_name=self._phased_table, record_id=record.id):
+                logger.warning(
+                    "ClickHouseBenchmarkResultStore: duplicate phased record id=%s в `%s`.`%s` "
+                    "(run_id=%d, benchmark=%s, table=%s.%s, mode=%s) — пропускаем insert",
+                    record.id,
+                    self._database,
+                    self._phased_table,
+                    record.benchmark_run_id,
+                    record.benchmark_id,
+                    record.source_db_name,
+                    record.source_table_name,
+                    record.variant_mode,
+                )
+                return
+            row_map = self._record_to_phased_clickhouse_map(record)
+            self._insert_row_map(
+                table_name=self._phased_table,
+                row_map=row_map,
+                preferred_columns=self._PHASED_INSERT_COLUMNS,
+            )
+
+    @staticmethod
+    def _normalize_record_id(record_id: str) -> str:
+        """Возвращает нормализованный record id."""
+        return str(record_id or "").strip()
+
+    @staticmethod
+    def _parse_float_env(env_name: str, *, default: float) -> float:
+        """Читает float-параметр из env; при ошибке возвращает default."""
+        raw = str(os.getenv(env_name, "") or "").strip()
+        if not raw:
+            return float(default)
+        try:
+            return max(0.0, float(raw))
+        except Exception:
+            logger.warning(
+                "ClickHouseBenchmarkResultStore: env `%s=%s` не float, используем default=%s",
+                env_name,
+                raw,
+                default,
+            )
+            return float(default)
+
+    @staticmethod
+    def _is_redis_url(value: str) -> bool:
+        """Проверяет, что строка похожа на redis URL."""
+        lowered = str(value or "").strip().lower()
+        return lowered.startswith("redis://") or lowered.startswith("rediss://")
+
+    def _resolve_redis_lock_url(self) -> str:
+        """Определяет URL Redis для dedup-lock."""
+        explicit = str(os.getenv("BENCH_RESULT_STORE_REDIS_URL", "") or "").strip()
+        if explicit:
+            return explicit
+
+        # Фоллбек на общий Celery backend, если это Redis.
+        celery_backend = str(os.getenv("BENCH_CELERY_BACKEND_URL", "") or "").strip()
+        if self._is_redis_url(celery_backend):
+            return celery_backend
+        return ""
+
+    def _init_redis_lock_client(self) -> None:
+        """Инициализирует Redis-клиент для межпроцессного lock."""
+        redis_url = str(self._record_lock_redis_url or "").strip()
+        if not redis_url:
+            raise RuntimeError(
+                "ClickHouseBenchmarkResultStore: Redis обязателен для запуска. "
+                "Задай BENCH_RESULT_STORE_REDIS_URL "
+                "(или BENCH_CELERY_BACKEND_URL с redis:// / rediss://)."
+            )
+        if redis_module is None:
+            raise RuntimeError(
+                "ClickHouseBenchmarkResultStore: пакет `redis` не установлен, "
+                "но Redis lock обязателен для запуска."
+            )
+        try:
+            client = redis_module.Redis.from_url(redis_url)
+            client.ping()
+            self._record_lock_redis_client = client
+            logger.info(
+                "ClickHouseBenchmarkResultStore: включен Redis dedup-lock "
+                "(prefix=%s, ttl_sec=%.1f, blocking_timeout_sec=%.1f)",
+                self._record_lock_redis_prefix,
+                self._record_lock_redis_ttl_sec,
+                self._record_lock_redis_blocking_timeout_sec,
+            )
+        except Exception as exc:
+            self._record_lock_redis_client = None
+            raise RuntimeError(
+                "ClickHouseBenchmarkResultStore: не удалось инициализировать Redis dedup-lock "
+                f"(url={redis_url}): {exc}"
+            ) from exc
+
+    @contextmanager
+    def _acquire_cross_process_record_lock(self, *, table_name: str, record_id: str):
+        """
+        Межпроцессный Redis lock для `(table_name, record_id)`.
+
+        Нужен, чтобы check->insert дедуп работал корректно между несколькими worker-процессами.
+        """
+        normalized_id = self._normalize_record_id(record_id)
+        if not normalized_id:
+            yield
+            return
+
+        redis_client = self._record_lock_redis_client
+        if redis_client is None:
+            raise RuntimeError(
+                "ClickHouseBenchmarkResultStore: Redis dedup-lock client не инициализирован"
+            )
+
+        lock_key = f"{self._database}.{table_name}:{normalized_id}"
+        lock_name = (
+            f"{self._record_lock_redis_prefix}:"
+            f"{sha256(lock_key.encode('utf-8')).hexdigest()}"
+        )
+        lock = redis_client.lock(
+            name=lock_name,
+            timeout=self._record_lock_redis_ttl_sec,
+            blocking_timeout=self._record_lock_redis_blocking_timeout_sec,
         )
 
+        acquired = False
+        try:
+            acquired = bool(lock.acquire(blocking=True))
+            if not acquired:
+                raise TimeoutError(
+                    "ClickHouseBenchmarkResultStore: timeout acquiring Redis dedup-lock "
+                    f"for `{self._database}`.`{table_name}` id={normalized_id}"
+                )
+            yield
+        finally:
+            if acquired:
+                try:
+                    lock.release()
+                except Exception:
+                    pass
+
+    def _insert_row_map(
+        self,
+        *,
+        table_name: str,
+        row_map: Dict[str, Any],
+        preferred_columns: Sequence[str],
+    ) -> None:
+        """Вставляет запись в таблицу в соответствии с текущей runtime-схемой."""
+        column_names = list(preferred_columns)
+        row = tuple(row_map[column_name] for column_name in column_names)
+        self._client.insert(
+            table=f"{self._database}.{table_name}",
+            data=[row],
+            column_names=column_names,
+        )
+
+    def _record_id_exists(self, *, table_name: str, record_id: str) -> bool:
+        """Проверяет наличие записи с указанным `id` в таблице результатов."""
+        normalized_id = self._normalize_record_id(record_id)
+        if not normalized_id:
+            return False
+        rows = self._execute(
+            f"""
+            SELECT 1
+            FROM `{self._database}`.`{table_name}`
+            WHERE id = %(id)s
+            LIMIT 1
+            """,
+            {"id": normalized_id},
+        )
+        return bool(rows)
+
     def _record_to_clickhouse_map(self, record: StoredBenchmarkResult) -> Dict[str, Any]:
-        benchmark_started_at_utc = self._to_naive_utc_datetime(record.benchmark_started_at)
-        started_at_utc = self._to_naive_utc_datetime(record.started_at)
-        finished_at_utc = self._to_naive_utc_datetime(record.finished_at)
+        benchmark_started_at_utc = self._to_naive_storage_datetime(record.benchmark_started_at)
+        started_at_utc = self._to_naive_storage_datetime(record.started_at)
+        finished_at_utc = self._to_naive_storage_datetime(record.finished_at)
 
         row_map = {
             **record.model_dump(),
@@ -2017,9 +2378,9 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
 
     def _record_to_phased_clickhouse_map(self, record: StoredBenchmarkResult) -> Dict[str, Any]:
         """Преобразует запись результата в map для phased-таблицы."""
-        benchmark_started_at_utc = self._to_naive_utc_datetime(record.benchmark_started_at)
-        started_at_utc = self._to_naive_utc_datetime(record.started_at)
-        finished_at_utc = self._to_naive_utc_datetime(record.finished_at)
+        benchmark_started_at_utc = self._to_naive_storage_datetime(record.benchmark_started_at)
+        started_at_utc = self._to_naive_storage_datetime(record.started_at)
+        finished_at_utc = self._to_naive_storage_datetime(record.finished_at)
 
         variant_params_json = record.variant_params_json or json.dumps(
             record.variant_params,
@@ -2075,6 +2436,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             "parent_id": record.parent_id,
             "phase": record.phase,
             "phase_name": record.phase_name,
+            "celery_task_id": record.celery_task_id,
+            "celery_worker_hostname": record.celery_worker_hostname,
             "started_at": started_at_utc,
             "finished_at": finished_at_utc,
             "source_db_name": str(record.source_db_name),

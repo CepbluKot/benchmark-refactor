@@ -15,6 +15,7 @@ class VariantMeta(BaseModel):
 
     global_index: int
     mode: str
+    execution_uuid: Optional[str] = None
     parent_variant_table: Optional[str] = None
     phase_name: Optional[str] = None
     table_index_granularity: Optional[int] = None

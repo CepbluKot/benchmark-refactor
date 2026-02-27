@@ -163,6 +163,10 @@ class BenchmarkVariantResult(_FrozenModel):
     source_table_ddl: Optional[str] = None
     tested_table_ddl: Optional[str] = None
     id: Optional[str] = None
+    celery_task_id: Optional[str] = None
+    celery_worker_hostname: Optional[str] = None
+    worker_started_at: Optional[datetime] = None
+    worker_finished_at: Optional[datetime] = None
     is_source_table_copy: Optional[bool] = None
     index_params: Optional[str] = None
     total_n_rows_in_tested_table: Optional[int] = None
@@ -324,6 +328,8 @@ class StoredBenchmarkResult(_FrozenModel):
     parent_id: Optional[str] = None
     phase: Optional[int] = None
     phase_name: Optional[str] = None
+    celery_task_id: Optional[str] = None
+    celery_worker_hostname: Optional[str] = None
     source_db_name: str
     source_table_name: str
     tested_table_ddl: str
@@ -561,6 +567,7 @@ def build_variant_params(variant_meta: VariantMeta) -> Dict[str, Any]:
     return {
         "mode": variant_meta.mode,
         "global_index": variant_meta.global_index,
+        "execution_uuid": variant_meta.execution_uuid,
         "parent_variant_table": variant_meta.parent_variant_table,
         "phase_name": variant_meta.phase_name,
         "table_index_granularity": variant_meta.table_index_granularity,

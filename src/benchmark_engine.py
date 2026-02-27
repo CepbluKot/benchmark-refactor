@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import logging
 import os
 from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from uuid import uuid4
 
 import src.benchmark_runtime.implementations.table_strategy.sequential_phased_topn as sequential_phased_topn_strategy_impl
 from src.clickhouse_ddl import TableDDL
@@ -764,11 +765,17 @@ class BenchmarkEngine:
         source_benchmark: Optional[SourceBenchmarkResult] = None,
     ) -> VariantJob:
         """Собирает `VariantJob` из подготовленного variant DDL и его метаданных."""
+        effective_variant_meta = variant_meta
+        if not str(variant_meta.execution_uuid or "").strip():
+            effective_variant_meta = variant_meta.model_copy(
+                update={"execution_uuid": uuid4().hex}
+            )
+
         variant_database = table_plan.test_database or table_plan.database
         variant_table = variant_table_name(
             original_table=table_plan.table,
             benchmark_id=table_plan.benchmark_id,
-            variant_index=variant_meta.global_index,
+            variant_index=effective_variant_meta.global_index,
         )
         prepared_ddl = variant_ddl.copy()
         prepared_ddl.name = f"{variant_database}.{variant_table}"
@@ -782,7 +789,7 @@ class BenchmarkEngine:
 
         effective_insert_rows_limit = self.resolve_insert_rows_limit(
             table_plan=table_plan,
-            variant_mode=variant_meta.mode,
+            variant_mode=effective_variant_meta.mode,
             job_mode=job_mode,
         )
 
@@ -797,7 +804,7 @@ class BenchmarkEngine:
             variant_database=variant_database,
             source_table=table_plan.table,
             variant_table=variant_table,
-            variant_meta=variant_meta,
+            variant_meta=effective_variant_meta,
             mode=job_mode if job_mode is not None else table_plan.mode,
             max_iterations=table_plan.max_iterations,
             insert_rows_limit=effective_insert_rows_limit,
@@ -1073,11 +1080,20 @@ class BenchmarkRunner:
             run_started_at.isoformat(),
             list(benchmark_ids) if benchmark_ids else "all",
         )
-        raw_fixed_global_progress = os.getenv("BENCH_GLOBAL_PROGRESS_FIXED_TOTAL")
-        fixed_global_progress_enabled = (
-            bool(raw_fixed_global_progress and raw_fixed_global_progress.strip())
-            and raw_fixed_global_progress.strip().lower() in {"1", "true", "yes", "on"}
-        )
+        raw_fixed_global_progress = os.getenv("BENCH_GLOBAL_PROGRESS_FIXED_TOTAL", "").strip()
+        fixed_global_progress_enabled: Optional[bool]
+        if not raw_fixed_global_progress:
+            fixed_global_progress_enabled = None
+        elif raw_fixed_global_progress.lower() in {"1", "true", "yes", "on"}:
+            fixed_global_progress_enabled = True
+        elif raw_fixed_global_progress.lower() in {"0", "false", "no", "off"}:
+            fixed_global_progress_enabled = False
+        else:
+            fixed_global_progress_enabled = None
+        if fixed_global_progress_enabled is None:
+            fixed_global_progress_enabled = not self._contains_phased_strategy(
+                benchmark_ids=benchmark_ids
+            )
         global_progress_total: Optional[int] = None
         if fixed_global_progress_enabled:
             global_progress_total = self._estimate_global_progress_target(
@@ -1438,6 +1454,17 @@ class BenchmarkRunner:
             total_jobs,
         )
         return total_jobs
+
+    def _contains_phased_strategy(
+        self,
+        *,
+        benchmark_ids: Optional[Sequence[str]],
+    ) -> bool:
+        """Возвращает True, если среди выбранных benchmark есть phased-стратегия."""
+        for benchmark in self._engine.iter_benchmarks(benchmark_ids=benchmark_ids):
+            if self._canonical_strategy_key(benchmark.strategy) == "sequential_phased_topn_strategy":
+                return True
+        return False
 
     def _estimate_table_jobs_upper_bound(self, table_plan: TableBenchmarkPlan) -> int:
         """Считает верхнюю оценку числа variant jobs для одного table-plan."""

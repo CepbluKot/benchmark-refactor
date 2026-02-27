@@ -8,7 +8,7 @@ import itertools
 import logging
 import re
 from time import monotonic, sleep
-from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from src.clickhouse_ddl import IndexDef, TableDDL
 from src.column_variants import ColumnVariantMeta
@@ -477,6 +477,20 @@ def _dispatch_stage_jobs(
     )
 
 
+def _expected_execution_uuid_by_table(jobs: Sequence[VariantJob]) -> Dict[str, str]:
+    """Строит map `{variant_table: execution_uuid}` для валидации ответов воркеров."""
+    expected: Dict[str, str] = {}
+    for job in jobs:
+        table_name = str(job.variant_table or "").strip()
+        if not table_name:
+            continue
+        execution_uuid = str(job.variant_meta.execution_uuid or "").strip()
+        if not execution_uuid:
+            continue
+        expected[table_name] = execution_uuid
+    return expected
+
+
 def _wait_for_stage_summaries(
     *,
     store: BenchmarkResultStore,
@@ -486,9 +500,15 @@ def _wait_for_stage_summaries(
     source_table: str,
     variant_mode: str,
     expected_variant_tables: Sequence[str],
+    expected_execution_uuid_by_table: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, StoredVariantSummary]:
-    """Ждёт, пока result-store вернёт summary для всех переданных variant_table."""
+    """Ждёт summary для всех variant_table (при наличии — с проверкой execution_uuid)."""
     expected = {table for table in expected_variant_tables if table}
+    expected_uuids = {
+        str(table_name).strip(): str(execution_uuid).strip()
+        for table_name, execution_uuid in (expected_execution_uuid_by_table or {}).items()
+        if str(table_name).strip() and str(execution_uuid).strip()
+    }
     if not expected:
         return {}
 
@@ -508,20 +528,78 @@ def _wait_for_stage_summaries(
                 "что необходимо для multi-phase стратегии"
             ) from exc
 
-        by_table = {
-            summary.variant_table: summary
-            for summary in summaries
-            if summary.variant_table in expected
-        }
+        by_table: Dict[str, StoredVariantSummary] = {}
+        matched_uuid_counts: Dict[tuple[str, str], int] = {}
+        for summary in summaries:
+            variant_table = summary.variant_table
+            if variant_table not in expected:
+                continue
+            expected_uuid = expected_uuids.get(variant_table)
+            if expected_uuid:
+                summary_uuid = ""
+                if isinstance(summary.variant_params, dict):
+                    summary_uuid = str(
+                        summary.variant_params.get("execution_uuid") or ""
+                    ).strip()
+                if summary_uuid != expected_uuid:
+                    continue
+                uuid_key = (variant_table, expected_uuid)
+                matched_uuid_counts[uuid_key] = matched_uuid_counts.get(uuid_key, 0) + 1
+            by_table[variant_table] = summary
+        duplicate_uuid_keys = sorted(
+            key for key, count in matched_uuid_counts.items() if count > 1
+        )
+        if duplicate_uuid_keys:
+            raise ValueError(
+                "Нарушена целостность phase-result correlation: найдено более одного "
+                "результата для execution_uuid. "
+                f"mode={variant_mode}, duplicates={duplicate_uuid_keys[:10]}"
+            )
+        if expected_uuids:
+            missing_uuid_keys = sorted(
+                (table_name, expected_uuid)
+                for table_name, expected_uuid in expected_uuids.items()
+                if matched_uuid_counts.get((table_name, expected_uuid), 0) != 1
+            )
+            if not missing_uuid_keys and len(by_table) != len(expected):
+                missing_tables = sorted(expected - set(by_table))
+                raise ValueError(
+                    "Нарушена целостность phase-result correlation: "
+                    "количество сохранённых UUID совпало, но таблицы не сошлись. "
+                    f"mode={variant_mode}, missing_tables={missing_tables[:10]}"
+                )
+            if missing_uuid_keys:
+                # продолжим polling до timeout — возможно воркеры ещё дописывают результаты.
+                pass
         if len(by_table) >= len(expected):
-            return by_table
+            if expected_uuids:
+                missing_uuid_keys = [
+                    (table_name, expected_uuid)
+                    for table_name, expected_uuid in expected_uuids.items()
+                    if matched_uuid_counts.get((table_name, expected_uuid), 0) != 1
+                ]
+                if missing_uuid_keys:
+                    # Не возвращаем неполный snapshot по UUID, продолжаем ждать.
+                    pass
+                else:
+                    return by_table
+            else:
+                return by_table
 
         if monotonic() >= deadline:
             missing = sorted(expected - set(by_table))
+            missing_uuid_keys = []
+            if expected_uuids:
+                missing_uuid_keys = sorted(
+                    (table_name, expected_uuid)
+                    for table_name, expected_uuid in expected_uuids.items()
+                    if matched_uuid_counts.get((table_name, expected_uuid), 0) != 1
+                )
             raise TimeoutError(
                 "Ожидание результатов фазы превысило timeout: "
                 f"mode={variant_mode}, expected={len(expected)}, ready={len(by_table)}, "
-                f"missing={missing[:10]}"
+                f"missing={missing[:10]}, matched_by_uuid={bool(expected_uuids)}, "
+                f"missing_uuid_keys={missing_uuid_keys[:10]}"
             )
         sleep(_STAGE_WAIT_POLL_INTERVAL_SEC)
 
@@ -1009,6 +1087,9 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             source_table=table_plan.table,
             variant_mode="order_by",
             expected_variant_tables=[job.variant_table for job in order_jobs],
+            expected_execution_uuid_by_table=_expected_execution_uuid_by_table(
+                order_jobs
+            ),
         )
         _finalize_stage_ranking_if_supported(
             store=store,
@@ -1130,6 +1211,9 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 source_table=table_plan.table,
                 variant_mode="types",
                 expected_variant_tables=[job.variant_table for job in jobs],
+                expected_execution_uuid_by_table=_expected_execution_uuid_by_table(
+                    jobs
+                ),
             )
             _finalize_stage_ranking_if_supported(
                 store=store,
@@ -1308,6 +1392,9 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 source_table=table_plan.table,
                 variant_mode="codecs",
                 expected_variant_tables=[job.variant_table for job in jobs],
+                expected_execution_uuid_by_table=_expected_execution_uuid_by_table(
+                    jobs
+                ),
             )
             _finalize_stage_ranking_if_supported(
                 store=store,
@@ -1513,6 +1600,9 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 source_table=table_plan.table,
                 variant_mode="indexes",
                 expected_variant_tables=[job.variant_table for job in jobs],
+                expected_execution_uuid_by_table=_expected_execution_uuid_by_table(
+                    jobs
+                ),
             )
             _finalize_stage_ranking_if_supported(
                 store=store,
@@ -1705,6 +1795,9 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             source_table=table_plan.table,
             variant_mode="final_validation",
             expected_variant_tables=[job.variant_table for job in final_jobs],
+            expected_execution_uuid_by_table=_expected_execution_uuid_by_table(
+                final_jobs
+            ),
         )
         _finalize_stage_ranking_if_supported(
             store=store,

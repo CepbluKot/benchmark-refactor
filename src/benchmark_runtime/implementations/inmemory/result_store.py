@@ -55,6 +55,9 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
             if result.variant_params
             else build_variant_params(job.variant_meta)
         )
+        execution_uuid = ""
+        if isinstance(variant_params, dict):
+            execution_uuid = str(variant_params.get("execution_uuid") or "").strip()
         tested_table_ddl = result.tested_table_ddl or job.variant_ddl.to_ddl()
         variant_mode = result.variant_mode or job.variant_meta.mode
 
@@ -64,7 +67,9 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
                 benchmark_started_at=job.benchmark_started_at,
                 benchmark_id=job.benchmark_id,
                 started_at=job.benchmark_started_at,
-                id=result.id or str(uuid4()),
+                id=execution_uuid or result.id or str(uuid4()),
+                celery_task_id=result.celery_task_id,
+                celery_worker_hostname=result.celery_worker_hostname,
                 source_db_name=job.source_database,
                 source_table_name=job.source_table,
                 tested_table_ddl=tested_table_ddl,

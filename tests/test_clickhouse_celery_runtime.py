@@ -182,6 +182,27 @@ class _FakeClickHouseResultStore(ClickHouseBenchmarkResultStore):
 
         return _DummyClient()
 
+    def _init_redis_lock_client(self) -> None:
+        class _NoopRedisLock:
+            def acquire(self, blocking: bool = True) -> bool:
+                del blocking
+                return True
+
+            def release(self) -> None:
+                return None
+
+        class _NoopRedisClient:
+            def lock(
+                self,
+                name: str,
+                timeout: float | None = None,
+                blocking_timeout: float | None = None,
+            ) -> _NoopRedisLock:
+                del name, timeout, blocking_timeout
+                return _NoopRedisLock()
+
+        self._record_lock_redis_client = _NoopRedisClient()
+
     def _execute(self, query: str, params: Any = None):
         self.captured_queries.append((query, params))
         if "SELECT\n                variant_table" in query:

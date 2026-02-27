@@ -11,7 +11,6 @@
   user_events__bench__mytest__0042
 
 Ограничения:
-  - Имена обрезаются до 64 символов (лимит ClickHouse).
   - Символы кроме [a-zA-Z0-9_] заменяются на '_'.
 """
 
@@ -20,7 +19,6 @@ from __future__ import annotations
 import re
 from typing import Optional, Tuple
 
-_MAX_LEN = 64
 _SEP = "__bench__"
 _IDX_SEP = "__"
 _UNSAFE = re.compile(r"[^a-zA-Z0-9_]")
@@ -48,15 +46,7 @@ def variant_table_name(
     table = _sanitize(original_table)
     bench = _sanitize(benchmark_id)
     suffix = f"{_SEP}{bench}{_IDX_SEP}{variant_index:04d}"
-
-    max_table_len = _MAX_LEN - len(suffix)
-    if max_table_len <= 0:
-        raise ValueError(
-            f"benchmark_id={benchmark_id!r} слишком длинный — "
-            f"суффикс '{suffix}' не влезает в {_MAX_LEN} символов"
-        )
-
-    return table[:max_table_len] + suffix
+    return table + suffix
 
 
 def parse_variant_name(name: str) -> Optional[Tuple[str, str, int]]:

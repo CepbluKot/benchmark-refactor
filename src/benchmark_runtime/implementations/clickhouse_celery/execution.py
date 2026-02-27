@@ -127,6 +127,8 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
         """Отправляет variant-задачу в Celery (fire-and-forget)."""
         variant_payload = self._build_variant_payload(job)
         task_id = self._next_task_id(job)
+        if "celery_task_id" not in variant_payload.variant_params:
+            variant_payload.variant_params["celery_task_id"] = task_id
         logger.debug(
             "CeleryClickHouseExecutionAdapter: dispatch variant "
             "(run_id=%d, benchmark=%s, table=%s.%s, variant=%s, mode=%s, task_id=%s)",

@@ -2844,6 +2844,89 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         }
         self.assertGreaterEqual(len(final_parent_tables), 2)
 
+    def test_wait_for_stage_summaries_matches_expected_execution_uuid(self) -> None:
+        """Проверяет, что summary матчатся не только по table, но и по execution_uuid."""
+        import src.benchmark_runtime.implementations.table_strategy.sequential_phased_topn as phased_strategy
+        from src.benchmark_runtime.types import StoredVariantSummary
+
+        class _StoreWithDuplicateTable:
+            def list_variant_summaries(self, **_kwargs):
+                return [
+                    StoredVariantSummary(
+                        variant_table="events__bench__0001",
+                        tested_table_ddl="CREATE TABLE x (a UInt8) ENGINE = MergeTree ORDER BY a",
+                        variant_mode="types",
+                        score=999.0,
+                        variant_params={"execution_uuid": "foreign-uuid"},
+                    ),
+                    StoredVariantSummary(
+                        variant_table="events__bench__0001",
+                        tested_table_ddl="CREATE TABLE y (a UInt8) ENGINE = MergeTree ORDER BY a",
+                        variant_mode="types",
+                        score=1.0,
+                        variant_params={"execution_uuid": "expected-uuid"},
+                    ),
+                ]
+
+        summaries = phased_strategy._wait_for_stage_summaries(
+            store=_StoreWithDuplicateTable(),
+            benchmark_run_id=1,
+            benchmark_id="bench_uuid_match",
+            source_database="analytics",
+            source_table="events",
+            variant_mode="types",
+            expected_variant_tables=["events__bench__0001"],
+            expected_execution_uuid_by_table={
+                "events__bench__0001": "expected-uuid",
+            },
+        )
+
+        self.assertEqual(len(summaries), 1)
+        matched = summaries["events__bench__0001"]
+        self.assertEqual(
+            matched.variant_params.get("execution_uuid"),
+            "expected-uuid",
+        )
+        self.assertIn("CREATE TABLE y", matched.tested_table_ddl)
+
+    def test_wait_for_stage_summaries_raises_on_duplicate_execution_uuid(self) -> None:
+        """Проверяет, что duplicate execution_uuid останавливает переход фазы."""
+        import src.benchmark_runtime.implementations.table_strategy.sequential_phased_topn as phased_strategy
+        from src.benchmark_runtime.types import StoredVariantSummary
+
+        class _StoreWithDuplicateUuid:
+            def list_variant_summaries(self, **_kwargs):
+                return [
+                    StoredVariantSummary(
+                        variant_table="events__bench__0001",
+                        tested_table_ddl="CREATE TABLE x (a UInt8) ENGINE = MergeTree ORDER BY a",
+                        variant_mode="types",
+                        score=10.0,
+                        variant_params={"execution_uuid": "dup-uuid"},
+                    ),
+                    StoredVariantSummary(
+                        variant_table="events__bench__0001",
+                        tested_table_ddl="CREATE TABLE y (a UInt8) ENGINE = MergeTree ORDER BY a",
+                        variant_mode="types",
+                        score=9.0,
+                        variant_params={"execution_uuid": "dup-uuid"},
+                    ),
+                ]
+
+        with self.assertRaisesRegex(ValueError, "execution_uuid"):
+            phased_strategy._wait_for_stage_summaries(
+                store=_StoreWithDuplicateUuid(),
+                benchmark_run_id=1,
+                benchmark_id="bench_uuid_match",
+                source_database="analytics",
+                source_table="events",
+                variant_mode="types",
+                expected_variant_tables=["events__bench__0001"],
+                expected_execution_uuid_by_table={
+                    "events__bench__0001": "dup-uuid",
+                },
+            )
+
     def test_sequential_mode_propagates_source_benchmark_to_all_stage_jobs(self) -> None:
         """Проверяет, что baseline source benchmark доступен во всех sequential jobs."""
         benchmark = BenchmarkConfig(

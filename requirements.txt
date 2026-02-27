@@ -3,6 +3,7 @@ pydantic-settings>=2.3,<3
 python-dotenv>=1.0,<2
 clickhouse-connect>=0.7,<1
 celery>=5.4,<6
+redis>=5.0,<6
 tqdm>=4.66,<5
 tqdm-loggable>=0.3,<1
 numpy>=1.26,<3

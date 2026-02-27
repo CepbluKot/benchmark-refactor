@@ -1,7 +1,9 @@
 import unittest
 import json
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from unittest.mock import patch
 
 from src.benchmark_runtime.implementations.clickhouse_celery.result_store import (
     ClickHouseBenchmarkResultStore,
@@ -10,9 +12,30 @@ from src.benchmark_runtime.implementations.clickhouse_celery.result_store import
 from src.benchmark_runtime.types import BenchmarkVariantResult
 
 
+class _NoopRedisLock:
+    def acquire(self, blocking: bool = True) -> bool:
+        del blocking
+        return True
+
+    def release(self) -> None:
+        return None
+
+
+class _NoopRedisClient:
+    def lock(
+        self,
+        name: str,
+        timeout: float | None = None,
+        blocking_timeout: float | None = None,
+    ) -> _NoopRedisLock:
+        del name, timeout, blocking_timeout
+        return _NoopRedisLock()
+
+
 class _CapturingClient:
-    def __init__(self) -> None:
+    def __init__(self, *, stored_record_ids: Optional[set[str]] = None) -> None:
         self.insert_calls: List[Dict[str, Any]] = []
+        self.stored_record_ids = stored_record_ids
 
     def insert(self, table: str, data: List[tuple], column_names: List[str]) -> None:
         self.insert_calls.append(
@@ -22,6 +45,14 @@ class _CapturingClient:
                 "column_names": column_names,
             }
         )
+        if self.stored_record_ids is None:
+            return
+        if not data or "id" not in column_names:
+            return
+        id_index = column_names.index("id")
+        for row in data:
+            if id_index < len(row):
+                self.stored_record_ids.add(str(row[id_index]))
 
     def close(self) -> None:
         return None
@@ -30,7 +61,8 @@ class _CapturingClient:
 class _CapturingStore(ClickHouseBenchmarkResultStore):
     def __init__(self) -> None:
         self.executed_queries: List[str] = []
-        self.capturing_client = _CapturingClient()
+        self.stored_record_ids: set[str] = set()
+        self.capturing_client = _CapturingClient(stored_record_ids=self.stored_record_ids)
         super().__init__(
             connection=ClickHouseConnectionParams(
                 host="localhost",
@@ -46,8 +78,16 @@ class _CapturingStore(ClickHouseBenchmarkResultStore):
     def _build_client(self):
         return self.capturing_client
 
+    def _init_redis_lock_client(self) -> None:
+        self._record_lock_redis_client = _NoopRedisClient()
+
     def _execute(self, query: str, params: Optional[Any] = None):
-        del params
+        normalized = " ".join(query.split()).lower()
+        if normalized.startswith("select 1 from"):
+            record_id = ""
+            if isinstance(params, dict):
+                record_id = str(params.get("id") or "")
+            return [[1]] if record_id in self.stored_record_ids else []
         self.executed_queries.append(query)
         return []
 
@@ -152,6 +192,9 @@ class _MaxRunIdStore(ClickHouseBenchmarkResultStore):
     def _build_client(self):
         return self.capturing_client
 
+    def _init_redis_lock_client(self) -> None:
+        self._record_lock_redis_client = _NoopRedisClient()
+
     def ensure_schema(self) -> None:
         self.ensure_schema_calls += 1
         for table_name in self.exists_by_table:
@@ -176,7 +219,42 @@ class _MaxRunIdStore(ClickHouseBenchmarkResultStore):
         return []
 
 
+class _FailFastStore(ClickHouseBenchmarkResultStore):
+    def __init__(self) -> None:
+        self.capturing_client = _CapturingClient()
+        super().__init__(
+            connection=ClickHouseConnectionParams(
+                host="localhost",
+                port=9000,
+                login="default",
+                password="secret",
+            ),
+            database="bench",
+            table="results",
+            create_table_if_missing=False,
+        )
+
+    def _build_client(self):
+        return self.capturing_client
+
+    def _execute(self, query: str, params: Optional[Any] = None):
+        del query, params
+        return []
+
+
 class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
+    def test_store_requires_redis_lock_configuration(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "BENCH_RESULT_STORE_REDIS_URL": "",
+                "BENCH_CELERY_BACKEND_URL": "",
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Redis обязателен"):
+                _FailFastStore()
+
     def test_store_contains_per_query_select_columns_and_values(self) -> None:
         store = _CapturingStore()
 
@@ -418,6 +496,91 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
         self.assertIn("q_agg_user", speedup_per_query_json)
         self.assertTrue(tested_per_query_json["q_agg_user"]["query"].startswith("SELECT"))
         self.assertTrue(source_per_query_json["q_agg_user"]["query"].startswith("SELECT"))
+
+    def test_store_worker_result_uses_fallback_when_tested_ddl_table_mismatch(self) -> None:
+        store = _CapturingStore()
+
+        result = BenchmarkVariantResult(
+            benchmark_run_id=12,
+            benchmark_started_at=datetime(2026, 2, 24, 14, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_mismatch_ddl",
+            source_database="dm_core_lm",
+            source_table="logs_dbt",
+            variant_table="logs_dbt__bench__bench_mismatch_ddl__0001",
+            variant_mode="types",
+            # Намеренно некорректный DDL: имя другой таблицы.
+            tested_table_ddl=(
+                "CREATE TABLE benchmark_tmp.logs_adqm__bench__bench_mismatch_ddl__0001 "
+                "(`msg` String) ENGINE = MergeTree ORDER BY msg"
+            ),
+            score=1.0,
+        )
+
+        fallback_ddl = (
+            "CREATE TABLE benchmark_tmp.logs_dbt__bench__bench_mismatch_ddl__0001 "
+            "(`msg` String) ENGINE = MergeTree ORDER BY msg"
+        )
+
+        store.store_worker_result(
+            benchmark_run_id=12,
+            benchmark_started_at=datetime(2026, 2, 24, 14, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_mismatch_ddl",
+            source_database="dm_core_lm",
+            source_table="logs_dbt",
+            variant_table="logs_dbt__bench__bench_mismatch_ddl__0001",
+            variant_mode="types",
+            variant_params={"mode": "types"},
+            tested_table_ddl_fallback=fallback_ddl,
+            source_table_ddl_fallback=None,
+            result=result,
+        )
+
+        self.assertEqual(len(store.capturing_client.insert_calls), 1)
+        main_insert_call = next(
+            call for call in store.capturing_client.insert_calls if call["table"] == "bench.results"
+        )
+        columns = list(main_insert_call["column_names"])
+        row = list(main_insert_call["data"][0])
+        row_by_column = dict(zip(columns, row))
+        stored_ddl = str(row_by_column["tested_table_ddl"])
+        self.assertIn("logs_dbt__bench__bench_mismatch_ddl__0001", stored_ddl)
+        self.assertNotIn("logs_adqm__bench__bench_mismatch_ddl__0001", stored_ddl)
+
+    def test_store_worker_result_is_idempotent_by_execution_uuid_in_process(self) -> None:
+        store = _CapturingStore()
+
+        result = BenchmarkVariantResult(
+            benchmark_run_id=99,
+            benchmark_started_at=datetime(2026, 2, 24, 15, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_idempotent",
+            source_database="analytics",
+            source_table="events",
+            variant_table="events__bench__bench_idempotent__0001",
+            variant_mode="types",
+            tested_table_ddl=(
+                "CREATE TABLE benchmark_tmp.events__bench__bench_idempotent__0001 "
+                "(`user_id` Int32) ENGINE = MergeTree ORDER BY user_id"
+            ),
+            score=1.0,
+        )
+        payload_kwargs = dict(
+            benchmark_run_id=99,
+            benchmark_started_at=datetime(2026, 2, 24, 15, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_idempotent",
+            source_database="analytics",
+            source_table="events",
+            variant_table="events__bench__bench_idempotent__0001",
+            variant_mode="types",
+            variant_params={"mode": "types", "execution_uuid": "exec-idempotent-1"},
+            tested_table_ddl_fallback=result.tested_table_ddl or "",
+            source_table_ddl_fallback=None,
+            result=result,
+        )
+
+        store.store_worker_result(**payload_kwargs)
+        store.store_worker_result(**payload_kwargs)
+
+        self.assertEqual(len(store.capturing_client.insert_calls), 1)
 
     def test_recalculate_phase_ranking_scopes_to_variant_mode(self) -> None:
         store = _RankingStore()

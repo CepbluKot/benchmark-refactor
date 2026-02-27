@@ -273,6 +273,19 @@ SQL-строки (`*_ddl`, `*_query`, SQL внутри JSON) перед запи
 `score_calculation_json` сохраняется рядом со `score`.
 Для phased-ранжирования `is_top_n` выставляется по winners фазы; если фактически помечено меньше
 ожидаемого top-N, store автоматически делает fallback-перерасчёт `rank_in_phase`/`is_top_n` по `score`.
+Идемпотентность записи варианта обеспечивается по `id`:
+вокруг `check -> insert` используется Redis lock в result-store.
+Lock настраивается через `BENCH_RESULT_STORE_REDIS_URL`
+(если не задан — используется `BENCH_CELERY_BACKEND_URL`, если это Redis),
+`BENCH_RESULT_STORE_REDIS_LOCK_PREFIX`,
+`BENCH_RESULT_STORE_REDIS_LOCK_TTL_SEC`,
+`BENCH_RESULT_STORE_REDIS_LOCK_BLOCKING_TIMEOUT_SEC`.
+Если Redis не настроен/недоступен, runtime завершится с ошибкой при старте store
+(без fallback на process-local lock).
+Для multi-pod Kubernetes это корректный межпроцессный дедуп
+(в отличие от локального файлового lock).
+Fallback на «старую схему» таблиц результатов отключён:
+если таблица не соответствует актуальной runtime-схеме, insert завершится ошибкой.
 
 Примеры аналитических SQL по новой схеме:
 Для phased-стратегии используй таблицу из `BENCH_PHASED_RESULT_TABLE`
@@ -541,9 +554,17 @@ BENCH_RESULT_TABLE=benchmark_results
 BENCH_LEGACY_RESULT_TABLE=benchmark_results_legacy
 BENCH_PHASED_RESULT_TABLE=benchmark_results_phased
 BENCH_PHASED_RUNS_TABLE=benchmark_runs
+BENCH_RESULT_STORE_REDIS_URL=redis://redis:6379/0
+BENCH_RESULT_STORE_REDIS_LOCK_PREFIX=bench_result_store_lock
+BENCH_RESULT_STORE_REDIS_LOCK_TTL_SEC=300
+BENCH_RESULT_STORE_REDIS_LOCK_BLOCKING_TIMEOUT_SEC=60
 ```
 
 Если `BENCH_RESULT_CONNECTION_ID` не задан, берётся первый connection из конфига.
+Если `BENCH_RESULT_STORE_REDIS_URL` не задан, result-store попробует взять
+`BENCH_CELERY_BACKEND_URL`, если это Redis URL.
+Если оба URL не Redis/пустые, запуск завершится ошибкой.
+Пакет `redis` обязателен (входит в `requirements.txt`); без него store не стартует.
 
 3. Запусти:
 

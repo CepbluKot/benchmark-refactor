@@ -426,16 +426,18 @@ class CombinerAndNamingTests(unittest.TestCase):
         )
         self.assertTrue(is_variant_table(name))
 
-    def test_variant_name_is_truncated_to_clickhouse_limit(self) -> None:
-        """Проверяет, что variant name is truncated to clickhouse limit."""
+    def test_variant_name_is_not_truncated(self) -> None:
+        """Проверяет, что variant name больше не режется по длине."""
         name = variant_table_name("a" * 200, "bench", 1)
-        self.assertLessEqual(len(name), 64)
+        self.assertGreater(len(name), 64)
+        self.assertTrue(name.startswith("a" * 200))
         self.assertTrue(name.endswith("__bench__bench__0001"))
 
-    def test_variant_name_raises_for_too_long_benchmark_id(self) -> None:
-        """Проверяет, что variant name raises for too long benchmark id."""
-        with self.assertRaises(ValueError):
-            variant_table_name("events", "b" * 100, 0)
+    def test_variant_name_supports_long_benchmark_id(self) -> None:
+        """Проверяет, что длинный benchmark id больше не вызывает исключение."""
+        name = variant_table_name("events", "b" * 100, 0)
+        self.assertTrue(name.startswith("events__bench__"))
+        self.assertTrue(name.endswith("__0000"))
 
     def test_custom_variant_strategy_can_be_registered(self) -> None:
         """Проверяет, что custom variant strategy can be registered."""

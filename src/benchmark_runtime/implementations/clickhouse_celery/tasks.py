@@ -11,7 +11,7 @@ import re
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -3243,7 +3243,12 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
         client.close()
 
 
-def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVariantResult:
+def run_variant_benchmark(
+    payload: VariantBenchmarkTaskPayload,
+    *,
+    celery_task_id: Optional[str] = None,
+    celery_worker_hostname: Optional[str] = None,
+) -> BenchmarkVariantResult:
     """Реальное выполнение variant benchmark с сохранением результата в ClickHouse."""
     client = _ClickHouseRuntimeClient(payload.connection)
     result_store = ClickHouseBenchmarkResultStore(
@@ -3268,6 +3273,7 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
             if index_payload:
                 insert_tested_cols.append(str(column_name))
 
+    worker_started_at = datetime.now(timezone.utc)
     try:
         client.create_database_if_not_exists(payload.variant_database)
         client.drop_table_if_exists(
@@ -3730,6 +3736,8 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
                 force_score_to_minus_one_reason,
             )
 
+        execution_uuid = str(payload.variant_params.get("execution_uuid") or "").strip()
+        worker_finished_at = datetime.now(timezone.utc)
         result = BenchmarkVariantResult(
             benchmark_run_id=payload.benchmark_run_id,
             benchmark_started_at=payload.benchmark_started_at,
@@ -3739,6 +3747,15 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
             variant_table=payload.variant_table,
             variant_mode=payload.variant_mode,
             variant_params=dict(payload.variant_params),
+            id=execution_uuid or None,
+            celery_task_id=(str(celery_task_id).strip() if celery_task_id else None),
+            celery_worker_hostname=(
+                str(celery_worker_hostname).strip()
+                if celery_worker_hostname
+                else None
+            ),
+            worker_started_at=worker_started_at,
+            worker_finished_at=worker_finished_at,
             source_table_ddl=(
                 payload.source_benchmark.get("source_table_ddl")
                 if payload.source_benchmark
@@ -4089,7 +4106,24 @@ if app is not None:
         )
 
         try:
-            result = run_variant_benchmark(typed_payload)
+            celery_task_id: Optional[str] = None
+            celery_worker_hostname: Optional[str] = None
+            try:
+                request = getattr(variant_benchmark_task, "request", None)
+                if request is not None:
+                    celery_task_id = str(getattr(request, "id", "") or "").strip() or None
+                    celery_worker_hostname = (
+                        str(getattr(request, "hostname", "") or "").strip() or None
+                    )
+            except Exception:
+                celery_task_id = None
+                celery_worker_hostname = None
+
+            result = run_variant_benchmark(
+                typed_payload,
+                celery_task_id=celery_task_id,
+                celery_worker_hostname=celery_worker_hostname,
+            )
         except Exception as exc:
             # Важный guard: невалидный/ошибочный вариант считается пропущенным,
             # чтобы общий benchmark не зависал и progress учитывал задачу.
