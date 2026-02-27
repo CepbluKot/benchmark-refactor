@@ -113,6 +113,69 @@ class _RankingStore(_CapturingStore):
         return []
 
 
+class _MaxRunIdStore(ClickHouseBenchmarkResultStore):
+    def __init__(
+        self,
+        *,
+        phased_exists: bool,
+        legacy_exists: bool,
+        phased_max: Optional[int],
+        legacy_max: Optional[int],
+        create_legacy_table: bool = True,
+    ) -> None:
+        self.capturing_client = _CapturingClient()
+        self.ensure_schema_calls = 0
+        self.executed_queries: List[str] = []
+        self.exists_by_table: Dict[str, int] = {
+            "results_phased": 1 if phased_exists else 0,
+            "results_legacy": 1 if legacy_exists else 0,
+        }
+        self.max_by_table: Dict[str, Optional[int]] = {
+            "results_phased": phased_max,
+            "results_legacy": legacy_max,
+        }
+        super().__init__(
+            connection=ClickHouseConnectionParams(
+                host="localhost",
+                port=9000,
+                login="default",
+                password="secret",
+            ),
+            database="bench",
+            table="results_phased",
+            legacy_table="results_legacy",
+            phased_table="results_phased",
+            create_legacy_table=create_legacy_table,
+            create_table_if_missing=False,
+        )
+
+    def _build_client(self):
+        return self.capturing_client
+
+    def ensure_schema(self) -> None:
+        self.ensure_schema_calls += 1
+        for table_name in self.exists_by_table:
+            self.exists_by_table[table_name] = 1
+
+    def _execute(self, query: str, params: Optional[Any] = None):
+        del params
+        self.executed_queries.append(query)
+        normalized = " ".join(query.split()).lower()
+        if normalized.startswith("exists table"):
+            if "results_phased" in normalized:
+                return [[self.exists_by_table["results_phased"]]]
+            if "results_legacy" in normalized:
+                return [[self.exists_by_table["results_legacy"]]]
+            return [[0]]
+        if normalized.startswith("select max(benchmark_run_id)"):
+            if "results_phased" in normalized:
+                return [[self.max_by_table["results_phased"]]]
+            if "results_legacy" in normalized:
+                return [[self.max_by_table["results_legacy"]]]
+            return [[None]]
+        return []
+
+
 class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
     def test_store_contains_per_query_select_columns_and_values(self) -> None:
         store = _CapturingStore()
@@ -513,6 +576,42 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
         self.assertEqual(
             [bool(call["is_top_n"]) for call in rank_updates],
             [True, True, True, False],
+        )
+
+    def test_max_benchmark_run_id_recovers_from_missing_tables(self) -> None:
+        store = _MaxRunIdStore(
+            phased_exists=False,
+            legacy_exists=False,
+            phased_max=7,
+            legacy_max=5,
+        )
+
+        self.assertEqual(store.max_benchmark_run_id(), 7)
+        self.assertGreaterEqual(store.ensure_schema_calls, 1)
+
+    def test_max_benchmark_run_id_uses_max_from_phased_and_legacy(self) -> None:
+        store = _MaxRunIdStore(
+            phased_exists=True,
+            legacy_exists=True,
+            phased_max=4,
+            legacy_max=9,
+        )
+
+        self.assertEqual(store.max_benchmark_run_id(), 9)
+        self.assertEqual(store.ensure_schema_calls, 0)
+
+    def test_max_benchmark_run_id_skips_legacy_when_disabled(self) -> None:
+        store = _MaxRunIdStore(
+            phased_exists=True,
+            legacy_exists=False,
+            phased_max=12,
+            legacy_max=None,
+            create_legacy_table=False,
+        )
+
+        self.assertEqual(store.max_benchmark_run_id(), 12)
+        self.assertFalse(
+            any("results_legacy" in query.lower() for query in store.executed_queries)
         )
 
 

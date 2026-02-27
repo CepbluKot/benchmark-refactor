@@ -1014,18 +1014,84 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             )
         return top_variants
 
+    @staticmethod
+    def _is_missing_ch_object_error(exc: Exception) -> bool:
+        """Возвращает True для ошибок отсутствующей таблицы/БД в ClickHouse."""
+        message = str(exc).lower()
+        return (
+            "unknown_table" in message
+            or "unknown table" in message
+            or "unknown_database" in message
+            or "unknown database" in message
+            or "doesn't exist" in message
+        )
+
+    def _table_exists(self, table_name: str) -> bool:
+        """Проверяет существование таблицы результатов."""
+        try:
+            rows = self._execute(f"EXISTS TABLE `{self._database}`.`{table_name}`")
+        except Exception as exc:
+            if self._is_missing_ch_object_error(exc):
+                return False
+            raise
+
+        if not rows or not rows[0]:
+            return False
+        raw_value = rows[0][0]
+        try:
+            return bool(int(raw_value or 0))
+        except Exception:
+            return bool(raw_value)
+
+    def _safe_max_benchmark_run_id_for_table(self, table_name: str) -> int:
+        """
+        Возвращает max(benchmark_run_id) для таблицы.
+
+        Если таблица отсутствует (например, после ручной чистки БД), пытается
+        восстановить схему через ensure_schema() и повторяет проверку.
+        """
+        if not self._table_exists(table_name):
+            logger.warning(
+                "ClickHouseBenchmarkResultStore: таблица `%s`.`%s` не найдена. "
+                "Пробуем восстановить схему result-store.",
+                self._database,
+                table_name,
+            )
+            self.ensure_schema()
+            if not self._table_exists(table_name):
+                logger.warning(
+                    "ClickHouseBenchmarkResultStore: таблица `%s`.`%s` всё ещё отсутствует. "
+                    "Возвращаем max benchmark_run_id = 0.",
+                    self._database,
+                    table_name,
+                )
+                return 0
+
+        try:
+            rows = self._execute(
+                f"SELECT max(benchmark_run_id) FROM `{self._database}`.`{table_name}`"
+            )
+        except Exception as exc:
+            if self._is_missing_ch_object_error(exc):
+                logger.warning(
+                    "ClickHouseBenchmarkResultStore: таблица `%s`.`%s` исчезла во время чтения "
+                    "max(benchmark_run_id). Возвращаем 0.",
+                    self._database,
+                    table_name,
+                )
+                return 0
+            raise
+
+        if not rows or rows[0][0] is None:
+            return 0
+        return int(rows[0][0])
+
     def max_benchmark_run_id(self) -> int:
-        """Возвращает максимальный `benchmark_run_id` из таблицы результатов."""
-        phased_rows = self._execute(
-            f"SELECT max(benchmark_run_id) FROM `{self._database}`.`{self._phased_table}`"
-        )
-        phased_max = int(phased_rows[0][0]) if phased_rows and phased_rows[0][0] is not None else 0
-        if self._legacy_table == self._phased_table:
+        """Возвращает максимальный `benchmark_run_id` из таблиц результатов."""
+        phased_max = self._safe_max_benchmark_run_id_for_table(self._phased_table)
+        if self._legacy_table == self._phased_table or not self._create_legacy_table:
             return phased_max
-        legacy_rows = self._execute(
-            f"SELECT max(benchmark_run_id) FROM `{self._database}`.`{self._legacy_table}`"
-        )
-        legacy_max = int(legacy_rows[0][0]) if legacy_rows and legacy_rows[0][0] is not None else 0
+        legacy_max = self._safe_max_benchmark_run_id_for_table(self._legacy_table)
         return max(phased_max, legacy_max)
 
     def _build_record(
