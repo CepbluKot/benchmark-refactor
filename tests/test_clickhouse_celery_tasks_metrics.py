@@ -149,6 +149,22 @@ class _FakeRuntimeClient:
     def get_total_compressed_size_bytes(self, database: str, table: str) -> float:
         return float(self.total_size_map.get((database, table), 0.0))
 
+    def get_table_parts_size_metrics(self, database: str, table: str) -> Dict[str, float]:
+        total_size = float(self.total_size_map.get((database, table), 0.0) or 0.0)
+        index_sizes = self.index_sizes_map.get((database, table), {})
+        secondary_indexes_size = float(
+            sum(float(stats.get("size_compressed_bytes", 0.0) or 0.0) for stats in index_sizes.values())
+        )
+        return {
+            "rows": float(self.count_rows_map.get((database, table), 0) or 0.0),
+            "data_compressed_bytes": total_size,
+            "data_uncompressed_bytes": total_size,
+            "bytes_on_disk": total_size + secondary_indexes_size,
+            "parts_count": 1.0 if (total_size > 0 or secondary_indexes_size > 0) else 0.0,
+            "primary_key_bytes_in_memory": 0.0,
+            "secondary_indices_compressed_bytes": secondary_indexes_size,
+        }
+
     def insert_from_source_with_metrics(
         self,
         *,
@@ -1226,11 +1242,11 @@ ORDER BY msg
 
         # Берём сумму по колонкам (200), а не слишком маленький total из system.parts (10).
         self.assertEqual(result.tested_table_consumed_compressed_size_bytes_overall, 200.0)
-        # С индексами: 200 + 50.
-        self.assertEqual(result.tested_table_consumed_compressed_size_bytes_with_indexes, 250.0)
+        # С индексами используем total_on_disk, но не ниже нормализованного compressed data.
+        self.assertEqual(result.tested_table_consumed_compressed_size_bytes_with_indexes, 200.0)
         self.assertEqual(
             result.tested_table_consumed_compressed_size_bytes_with_indexes_readable,
-            make_readable_bytes(250.0),
+            make_readable_bytes(200.0),
         )
 
     def test_run_variant_benchmark_forces_score_minus_one_when_compression_by_column_empty(self) -> None:
@@ -2212,6 +2228,28 @@ ORDER BY msg
 
         total = client.get_total_compressed_size_bytes("bench_tmp", "messages")
         self.assertEqual(total, 2048.0)
+
+    def test_runtime_client_get_table_parts_size_metrics_returns_total_on_disk(self) -> None:
+        client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
+
+        def _execute(query: str, params: Optional[Dict[str, Any]] = None):
+            del params
+            if "sum(bytes_on_disk) AS bytes_on_disk" in query:
+                return [(1000, 400, 1200, 700, 3)]
+            if "sum(primary_key_bytes_in_memory)" in query:
+                return [(64, 128)]
+            return []
+
+        client.execute = _execute  # type: ignore[method-assign]
+
+        parts_metrics = client.get_table_parts_size_metrics("bench_tmp", "messages")
+        self.assertEqual(parts_metrics["rows"], 1000.0)
+        self.assertEqual(parts_metrics["data_compressed_bytes"], 400.0)
+        self.assertEqual(parts_metrics["data_uncompressed_bytes"], 1200.0)
+        self.assertEqual(parts_metrics["bytes_on_disk"], 700.0)
+        self.assertEqual(parts_metrics["parts_count"], 3.0)
+        self.assertEqual(parts_metrics["primary_key_bytes_in_memory"], 64.0)
+        self.assertEqual(parts_metrics["secondary_indices_compressed_bytes"], 128.0)
 
     def test_runtime_client_get_column_sizes_single_column_uses_total_size_fallback(self) -> None:
         client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)

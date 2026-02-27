@@ -495,6 +495,34 @@ def _normalize_total_size_bytes(
     return total
 
 
+def _to_positive_finite_float(value: Any) -> float:
+    """Безопасно приводит значение к float и отбрасывает некорректные значения."""
+    try:
+        normalized = float(value or 0.0)
+    except Exception:
+        return 0.0
+    if not math.isfinite(normalized) or normalized <= 0:
+        return 0.0
+    return normalized
+
+
+def _resolve_total_size_with_indexes_bytes(
+    *,
+    parts_metrics: Dict[str, float],
+    normalized_data_size_bytes: float,
+) -> float:
+    """
+    Возвращает полный размер таблицы с индексами.
+
+    Используем `sum(bytes_on_disk)` из `system.parts` как primary-источник total_on_disk.
+    Если `bytes_on_disk` временно занижен/нулевой, не даём итогу опуститься ниже
+    нормализованного `data_compressed_bytes`.
+    """
+    data_size = _to_positive_finite_float(normalized_data_size_bytes)
+    total_on_disk = _to_positive_finite_float(parts_metrics.get("bytes_on_disk"))
+    return max(total_on_disk, data_size)
+
+
 def _wait_for_table_size_materialization_if_needed(
     client: "_ClickHouseRuntimeClient",
     *,
@@ -1258,6 +1286,83 @@ class _ClickHouseRuntimeClient:
                 fallback_size,
             )
         return fallback_size
+
+    def get_table_parts_size_metrics(self, database: str, table: str) -> Dict[str, float]:
+        """
+        Агрегированные size-метрики таблицы из `system.parts`.
+
+        Основные поля:
+          - `data_compressed_bytes`
+          - `data_uncompressed_bytes`
+          - `bytes_on_disk` (общий размер таблицы на диске, с индексами)
+          - `rows`
+          - `parts_count`
+
+        Дополнительно (если поддерживается сервером):
+          - `primary_key_bytes_in_memory`
+          - `secondary_indices_compressed_bytes`
+        """
+        base_rows = self.execute(
+            """
+            SELECT
+                sum(rows) AS rows,
+                sum(data_compressed_bytes) AS data_compressed_bytes,
+                sum(data_uncompressed_bytes) AS data_uncompressed_bytes,
+                sum(bytes_on_disk) AS bytes_on_disk,
+                count() AS parts_count
+            FROM system.parts
+            WHERE database = %(database)s
+              AND table = %(table)s
+              AND active = 1
+            """,
+            {"database": database, "table": table},
+        )
+        metrics: Dict[str, float] = {
+            "rows": 0.0,
+            "data_compressed_bytes": 0.0,
+            "data_uncompressed_bytes": 0.0,
+            "bytes_on_disk": 0.0,
+            "parts_count": 0.0,
+            "primary_key_bytes_in_memory": 0.0,
+            "secondary_indices_compressed_bytes": 0.0,
+        }
+        if base_rows:
+            row = base_rows[0]
+            if len(row) >= 5:
+                metrics["rows"] = _to_positive_finite_float(row[0])
+                metrics["data_compressed_bytes"] = _to_positive_finite_float(row[1])
+                metrics["data_uncompressed_bytes"] = _to_positive_finite_float(row[2])
+                metrics["bytes_on_disk"] = _to_positive_finite_float(row[3])
+                metrics["parts_count"] = _to_positive_finite_float(row[4])
+
+        try:
+            extended_rows = self.execute(
+                """
+                SELECT
+                    sum(primary_key_bytes_in_memory) AS primary_key_bytes_in_memory,
+                    sum(secondary_indices_compressed_bytes) AS secondary_indices_compressed_bytes
+                FROM system.parts
+                WHERE database = %(database)s
+                  AND table = %(table)s
+                  AND active = 1
+                """,
+                {"database": database, "table": table},
+            )
+            if extended_rows and len(extended_rows[0]) >= 2:
+                metrics["primary_key_bytes_in_memory"] = _to_positive_finite_float(
+                    extended_rows[0][0]
+                )
+                metrics["secondary_indices_compressed_bytes"] = _to_positive_finite_float(
+                    extended_rows[0][1]
+                )
+        except Exception:
+            logger.debug(
+                "Не удалось получить расширенные size-метрики из system.parts для %s.%s",
+                database,
+                table,
+            )
+
+        return metrics
 
     def get_column_sizes(self, database: str, table: str) -> Dict[str, Dict[str, Any]]:
         """
@@ -2829,6 +2934,22 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             column_sizes=source_columns_sizes,
             context=f"run_source_benchmark source {payload.source_database}.{payload.source_table}",
         )
+        source_parts_metrics = client.get_table_parts_size_metrics(
+            payload.source_database,
+            payload.source_table,
+        )
+        source_parts_data_size = _to_positive_finite_float(
+            source_parts_metrics.get("data_compressed_bytes")
+        )
+        if source_parts_data_size > 0:
+            source_total_size_bytes = _normalize_total_size_bytes(
+                source_parts_data_size,
+                column_sizes=source_columns_sizes,
+                context=(
+                    f"run_source_benchmark source(parts) "
+                    f"{payload.source_database}.{payload.source_table}"
+                ),
+            )
 
         tested_columns_sizes = client.get_column_sizes(baseline_database, baseline_table)
         tested_indexes_sizes = client.get_index_sizes(baseline_database, baseline_table)
@@ -2851,24 +2972,32 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             column_sizes=tested_columns_sizes,
             context=f"run_source_benchmark baseline {baseline_database}.{baseline_table}",
         )
-        source_total_index_size_bytes = float(
-            sum(
-                float(index_stats.get("size_compressed_bytes", 0.0) or 0.0)
-                for index_stats in source_indexes_sizes.values()
-            )
+        tested_parts_metrics = client.get_table_parts_size_metrics(
+            baseline_database,
+            baseline_table,
         )
-        tested_total_index_size_bytes = float(
-            sum(
-                float(index_stats.get("size_compressed_bytes", 0.0) or 0.0)
-                for index_stats in tested_indexes_sizes.values()
-            )
+        tested_parts_data_size = _to_positive_finite_float(
+            tested_parts_metrics.get("data_compressed_bytes")
         )
+        if tested_parts_data_size > 0:
+            tested_total_size_bytes = _normalize_total_size_bytes(
+                tested_parts_data_size,
+                column_sizes=tested_columns_sizes,
+                context=(
+                    f"run_source_benchmark baseline(parts) "
+                    f"{baseline_database}.{baseline_table}"
+                ),
+            )
         if tested_total_size_bytes <= 0 and source_total_size_bytes > 0:
             tested_total_size_bytes = source_total_size_bytes
-        if tested_total_index_size_bytes <= 0 and source_total_index_size_bytes > 0:
-            tested_total_index_size_bytes = source_total_index_size_bytes
-        source_total_size_bytes_with_indexes = source_total_size_bytes + source_total_index_size_bytes
-        tested_total_size_bytes_with_indexes = tested_total_size_bytes + tested_total_index_size_bytes
+        source_total_size_bytes_with_indexes = _resolve_total_size_with_indexes_bytes(
+            parts_metrics=source_parts_metrics,
+            normalized_data_size_bytes=source_total_size_bytes,
+        )
+        tested_total_size_bytes_with_indexes = _resolve_total_size_with_indexes_bytes(
+            parts_metrics=tested_parts_metrics,
+            normalized_data_size_bytes=tested_total_size_bytes,
+        )
 
         metrics: dict[str, Any] = {
             "measured_percentiles": list(payload.measured_percentiles),
@@ -3225,13 +3354,26 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
             column_sizes=tested_columns_sizes,
             context=f"run_variant_benchmark tested {payload.variant_database}.{payload.variant_table}",
         )
-        tested_total_index_size_bytes = float(
-            sum(
-                float(index_stats.get("size_compressed_bytes", 0.0) or 0.0)
-                for index_stats in tested_indexes_sizes.values()
-            )
+        tested_parts_metrics = client.get_table_parts_size_metrics(
+            payload.variant_database,
+            payload.variant_table,
         )
-        tested_total_size_bytes_with_indexes = tested_total_size_bytes + tested_total_index_size_bytes
+        tested_parts_data_size = _to_positive_finite_float(
+            tested_parts_metrics.get("data_compressed_bytes")
+        )
+        if tested_parts_data_size > 0:
+            tested_total_size_bytes = _normalize_total_size_bytes(
+                tested_parts_data_size,
+                column_sizes=tested_columns_sizes,
+                context=(
+                    f"run_variant_benchmark tested(parts) "
+                    f"{payload.variant_database}.{payload.variant_table}"
+                ),
+            )
+        tested_total_size_bytes_with_indexes = _resolve_total_size_with_indexes_bytes(
+            parts_metrics=tested_parts_metrics,
+            normalized_data_size_bytes=tested_total_size_bytes,
+        )
         source_total_size_bytes = float(
             source_metrics.get("source_table_consumed_compressed_size_bytes_overall", 0.0) or 0.0
         )
@@ -3243,7 +3385,13 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
             ),
             context=f"run_variant_benchmark source-metrics {payload.source_database}.{payload.source_table}",
         )
-        if source_total_size_bytes <= 0:
+        source_total_size_bytes_with_indexes = float(
+            source_metrics.get("source_table_total_size_bytes_with_indexes", 0.0) or 0.0
+        )
+        if source_total_size_bytes_with_indexes <= 0 and source_total_size_bytes > 0:
+            source_total_size_bytes_with_indexes = source_total_size_bytes
+
+        if source_total_size_bytes <= 0 or source_total_size_bytes_with_indexes <= 0:
             # Защита от редких baseline-анomalies: читаем live size source-таблицы.
             live_source_columns_sizes = client.get_column_sizes(
                 payload.source_database,
@@ -3277,12 +3425,30 @@ def run_variant_benchmark(payload: VariantBenchmarkTaskPayload) -> BenchmarkVari
                     f"{payload.source_database}.{payload.source_table}"
                 ),
             )
+            live_source_parts_metrics = client.get_table_parts_size_metrics(
+                payload.source_database,
+                payload.source_table,
+            )
+            live_source_parts_data_size = _to_positive_finite_float(
+                live_source_parts_metrics.get("data_compressed_bytes")
+            )
+            if live_source_parts_data_size > 0:
+                live_source_total_size_bytes = _normalize_total_size_bytes(
+                    live_source_parts_data_size,
+                    column_sizes=live_source_columns_sizes,
+                    context=(
+                        f"run_variant_benchmark source-live(parts) "
+                        f"{payload.source_database}.{payload.source_table}"
+                    ),
+                )
+            live_source_total_size_bytes_with_indexes = _resolve_total_size_with_indexes_bytes(
+                parts_metrics=live_source_parts_metrics,
+                normalized_data_size_bytes=live_source_total_size_bytes,
+            )
             if live_source_total_size_bytes > 0:
                 source_total_size_bytes = live_source_total_size_bytes
-        source_total_size_bytes_with_indexes = float(
-            source_metrics.get("source_table_total_size_bytes_with_indexes", source_total_size_bytes)
-            or source_total_size_bytes
-        )
+            if live_source_total_size_bytes_with_indexes > 0:
+                source_total_size_bytes_with_indexes = live_source_total_size_bytes_with_indexes
         if source_total_size_bytes_with_indexes <= 0 and source_total_size_bytes > 0:
             source_total_size_bytes_with_indexes = source_total_size_bytes
 
