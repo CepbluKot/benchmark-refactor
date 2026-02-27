@@ -1,0 +1,1828 @@
+{
+  "benchmarks": [
+    {
+      "id": "bench_prod_dm_core_logs_adqm_sequential_topn_lite",
+      "connection_id": "prod_ch_dm_core_logs_adqm",
+      "strategy": "sequential_phased_topn_strategy",
+      "column_rules_mode": "inline_only",
+      "index_rules_mode": "inline_only",
+      "column_order_mode": "compressed_size_desc",
+      "tables": {
+        "dm_core_lm": [
+          "logs_adqm",
+          "logs_airflow",
+          "logs_dbt"
+        ],
+        "raw_lm": [
+          "log_flexloader_core_general",
+          "log_flexloader_core_loaders",
+          "log_flexloader_core_spark",
+          "log_k8s_audit",
+          "log_k8s_events",
+          "log_k8s_nova_via_filebeat"
+        ]
+      },
+      "test_database": "benchmark_tmp",
+      "insert_operations_count": 10,
+      "sequential_top_n_limits": {
+        "order_by": 1,
+        "types": 1,
+        "codecs": 1,
+        "indexes": 1,
+        "final_validation": 1
+      },
+      "max_winners_per_parent_limits": {
+        "types": 1,
+        "codecs": 1,
+        "indexes": 1
+      },
+      "scoring": {
+        "mode": "expression",
+        "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)",
+        "on_error_score": -1.0
+      },
+      "max_benchmarks_limits": {
+        "order_by": 3,
+        "types": 3,
+        "codecs": 4,
+        "indexes": 6,
+        "final_validation": 2,
+        "sequential": 2
+      },
+      "source_insert_rows_per_operation_limit": 50000,
+      "source_insert_rows_per_operation_limits": {
+        "sequential": 50000
+      },
+      "insert_rows_per_operation_limit": 50000,
+      "insert_rows_per_operation_limits": {
+        "order_by": 50000,
+        "types": 50000,
+        "codecs": 50000,
+        "indexes": 50000,
+        "final_validation": 50000,
+        "sequential": 50000
+      },
+      "global_rules": {
+        "order_by_rules": {
+          "auto_generate_candidates": true
+        },
+        "column_rules": [],
+        "index_rules": [
+          {
+            "by_type": "String",
+            "indexes": [
+              {
+                "type": "ngrambf_v1(3, 32768, 2, 0)",
+                "granularity": [
+                  1,
+                  2
+                ],
+                "index_granularity_values": [
+                  8192,
+                  16384
+                ]
+              }
+            ]
+          },
+          {
+            "by_type": "LowCardinality(String)",
+            "indexes": [
+              {
+                "type": "ngrambf_v1(3, 32768, 2, 0)",
+                "granularity": [
+                  1,
+                  2
+                ],
+                "index_granularity_values": [
+                  8192,
+                  16384
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "table_rules": [
+        {
+          "database": "dm_core_lm",
+          "table": "logs_adqm",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "log_level",
+            "logger"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 3,
+            "types": 3,
+            "codecs": 4,
+            "indexes": 6,
+            "final_validation": 2
+          },
+          "queries": {
+            "mode": "manual",
+            "test_queries": [
+              {
+                "query_id": "q_adqm_dec25_message_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%error%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_adqm_dec25_message_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_adqm_dec25_log_level_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_level` = 'ERROR'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_adqm_dec25_logger",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `logger` LIKE '%adqm%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              }
+            ]
+          },
+          "rules": {
+            "column_rules": [],
+            "codec_rules": [
+              {
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6, 'Europe/Moscow')",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "message",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "log_file_path",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "pid",
+                "by_type": "UInt32",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(Delta(4), ZSTD(1))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "log_level",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "logger",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(200)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "host_name",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "object",
+                "by_type": "Nullable(String)",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "message",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "database": "dm_core_lm",
+          "table": "logs_airflow",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "dag",
+            "run",
+            "task",
+            "attempt"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 3,
+            "types": 3,
+            "codecs": 4,
+            "indexes": 6,
+            "final_validation": 2
+          },
+          "queries": {
+            "mode": "manual",
+            "test_queries": [
+              {
+                "query_id": "q_airflow_dec25_message_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `airflow_message` LIKE '%error%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_airflow_dec25_message_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `airflow_message` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_airflow_dec25_log_level_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `airflow_log_level` = 'ERROR'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_airflow_dec25_task",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `task` LIKE '%dag.task%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              }
+            ]
+          },
+          "rules": {
+            "column_rules": [],
+            "codec_rules": [
+              {
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6)",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "airflow_message",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "run",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "airflow_datetime",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "attempt",
+                "by_type": "UInt16",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(Delta(2), ZSTD(1))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "airflow_log_level",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "task",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "airflow_python_logger_module",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(200)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "run",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "airflow_message",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "database": "dm_core_lm",
+          "table": "logs_dbt",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "dag",
+            "task",
+            "run"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 3,
+            "types": 3,
+            "codecs": 4,
+            "indexes": 6,
+            "final_validation": 2
+          },
+          "queries": {
+            "mode": "manual",
+            "test_queries": [
+              {
+                "query_id": "q_dbt_dec25_msg_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `msg` LIKE '%error%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_dbt_dec25_msg_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `msg` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_dbt_dec25_dbt_msg_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND ifNull(`dbt_msg`, '') LIKE '%error%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_dbt_dec25_log_level",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_level` = 'ERROR'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              }
+            ]
+          },
+          "rules": {
+            "column_rules": [],
+            "codec_rules": [
+              {
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6, 'UTC')",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "_fluentbit_timestamp",
+                "by_type": "DateTime64(6)",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "msg",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "dbt_msg",
+                "by_type": "Nullable(String)",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "run",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "job_id",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "log_level",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "log_class",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "log_code",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(100)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "task",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "dbt_target_user",
+                "by_type": "LowCardinality(Nullable(String))",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "dbt_target_host",
+                "by_type": "LowCardinality(Nullable(String))",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "job_id",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "msg",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "database": "raw_lm",
+          "table": "log_flexloader_core_general",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "operation_type",
+            "flex_log_level",
+            "host_name"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 3,
+            "types": 3,
+            "codecs": 4,
+            "indexes": 6,
+            "final_validation": 2
+          },
+          "queries": {
+            "mode": "manual",
+            "test_queries": [
+              {
+                "query_id": "q_general_dec25_flex_msg_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%error%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_general_dec25_flex_msg_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_general_dec25_flex_logger_core",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_logger` LIKE '%core%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_general_dec25_log_file_path_log",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_file_path` LIKE '%.log%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              }
+            ]
+          },
+          "rules": {
+            "codec_rules": [
+              {
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6)",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "flex_msg",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "flex_logger",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "log_file_path",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "flex_msg",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "flex_log_level",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "host_name",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              }
+            ],
+            "column_rules": []
+          }
+        },
+        {
+          "database": "raw_lm",
+          "table": "log_flexloader_core_loaders",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "operation_type",
+            "table_name"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 3,
+            "types": 3,
+            "codecs": 4,
+            "indexes": 6,
+            "final_validation": 2
+          },
+          "queries": {
+            "mode": "manual",
+            "test_queries": [
+              {
+                "query_id": "q_loaders_dec25_flex_msg_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%error%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_loaders_dec25_flex_msg_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_loaders_dec25_log_file_path_log",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_file_path` LIKE '%.log%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_loaders_dec25_log_file_path_json",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_file_path` LIKE '%.json%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              }
+            ]
+          },
+          "rules": {
+            "column_rules": [
+              {
+                "by_name": "flex_logger",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "log_file_path",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              }
+            ],
+            "codec_rules": [
+              {
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6)",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "flex_msg",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "log_file_path",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "log_file_path",
+                "by_type": "LowCardinality(String)",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "journal_id",
+                "by_type": "Nullable(UInt32)",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "flex_msg",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "flex_log_level",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "host_name",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "database": "raw_lm",
+          "table": "log_flexloader_core_spark",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "source_system",
+            "table_name"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 3,
+            "types": 3,
+            "codecs": 4,
+            "indexes": 6,
+            "final_validation": 2
+          },
+          "queries": {
+            "mode": "manual",
+            "test_queries": [
+              {
+                "query_id": "q_spark_dec25_flex_msg_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%error%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_spark_dec25_flex_msg_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_spark_dec25_log_file_path_log",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_file_path` LIKE '%.log%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_spark_dec25_host_name_node",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `host_name` LIKE '%node%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              }
+            ]
+          },
+          "rules": {
+            "codec_rules": [
+              {
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6)",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "flex_msg",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "log_file_path",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "flex_msg",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "host_name",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              }
+            ],
+            "column_rules": []
+          }
+        },
+        {
+          "database": "raw_lm",
+          "table": "log_k8s_audit",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "objectRef_namespace",
+            "verb",
+            "level"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 3,
+            "types": 3,
+            "codecs": 4,
+            "indexes": 6,
+            "final_validation": 2
+          },
+          "queries": {
+            "mode": "manual",
+            "test_queries": [
+              {
+                "query_id": "q_audit_dec25_rsp_msg_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `responseStatus_message` LIKE '%error%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_audit_dec25_rsp_msg_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `responseStatus_message` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_audit_dec25_request_uri_api",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND requestURI LIKE '%/api/%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_audit_dec25_verb_main",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND verb IN ('GET', 'POST', 'DELETE', 'PATCH', 'LIST')",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              }
+            ]
+          },
+          "rules": {
+            "column_rules": [
+              {
+                "by_name": "apiVersion",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "kind",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "level",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              }
+            ],
+            "codec_rules": [
+              {
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6)",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "responseStatus_message",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "annotations_authorization_reason",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(3))"
+                ]
+              },
+              {
+                "by_name": "requestURI",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "userAgent",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "responseStatus_code",
+                "by_type": "Int32",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(Delta(4), ZSTD(1))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "verb",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(20)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "verb",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(20)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "kind",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(100)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "kind",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(100)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "level",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "level",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "stage",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "stage",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": 1
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "database": "raw_lm",
+          "table": "log_k8s_events",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "involvedObject_namespace",
+            "source_type",
+            "ext_ClusterName",
+            "ext_ClusterEventType"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 3,
+            "types": 3,
+            "codecs": 4,
+            "indexes": 6,
+            "final_validation": 2
+          },
+          "queries": {
+            "mode": "manual",
+            "test_queries": [
+              {
+                "query_id": "q_events_dec25_message_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%error%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_events_dec25_message_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_events_dec25_event_type",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND ext_ClusterEventType IN ('Normal', 'Warning')",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_events_dec25_cluster_name",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND ext_ClusterName LIKE '%prod%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              }
+            ]
+          },
+          "rules": {
+            "column_rules": [
+              {
+                "by_name": "source_type",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "ext_ClusterEnv",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "ext_ClusterName",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              }
+            ],
+            "codec_rules": [
+              {
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6)",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "message",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "reason",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "source_type",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "ext_ClusterEnv",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "ext_ClusterName",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "message",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "ext_ClusterEventType",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "ext_ClusterEventType",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "ext_ClusterName",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "ext_ClusterName",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "ext_ClusterEnv",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(20)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "ext_ClusterEnv",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(20)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "source_type",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "database": "raw_lm",
+          "table": "log_k8s_nova_via_filebeat",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "namespace",
+            "workspace",
+            "container_name"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 3,
+            "types": 3,
+            "codecs": 4,
+            "indexes": 6,
+            "final_validation": 2
+          },
+          "queries": {
+            "mode": "manual",
+            "test_queries": [
+              {
+                "query_id": "q_k8s_nova_dec25_message_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%error%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_k8s_nova_dec25_message_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_k8s_nova_dec25_namespace",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `namespace` IN ('default', 'kube-system', 'monitoring')",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_k8s_nova_dec25_workspace",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `workspace` LIKE '%kube%'",
+                "cache_mode": "cold",
+                "select_operations_count": 3,
+                "warmup_queries": []
+              }
+            ]
+          },
+          "rules": {
+            "column_rules": [
+              {
+                "by_name": "container_image",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "pod_name",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              }
+            ],
+            "codec_rules": [
+              {
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6)",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "message",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "log_file_path",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "_raw_message",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(3))"
+                ]
+              },
+              {
+                "by_name": "_raw_message",
+                "by_type": "Nullable(String)",
+                "codecs": [
+                  "CODEC(ZSTD(3))"
+                ]
+              },
+              {
+                "by_name": "_error",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(3))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "namespace",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(100)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "namespace",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(100)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "workspace",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "workspace",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "container_name",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(200)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "container_name",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(200)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "container_image",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "container_image",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "queries": {
+        "mode": "manual",
+        "test_queries": [
+          {
+            "query_id": "q_fallback_like_error",
+            "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND toString(tuple(*)) LIKE '%error%'",
+            "cache_mode": "cold",
+            "select_operations_count": 3,
+            "warmup_queries": []
+          }
+        ]
+      }
+    }
+  ]
+}
