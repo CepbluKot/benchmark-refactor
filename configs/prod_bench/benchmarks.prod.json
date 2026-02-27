@@ -14,6 +14,7 @@
           "logs_dbt"
         ],
         "raw_lm": [
+          "log_flexloader_core_general",
           "log_flexloader_core_loaders",
           "log_flexloader_core_spark",
           "log_k8s_audit",
@@ -22,7 +23,7 @@
         ]
       },
       "test_database": "benchmark_tmp",
-      "insert_operations_count": 10,
+      "insert_operations_count": 100,
       "sequential_top_n_limits": {
         "order_by": 2,
         "types": 2,
@@ -48,13 +49,18 @@
         "final_validation": 6,
         "sequential": 3
       },
+      "source_insert_rows_per_operation_limit": 100000,
       "source_insert_rows_per_operation_limits": {
-        "sequential": 50000
+        "sequential": 100000
       },
+      "insert_rows_per_operation_limit": 100000,
       "insert_rows_per_operation_limits": {
-        "types": 50000,
-        "indexes": 50000,
-        "sequential": 50000
+        "order_by": 100000,
+        "types": 100000,
+        "codecs": 100000,
+        "indexes": 100000,
+        "final_validation": 100000,
+        "sequential": 100000
       },
       "global_rules": {
         "order_by_rules": {
@@ -100,26 +106,66 @@
         {
           "database": "dm_core_lm",
           "table": "logs_adqm",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "log_level",
+            "logger"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 10,
+            "types": 8,
+            "codecs": 40,
+            "indexes": 240,
+            "final_validation": 10
+          },
           "queries": {
             "mode": "manual",
             "test_queries": [
               {
-                "query_id": "q_logs_count_all",
-                "query": "SELECT count() FROM {table} WHERE `message` LIKE '%very ooooooong str %'",
+                "query_id": "q_adqm_dec25_message_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%error%'",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
               },
               {
-                "query_id": "q_logs_errors_count",
-                "query": "SELECT count() FROM {table} WHERE `message` LIKE '%error%'",
+                "query_id": "q_adqm_dec25_message_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%very ooooooong str %'",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
               },
               {
-                "query_id": "q_logs_path_pattern",
-                "query": "SELECT count() FROM {table} WHERE log_file_path LIKE '%adqm%'",
+                "query_id": "q_adqm_dec25_log_level_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_level` = 'ERROR'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_adqm_dec25_logger",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `logger` LIKE '%adqm%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_adqm_dec25_host_name",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `host_name` LIKE '%node%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_adqm_dec25_object",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND ifNull(`object`, '') LIKE '%obj%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_adqm_dec25_log_file_path",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_file_path` LIKE '%adqm%'",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
@@ -127,23 +173,347 @@
             ]
           },
           "rules": {
-            "column_rules": [
+            "column_rules": [],
+            "codec_rules": [
               {
-                "by_type": "String",
-                "by_name": "message",
-                "auto_generate_alternatives": true,
-                "auto_compressions_datatype": "String",
-                "types": [
-                  "String"
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6, 'Europe/Moscow')",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
                 ]
               },
               {
+                "by_name": "message",
                 "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
                 "by_name": "log_file_path",
-                "auto_generate_alternatives": true,
-                "auto_compressions_datatype": "String",
-                "types": [
-                  "String"
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "pid",
+                "by_type": "UInt32",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(Delta(4), ZSTD(1))",
+                  "CODEC(T64, ZSTD(1))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "log_level",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "logger",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(200)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "host_name",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "object",
+                "by_type": "Nullable(String)",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "message",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(4, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(4, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 65536, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 65536, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 131072, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  }
                 ]
               }
             ]
@@ -152,19 +522,68 @@
         {
           "database": "dm_core_lm",
           "table": "logs_airflow",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "dag",
+            "run",
+            "task",
+            "attempt"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 10,
+            "types": 8,
+            "codecs": 40,
+            "indexes": 240,
+            "final_validation": 10
+          },
           "queries": {
             "mode": "manual",
             "test_queries": [
               {
-                "query_id": "q_airflow_count_all",
-                "query": "SELECT count() FROM {table} WHERE `airflow_message` LIKE '%very ooooooong str %'",
+                "query_id": "q_airflow_dec25_message_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `airflow_message` LIKE '%error%'",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
               },
               {
-                "query_id": "q_airflow_message_pattern",
-                "query": "SELECT count() FROM {table} WHERE airflow_message LIKE '%error%'",
+                "query_id": "q_airflow_dec25_message_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `airflow_message` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_airflow_dec25_log_level_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `airflow_log_level` = 'ERROR'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_airflow_dec25_task",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `task` LIKE '%dag.task%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_airflow_dec25_logger_module",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `airflow_python_logger_module` LIKE '%airflow%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_airflow_dec25_run",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `run` LIKE '%manual__%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_airflow_dec25_dag_run_task",
+                "query": "SELECT dag, run, task, count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) GROUP BY dag, run, task ORDER BY count() DESC LIMIT 100",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
@@ -172,14 +591,354 @@
             ]
           },
           "rules": {
-            "column_rules": [
+            "column_rules": [],
+            "codec_rules": [
               {
-                "by_type": "String",
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6)",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              },
+              {
                 "by_name": "airflow_message",
-                "auto_generate_alternatives": true,
-                "auto_compressions_datatype": "String",
-                "types": [
-                  "String"
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
+                "by_name": "run",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "airflow_datetime",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "attempt",
+                "by_type": "UInt16",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(Delta(2), ZSTD(1))",
+                  "CODEC(T64, ZSTD(1))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "airflow_log_level",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "task",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "airflow_python_logger_module",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(200)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "run",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "airflow_message",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(4, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(4, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 65536, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 65536, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 131072, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  }
                 ]
               }
             ]
@@ -188,19 +947,102 @@
         {
           "database": "dm_core_lm",
           "table": "logs_dbt",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "dag",
+            "task",
+            "run"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 10,
+            "types": 8,
+            "codecs": 50,
+            "indexes": 280,
+            "final_validation": 10
+          },
           "queries": {
             "mode": "manual",
             "test_queries": [
               {
-                "query_id": "q_dbt_count_all",
-                "query": "SELECT count() FROM {table} WHERE `msg` LIKE '%very ooooooong str %'",
+                "query_id": "q_dbt_dec25_msg_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `msg` LIKE '%error%'",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
               },
               {
-                "query_id": "q_dbt_message_pattern",
-                "query": "SELECT count() FROM {table} WHERE msg LIKE '%error%'",
+                "query_id": "q_dbt_dec25_msg_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `msg` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_dbt_dec25_dbt_msg_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND ifNull(`dbt_msg`, '') LIKE '%error%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_dbt_dec25_log_level",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_level` = 'ERROR'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_dbt_dec25_log_class",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_class` LIKE '%model%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_dbt_dec25_log_code",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_code` LIKE '%E%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_dbt_dec25_task",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `task` LIKE '%task%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_dbt_dec25_target_user",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND ifNull(`dbt_target_user`, '') LIKE '%user%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_dbt_dec25_target_host",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND ifNull(`dbt_target_host`, '') LIKE '%host%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_dbt_dec25_job_id",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `job_id` LIKE '%job%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_dbt_dec25_run",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `run` LIKE '%run%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_dbt_dec25_dag_task_run",
+                "query": "SELECT dag, task, run, count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) GROUP BY dag, task, run ORDER BY count() DESC LIMIT 100",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
@@ -208,14 +1050,735 @@
             ]
           },
           "rules": {
-            "column_rules": [
+            "column_rules": [],
+            "codec_rules": [
               {
-                "by_type": "String",
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6, 'UTC')",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "_fluentbit_timestamp",
+                "by_type": "DateTime64(6)",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              },
+              {
                 "by_name": "msg",
-                "auto_generate_alternatives": true,
-                "auto_compressions_datatype": "String",
-                "types": [
-                  "String"
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
+                "by_name": "dbt_msg",
+                "by_type": "Nullable(String)",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
+                "by_name": "run",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "job_id",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "log_pid",
+                "by_type": "UInt32",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(Delta(4), ZSTD(1))",
+                  "CODEC(T64, ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "dbt_sql_run_time",
+                "by_type": "Float64",
+                "codecs": [
+                  "CODEC(Gorilla, ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "dbt_sql_affected_rows",
+                "by_type": "UInt64",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "log_level",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "log_class",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "log_code",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(100)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "task",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "dbt_target_user",
+                "by_type": "LowCardinality(Nullable(String))",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "dbt_target_host",
+                "by_type": "LowCardinality(Nullable(String))",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "job_id",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "msg",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "dbt_msg",
+                "by_type": "Nullable(String)",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "database": "raw_lm",
+          "table": "log_flexloader_core_general",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "operation_type",
+            "flex_log_level",
+            "host_name"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 10,
+            "types": 10,
+            "codecs": 40,
+            "indexes": 200,
+            "final_validation": 10
+          },
+          "queries": {
+            "mode": "manual",
+            "test_queries": [
+              {
+                "query_id": "q_general_dec25_flex_msg_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%error%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_general_dec25_flex_msg_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_general_dec25_flex_logger_core",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_logger` LIKE '%core%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_general_dec25_log_file_path_log",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_file_path` LIKE '%.log%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_general_dec25_log_file_path_json",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_file_path` LIKE '%.json%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_general_dec25_flex_log_level_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_log_level` = 'ERROR'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_general_dec25_host_name_node",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `host_name` LIKE '%node%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              }
+            ]
+          },
+          "rules": {
+            "codec_rules": [
+              {
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6)",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))",
+                  "CODEC(Delta(8), ZSTD(1))",
+                  "CODEC(Delta(8), ZSTD(2))",
+                  "CODEC(Delta(8), ZSTD(3))",
+                  "CODEC(DoubleDelta, ZSTD(1))",
+                  "CODEC(DoubleDelta, ZSTD(2))"
+                ]
+              },
+              {
+                "by_name": "flex_msg",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
+                "by_name": "flex_logger",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
+                "by_name": "log_file_path",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "flex_msg",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(4, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(4, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 65536, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 65536, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 131072, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "flex_log_level",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "host_name",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
                 ]
               }
             ]
@@ -224,19 +1787,73 @@
         {
           "database": "raw_lm",
           "table": "log_flexloader_core_loaders",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "operation_type",
+            "table_name"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 10,
+            "types": 10,
+            "codecs": 40,
+            "indexes": 220,
+            "final_validation": 10
+          },
           "queries": {
             "mode": "manual",
             "test_queries": [
               {
-                "query_id": "q_flex_count_all",
-                "query": "SELECT count() FROM {table} WHERE `flex_msg` LIKE '%very ooooooong str %'",
+                "query_id": "q_loaders_dec25_flex_msg_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%error%'",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
               },
               {
-                "query_id": "q_flex_path_pattern",
-                "query": "SELECT count() FROM {table} WHERE `flex_msg` LIKE '%error%'",
+                "query_id": "q_loaders_dec25_flex_msg_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_loaders_dec25_log_file_path_log",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_file_path` LIKE '%.log%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_loaders_dec25_log_file_path_json",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_file_path` LIKE '%.json%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_loaders_dec25_flex_logger_name",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_logger` LIKE '%loader%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_loaders_dec25_flex_log_level_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_log_level` = 'ERROR'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_loaders_dec25_host_name_node",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `host_name` LIKE '%node%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_loaders_dec25_operation_table",
+                "query": "SELECT operation_type, table_name, count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND operation_type IN ('ext', 'apl') GROUP BY operation_type, table_name ORDER BY count() DESC LIMIT 100",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
@@ -246,12 +1863,353 @@
           "rules": {
             "column_rules": [
               {
+                "by_name": "flex_logger",
                 "by_type": "String",
-                "by_name": "flex_msg",
-                "auto_generate_alternatives": true,
-                "auto_compressions_datatype": "String",
+                "auto_generate_alternatives": false,
                 "types": [
-                  "String"
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "log_file_path",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              }
+            ],
+            "codec_rules": [
+              {
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6)",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))",
+                  "CODEC(Delta(8), ZSTD(1))",
+                  "CODEC(Delta(8), ZSTD(2))",
+                  "CODEC(DoubleDelta, ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "flex_msg",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
+                "by_name": "log_file_path",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
+                "by_name": "log_file_path",
+                "by_type": "LowCardinality(String)",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
+                "by_name": "journal_id",
+                "by_type": "Nullable(UInt32)",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(Delta(4), ZSTD(1))",
+                  "CODEC(T64, ZSTD(1))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "flex_msg",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(4, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(4, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 65536, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 65536, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 131072, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "flex_log_level",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "host_name",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
                 ]
               }
             ]
@@ -260,19 +2218,59 @@
         {
           "database": "raw_lm",
           "table": "log_flexloader_core_spark",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "source_system",
+            "table_name"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 10,
+            "types": 10,
+            "codecs": 40,
+            "indexes": 220,
+            "final_validation": 10
+          },
           "queries": {
             "mode": "manual",
             "test_queries": [
               {
-                "query_id": "q_flex_spark_count_all",
-                "query": "SELECT count() FROM {table} WHERE `flex_msg` LIKE '%very ooooooong str %'",
+                "query_id": "q_spark_dec25_flex_msg_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%error%'",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
               },
               {
-                "query_id": "q_flex_spark_path_pattern",
-                "query": "SELECT count() FROM {table} WHERE `flex_msg` LIKE '%error%'",
+                "query_id": "q_spark_dec25_flex_msg_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_spark_dec25_log_file_path_log",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_file_path` LIKE '%.log%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_spark_dec25_host_name_node",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `host_name` LIKE '%node%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_spark_dec25_source_system_group",
+                "query": "SELECT source_system, count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) GROUP BY source_system ORDER BY count() DESC",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_spark_dec25_table_name_group",
+                "query": "SELECT table_name, count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) GROUP BY table_name ORDER BY count() DESC LIMIT 100",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
@@ -280,14 +2278,286 @@
             ]
           },
           "rules": {
-            "column_rules": [
+            "codec_rules": [
               {
-                "by_type": "String",
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6)",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              },
+              {
                 "by_name": "flex_msg",
-                "auto_generate_alternatives": true,
-                "auto_compressions_datatype": "String",
-                "types": [
-                  "String"
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
+                "by_name": "log_file_path",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "flex_msg",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(4, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(4, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 65536, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 65536, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 131072, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "host_name",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
                 ]
               }
             ]
@@ -296,19 +2566,109 @@
         {
           "database": "raw_lm",
           "table": "log_k8s_audit",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "objectRef_namespace",
+            "verb",
+            "level"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 12,
+            "types": 20,
+            "codecs": 60,
+            "indexes": 320,
+            "final_validation": 12
+          },
           "queries": {
             "mode": "manual",
             "test_queries": [
               {
-                "query_id": "q_k8s_count_all",
-                "query": "SELECT count() FROM {table} WHERE `responseStatus_message` LIKE '%very ooooooong str %'",
+                "query_id": "q_audit_dec25_rsp_msg_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `responseStatus_message` LIKE '%error%'",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
               },
               {
-                "query_id": "q_k8s_request_uri_pattern",
-                "query": "SELECT count() FROM {table} WHERE `responseStatus_message` LIKE '%error%'",
+                "query_id": "q_audit_dec25_rsp_msg_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `responseStatus_message` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_audit_dec25_request_uri_api",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND requestURI LIKE '%/api/%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_audit_dec25_verb_main",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND verb IN ('GET', 'POST', 'DELETE', 'PATCH', 'LIST')",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_audit_dec25_kind_main",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND kind IN ('Pod', 'Deployment', 'Service', 'Node', 'Namespace')",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_audit_dec25_level_main",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND level IN ('INFO', 'WARN', 'ERROR', 'Request', 'Metadata')",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_audit_dec25_stage_main",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND stage IN ('RequestReceived', 'ResponseStarted', 'ResponseComplete')",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_audit_dec25_rsp_code_main",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND responseStatus_code IN (200, 201, 400, 401, 403, 404, 429, 500)",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_audit_dec25_user_username",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND user_username LIKE '%system:%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_audit_dec25_objectref_namespace",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND objectRef_namespace IN ('default', 'kube-system', 'monitoring')",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_audit_dec25_ext_cluster_name",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND ext_ClusterName LIKE '%prod%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_audit_dec25_source_ips",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND sourceIPs LIKE '%10.%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_audit_dec25_user_agent",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND userAgent LIKE '%kube%'",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
@@ -318,12 +2678,541 @@
           "rules": {
             "column_rules": [
               {
+                "by_name": "apiVersion",
                 "by_type": "String",
-                "by_name": "responseStatus_message",
-                "auto_generate_alternatives": true,
-                "auto_compressions_datatype": "String",
+                "auto_generate_alternatives": false,
                 "types": [
-                  "String"
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "kind",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "level",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "verb",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "stage",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "ext_ClusterEnv",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "ext_ClusterName",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "responseStatus_status",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "objectRef_namespace",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              }
+            ],
+            "codec_rules": [
+              {
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6)",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "responseStatus_message",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
+                "by_name": "annotations_authorization_reason",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(3))"
+                ]
+              },
+              {
+                "by_name": "requestURI",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "userAgent",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "responseStatus_code",
+                "by_type": "Int32",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(Delta(4), ZSTD(1))",
+                  "CODEC(T64, ZSTD(1))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "verb",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(20)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "verb",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(20)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "kind",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(100)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "kind",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(100)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "level",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "level",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "stage",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "stage",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "responseStatus_code",
+                "by_type": "Int32",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": 1
+                  },
+                  {
+                    "type": "minmax",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "user_username",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "objectRef_namespace",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(100)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "objectRef_namespace",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(100)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "ext_ClusterName",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "ext_ClusterName",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "requestURI",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "sourceIPs",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": 1
+                  }
+                ]
+              },
+              {
+                "by_name": "responseStatus_message",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(4, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(4, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 65536, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 65536, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 131072, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  }
                 ]
               }
             ]
@@ -332,19 +3221,89 @@
         {
           "database": "raw_lm",
           "table": "log_k8s_events",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "involvedObject_namespace",
+            "source_type",
+            "ext_ClusterName",
+            "ext_ClusterEventType"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 12,
+            "types": 20,
+            "codecs": 60,
+            "indexes": 320,
+            "final_validation": 12
+          },
           "queries": {
             "mode": "manual",
             "test_queries": [
               {
-                "query_id": "q_k8s_events_count_all",
-                "query": "SELECT count() FROM {table} WHERE `message` LIKE '%very ooooooong str %'",
+                "query_id": "q_events_dec25_message_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%error%'",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
               },
               {
-                "query_id": "q_k8s_events_message_pattern",
-                "query": "SELECT count() FROM {table} WHERE message LIKE '%error%'",
+                "query_id": "q_events_dec25_message_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_events_dec25_event_type",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND ext_ClusterEventType IN ('Normal', 'Warning')",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_events_dec25_cluster_name",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND ext_ClusterName LIKE '%prod%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_events_dec25_cluster_env",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND ext_ClusterEnv IN ('prod', 'stage', 'dev')",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_events_dec25_source_type",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND source_type IN ('k8s_event', 'kube_event', 'event')",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_events_dec25_namespace",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND involvedObject_namespace IN ('default', 'kube-system', 'monitoring')",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_events_dec25_object_name",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND involvedObject_name LIKE '%pod%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_events_dec25_source_host",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND source_host LIKE '%node%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_events_dec25_reason",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND reason LIKE '%BackOff%'",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
@@ -354,12 +3313,628 @@
           "rules": {
             "column_rules": [
               {
+                "by_name": "source_type",
                 "by_type": "String",
-                "by_name": "message",
-                "auto_generate_alternatives": true,
-                "auto_compressions_datatype": "String",
+                "auto_generate_alternatives": false,
                 "types": [
-                  "String"
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "ext_ClusterEnv",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "ext_ClusterName",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "ext_ClusterEventType",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "involvedObject_name",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "involvedObject_namespace",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "source_host",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "reason",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              }
+            ],
+            "codec_rules": [
+              {
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6)",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "message",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
+                "by_name": "reason",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "source_type",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "ext_ClusterEnv",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "ext_ClusterName",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "ext_ClusterEventType",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "involvedObject_name",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "involvedObject_namespace",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "source_host",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "message",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(4, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(4, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 65536, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 65536, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 131072, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "ext_ClusterEventType",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "ext_ClusterEventType",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(8)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "ext_ClusterName",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "ext_ClusterName",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "ext_ClusterEnv",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(20)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "ext_ClusterEnv",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(20)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "source_type",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "source_type",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "involvedObject_namespace",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(100)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "involvedObject_namespace",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(100)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "involvedObject_name",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "involvedObject_name",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "source_host",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "source_host",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
                 ]
               }
             ]
@@ -368,19 +3943,88 @@
         {
           "database": "raw_lm",
           "table": "log_k8s_nova_via_filebeat",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "namespace",
+            "workspace",
+            "container_name"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 10,
+            "types": 14,
+            "codecs": 50,
+            "indexes": 260,
+            "final_validation": 10
+          },
           "queries": {
             "mode": "manual",
             "test_queries": [
               {
-                "query_id": "q_k8s_nova_count_all",
-                "query": "SELECT count() FROM {table} WHERE `message` LIKE '%very ooooooong str %'",
+                "query_id": "q_k8s_nova_dec25_message_error",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%error%'",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
               },
               {
-                "query_id": "q_k8s_nova_message_pattern",
-                "query": "SELECT count() FROM {table} WHERE message LIKE '%error%'",
+                "query_id": "q_k8s_nova_dec25_message_long_nomatch",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%very ooooooong str %'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_k8s_nova_dec25_namespace",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `namespace` IN ('default', 'kube-system', 'monitoring')",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_k8s_nova_dec25_workspace",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `workspace` LIKE '%kube%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_k8s_nova_dec25_container_name",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `container_name` LIKE '%app%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_k8s_nova_dec25_container_image",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `container_image` LIKE '%:latest%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_k8s_nova_dec25_pod_name",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `pod_name` LIKE '%pod%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_k8s_nova_dec25_deployment",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND ifNull(`deployment_name`, '') LIKE '%deploy%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_k8s_nova_dec25_app",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND ifNull(`app`, '') LIKE '%app%'",
+                "cache_mode": "cold",
+                "select_operations_count": 10,
+                "warmup_queries": []
+              },
+              {
+                "query_id": "q_k8s_nova_dec25_node",
+                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `node` LIKE '%node%'",
                 "cache_mode": "cold",
                 "select_operations_count": 10,
                 "warmup_queries": []
@@ -390,12 +4034,587 @@
           "rules": {
             "column_rules": [
               {
+                "by_name": "container_image",
                 "by_type": "String",
-                "by_name": "message",
-                "auto_generate_alternatives": true,
-                "auto_compressions_datatype": "String",
+                "auto_generate_alternatives": false,
                 "types": [
-                  "String"
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "pod_name",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              }
+            ],
+            "codec_rules": [
+              {
+                "by_name": "timestamp",
+                "by_type": "DateTime64(6)",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "message",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
+                "by_name": "log_file_path",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(1))"
+                ]
+              },
+              {
+                "by_name": "_raw_message",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(3))"
+                ]
+              },
+              {
+                "by_name": "_raw_message",
+                "by_type": "Nullable(String)",
+                "codecs": [
+                  "CODEC(ZSTD(3))"
+                ]
+              },
+              {
+                "by_name": "_error",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(ZSTD(3))"
+                ]
+              },
+              {
+                "by_name": "_error",
+                "by_type": "Nullable(String)",
+                "codecs": [
+                  "CODEC(ZSTD(3))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "namespace",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(100)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "namespace",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(100)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "workspace",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "workspace",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(50)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "container_name",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(200)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "container_name",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "set(200)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "container_image",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "container_image",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "pod_name",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "pod_name",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "deployment_name",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(200)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "deployment_name",
+                "by_type": "Nullable(String)",
+                "indexes": [
+                  {
+                    "type": "set(200)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "app",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "set(200)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "app",
+                "by_type": "Nullable(String)",
+                "indexes": [
+                  {
+                    "type": "set(200)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "node",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "node",
+                "by_type": "LowCardinality(String)",
+                "indexes": [
+                  {
+                    "type": "bloom_filter(0.01)",
+                    "granularity": [
+                      1,
+                      2
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "message",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(4, 1024, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(4, 1024, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 2048, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 4096, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 65536, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 8192, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      8192
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 4, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 16384, 5, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      16384
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 32768, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      32768
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 65536, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      65536
+                    ]
+                  },
+                  {
+                    "type": "ngrambf_v1(3, 131072, 3, 0)",
+                    "granularity": 1,
+                    "index_granularity_values": [
+                      131072
+                    ]
+                  }
                 ]
               }
             ]
@@ -407,7 +4626,7 @@
         "test_queries": [
           {
             "query_id": "q_fallback_like_error",
-            "query": "SELECT count() FROM {table} WHERE toString(tuple(*)) LIKE '%error%'",
+            "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND toString(tuple(*)) LIKE '%error%'",
             "cache_mode": "cold",
             "select_operations_count": 10,
             "warmup_queries": []
