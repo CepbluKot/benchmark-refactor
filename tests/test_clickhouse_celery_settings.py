@@ -66,7 +66,7 @@ class ClickHouseCelerySettingsTests(unittest.TestCase):
         self.assertEqual(settings.backend_url, "redis://localhost:6379/0")
 
     def test_default_urls_are_valid(self) -> None:
-        settings = ClickHouseCeleryWorkerSettings.model_validate({})
+        settings = ClickHouseCeleryWorkerSettings(_env_file=None)
         self.assertEqual(settings.broker_url, "pyamqp://guest:guest@localhost:5672//")
         self.assertEqual(settings.backend_url, "rpc://guest:guest@localhost:5672//")
         self.assertEqual(settings.celery_queue_name, "bench.benchmark")

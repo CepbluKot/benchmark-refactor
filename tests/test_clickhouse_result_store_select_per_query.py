@@ -243,7 +243,7 @@ class _FailFastStore(ClickHouseBenchmarkResultStore):
 
 
 class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
-    def test_store_requires_redis_lock_configuration(self) -> None:
+    def test_store_uses_localhost_redis_fallback_when_urls_not_set(self) -> None:
         with patch.dict(
             os.environ,
             {
@@ -252,8 +252,11 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             },
             clear=False,
         ):
-            with self.assertRaisesRegex(RuntimeError, "Redis"):
-                _FailFastStore()
+            store = _CapturingStore()
+            self.assertEqual(
+                store._record_lock_redis_url,  # noqa: SLF001
+                "redis://localhost:6379/0",
+            )
 
     def test_store_contains_per_query_select_columns_and_values(self) -> None:
         store = _CapturingStore()

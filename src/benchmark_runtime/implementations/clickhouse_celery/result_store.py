@@ -2324,11 +2324,12 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         celery_backend = str(os.getenv("BENCH_CELERY_BACKEND_URL", "") or "").strip()
         if self._is_redis_url(celery_backend):
             return celery_backend
-        return ""
+        # Локальный fallback для dev/локальных прогонов.
+        return "redis://localhost:6379/0"
 
     def _init_redis_lock_client(self) -> None:
         """Инициализирует Redis-клиент для межпроцессного lock."""
-        redis_url = str(self._record_lock_redis_url or 'redis://localhost:6379/0').strip()
+        redis_url = str(self._record_lock_redis_url or "").strip()
         if not redis_url:
             raise RuntimeError(
                 "ClickHouseBenchmarkResultStore: Redis обязателен для запуска. "
