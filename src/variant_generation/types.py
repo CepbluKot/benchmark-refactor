@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel
 
@@ -18,6 +18,8 @@ class VariantMeta(BaseModel):
     execution_uuid: Optional[str] = None
     parent_variant_table: Optional[str] = None
     phase_name: Optional[str] = None
+    stage_column_name: Optional[str] = None
+    merged_columns: Optional[List[str]] = None
     table_index_granularity: Optional[int] = None
     column_meta: Optional[ColumnVariantMeta] = None
     index_meta: Optional[IndexVariantMeta] = None

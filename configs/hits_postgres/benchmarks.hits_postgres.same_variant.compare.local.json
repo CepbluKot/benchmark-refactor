@@ -1,0 +1,110 @@
+{
+  "benchmarks": [
+    {
+      "id": "bench_same_variant_compare",
+      "connection_id": "local_ch_hits",
+      "strategy": "sequential_phased_topn_strategy",
+      "column_rules_mode": "inline_only",
+      "index_rules_mode": "inline_only",
+      "column_order_mode": "compressed_size_desc",
+      "order_by_first": "event_date",
+      "order_by_candidates": [
+        "event_date"
+      ],
+      "tables": {
+        "default": [
+          "hits_postgres"
+        ]
+      },
+      "test_database": "benchmark_tmp",
+      "insert_operations_count": 3,
+      "sequential_top_n_limits": {
+        "order_by": 1,
+        "types": 1,
+        "codecs": 1,
+        "indexes": 1,
+        "final_validation": 1
+      },
+      "max_winners_per_parent_limits": {
+        "types": 1,
+        "codecs": 1,
+        "indexes": 1
+      },
+      "max_benchmarks_limits": {
+        "order_by": 1,
+        "types": 1,
+        "codecs": 1,
+        "indexes": 1,
+        "indexes_validation": 1,
+        "final_validation": 1,
+        "sequential": 1
+      },
+      "source_insert_rows_per_operation_limits": {
+        "sequential": 100000
+      },
+      "insert_rows_per_operation_limits": {
+        "types": 100000,
+        "indexes": 100000,
+        "sequential": 100000
+      },
+      "scoring": {
+        "mode": "expression",
+        "expression": "pow(safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0), 0.9) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.1)",
+        "on_error_score": -1.0
+      },
+      "global_rules": {
+        "order_by_rules": {
+          "first_column": "event_date",
+          "candidates": [
+            "event_date"
+          ],
+          "auto_generate_candidates": false
+        },
+        "column_rules": [
+          {
+            "by_name": "page_url",
+            "by_type": "String",
+            "types": [
+              "String"
+            ],
+            "codecs": [
+              "CODEC(ZSTD(1))"
+            ]
+          }
+        ],
+        "index_rules": [
+          {
+            "by_name": "page_url",
+            "by_type": "String",
+            "indexes": [
+              {
+                "type": "tokenbf_v1(32768, 3, 0)",
+                "granularity": 2,
+                "index_granularity_values": [
+                  8192
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "queries": {
+        "mode": "manual",
+        "test_queries": [
+          {
+            "query_id": "q_page_url_like_catalog_item",
+            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%catalog/item/%'",
+            "cache_mode": "cold",
+            "select_operations_count": 5
+          },
+          {
+            "query_id": "q_page_url_like_help_delivery",
+            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%help/delivery%'",
+            "cache_mode": "cold",
+            "select_operations_count": 5
+          }
+        ]
+      }
+    }
+  ]
+}

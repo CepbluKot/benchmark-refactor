@@ -91,14 +91,13 @@ Legacy select-агрегаты в таблице результатов удал
 
 Для baseline исходной схемы есть отдельный лимит:
 1. `source_insert_rows_per_operation_limits[table_mode]` (если задан) — используется в `SourceBenchmarkJob`;
-2. затем legacy `source_insert_rows_per_operation_limit` (если задан);
+2. затем `source_insert_rows_per_operation_limit` (если задан);
 3. если не задано, baseline берёт fallback variant-лимитов (`insert_rows_per_operation_limits` -> `insert_rows_per_operation_limit`).
 
 Лимиты числа вариантов:
 1. `max_benchmarks_limits[types]` — максимум type/codec-вариантов.
 2. `max_benchmarks_limits[indexes]` — максимум index-вариантов.
-3. Затем legacy `max_type_benchmarks/max_index_benchmarks`.
-4. Если не задано, используется legacy fallback `insert_operations_count`.
+3. Если не задано, используется fallback `insert_operations_count`.
 
 Как работают insert-итерации:
 1. `insert_operations_count` — это количество insert-замеров (повторов), а не количество строк.
@@ -223,7 +222,8 @@ JSON-секции или `benchmark.project.json`.
 
 Для `sequential_phased_topn_strategy` runner делает 5 этапов:
 `order_by -> types -> codecs -> indexes -> final_validation`.
-Между этапами передаётся top-N победителей (`sequential_top_n_limits`/`sequential_top_n`).
+Между этапами передаётся top-N победителей
+(`sequential_top_n_limits`/`sequential_types_top_n_for_indexes`).
 Фазы `types/codecs/indexes` работают в one-column режиме:
 - внутри одного parent строятся кандидаты по колонкам;
 - собираются top-N merged-кандидаты (ограничение `max_winners_per_parent_limits`);
@@ -628,22 +628,74 @@ config = load_config("configs/benchmark.project.local.json")
 9. Insert-замеры собираются в единые массивы по всем `insert_operations_count` повторов,
    и перцентили считаются по этим единым массивам.
 
-#### 1) Запусти Celery worker
+#### 1) Запусти RabbitMQ
+
+Рекомендуемый вариант (через compose с выделенным `vhost=bench`
+и пустым списком `policies`):
 
 ```bash
-export BENCH_CELERY_BROKER_URL='pyamqp://guest:guest@localhost:5672//'
-export BENCH_CELERY_BACKEND_URL='rpc://guest:guest@localhost:5672//'
+docker compose -f configs/rabbitmq/docker-compose.rabbitmq.yml up -d
+```
+
+Проверка, что брокер доступен:
+
+```bash
+nc -zv 127.0.0.1 5672
+```
+
+Management UI: `http://127.0.0.1:15672` (`bench` / `bench`).
+
+Проверка, что в `bench`-vhost нет policy с `message-ttl`:
+
+```bash
+docker exec bench-rabbitmq rabbitmqctl list_policies -p bench
+```
+
+Должно быть пусто.
+
+Если контейнер уже был создан:
+
+```bash
+docker compose -f configs/rabbitmq/docker-compose.rabbitmq.yml start
+```
+
+Остановить/удалить:
+
+```bash
+docker compose -f configs/rabbitmq/docker-compose.rabbitmq.yml down
+```
+
+#### 2) Запусти Celery worker
+
+```bash
+export BENCH_CELERY_BROKER_URL='pyamqp://bench:bench@localhost:5672/bench'
+export BENCH_CELERY_BACKEND_URL='rpc://bench:bench@localhost:5672/bench'
+export BENCH_CELERY_QUEUE_NAME='bench.benchmark'
 export CELERY_WORKER_CONCURRENCY='4'
 export CLICKHOUSE_MANAGER_MAX_CONCURRENT_STREAMS_PER_PROCESS='1'
 export MAX_COPY_N_RETRIES='100'
 export MAX_COPY_RETRY_SLEEP_SEC='10'
 export MAX_COPY_RETRY_SLEEP_SEC_INCREMENT='2'
 # export CLICKHOUSE_STREAM_SLOT_ACQUIRE_TIMEOUT_SEC='5'
+# По умолчанию задачи не протухают: task_default_expires/time limits отключены (None).
+# При необходимости можно явно включить:
+# export BENCH_CELERY_TASK_DEFAULT_EXPIRES_SEC='3600'
+# export BENCH_CELERY_RESULT_EXPIRES_SEC='86400'
+# export BENCH_CELERY_TASK_SOFT_TIME_LIMIT_SEC='7200'
+# export BENCH_CELERY_TASK_TIME_LIMIT_SEC='7500'
+# Для Redis broker long-running задачи защищаются visibility timeout.
+# export BENCH_CELERY_BROKER_VISIBILITY_TIMEOUT_SEC='86400'
+# На стороне Celery queue-level TTL/queue expiry принудительно выключены
+# (`task_queue_ttl=None`, `task_queue_expires=None`), delivery mode — persistent.
+# Для RabbitMQ используется выделенная durable очередь `BENCH_CELERY_QUEUE_NAME`
+# c direct routing для source/variant задач.
+# Если на кластере админ навесил operator policy глобально, приложение это не
+# переопределит; тогда нужен отдельный vhost/кластер без этой policy.
 
 ./venv/bin/celery -A src.benchmark_runtime.implementations.clickhouse_celery.tasks worker -E --loglevel=INFO
 ```
 
-#### 2) Launcher-код
+#### 3) Launcher-код
 
 ```python
 from src.loader import load_config
@@ -894,10 +946,6 @@ print(run_id)
 - `queries.test_queries[].cache_mode = warm`: перед серией замеров запроса выполняются
   query-level `warmup_queries`, затем делаются `select_operations_count` замеров.
 
-Примечание: старые ключи (`max_iterations`, `sequential_top_n`, `insert_rows_limit`,
-`source_insert_rows_limit`, `insert_rows_limits`, `max_type_benchmarks`,
-`max_index_benchmarks`) пока поддерживаются как legacy-алиасы.
-
 ### `scoring`: как настроить формулу score
 
 `scoring.mode`:
@@ -917,9 +965,11 @@ print(run_id)
 - `mode`
 - `expression` (обязательно при `mode=expression`)
 - `on_error_score` (опционально: если expression упало, будет это значение; иначе `score=None`)
-
-Для обратной совместимости `expression` можно передать также как
-`score_expression` или `sql_expression` (алиасы валидации).
+- `by_stage` (опционально): stage-specific override формулы.
+  Поддерживаемые стадии:
+  - для source baseline: `source_baseline`;
+  - для variant задач: `types`, `indexes`, `combined`, `order_by`, `codecs`, `final_validation`.
+  Если стадия не описана в `by_stage`, используется верхнеуровневый `scoring`.
 
 Примеры:
 
@@ -937,6 +987,24 @@ print(run_id)
     "mode": "expression",
     "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)",
     "on_error_score": -1
+  }
+}
+```
+
+```json
+{
+  "scoring": {
+    "mode": "builtin",
+    "by_stage": {
+      "types": {
+        "mode": "expression",
+        "expression": "safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0)"
+      },
+      "indexes": {
+        "mode": "expression",
+        "expression": "pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.2) * pow(safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0), 0.8)"
+      }
+    }
   }
 }
 ```
@@ -1038,13 +1106,13 @@ print(run_id)
 - `sequential_phased_topn_strategy`
 
 Для `sequential_phased_topn_strategy` дополнительно можно задать:
-- legacy-поля:
+- параметры стратегии:
   - `order_by_first` — фиксированная первая колонка ORDER BY в фазе 1.
   - `order_by_candidates` — колонки-кандидаты, которые добавляются после `order_by_first`.
   - `sequential_top_n_limits` — top-N победителей по фазам
     (`order_by`, `types`, `codecs`, `indexes`, `final_validation`).
-    Если для фазы лимит не задан, используется общий `sequential_top_n`
-    (в конфиге: `sequential_types_top_n_for_indexes`).
+    Если для фазы лимит не задан, используется общий
+    `sequential_types_top_n_for_indexes`.
   - `max_winners_per_parent_limits` — лимиты числа merged-кандидатов на одного parent
     по фазам (`types`, `codecs`, `indexes`).
 - новый rules-блок (рекомендуется):
@@ -1148,7 +1216,7 @@ print(run_id)
    - построение DDL baseline-копии через `TableDDL` (DDL должен быть корректным);
    - baseline insert-прогон (source -> baseline copy) с метриками и лимитом `job.insert_rows_limit`
      (который берётся из `source_insert_rows_per_operation_limits[table_mode]`, затем из
-     legacy `source_insert_rows_per_operation_limit`, если он задан в конфиге);
+     `source_insert_rows_per_operation_limit`, если он задан в конфиге);
    - baseline select-прогон по baseline-копии;
    - расчёт baseline-метрик/score;
    - формирование `score_calculation_json` (с формулой, входными значениями и статусом);

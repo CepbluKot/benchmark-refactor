@@ -58,7 +58,7 @@ class LoaderTests(unittest.TestCase):
                             "strategy": "types_strategy",
                             "databases": ["analytics"],
                             "tables": ["events"],
-                            "max_iterations": 3,
+                            "insert_operations_count": 3,
                         }
                     ]
                 },
@@ -172,7 +172,7 @@ class LoaderTests(unittest.TestCase):
                         "strategy": "types_strategy",
                         "databases": ["analytics"],
                         "tables": ["events"],
-                        "max_iterations": 1,
+                        "insert_operations_count": 1,
                     }
                 ],
             }

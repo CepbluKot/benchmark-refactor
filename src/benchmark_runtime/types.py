@@ -67,7 +67,7 @@ class TableBenchmarkPlan(_FrozenModel):
     table: str
     strategy: BenchmarkStrategy
     mode: BenchmarkMode
-    max_iterations: int
+    insert_operations_count: int
     sequential_top_n: int
     sequential_top_n_limits: Optional[InsertRowsLimitsConfig] = None
     max_winners_per_parent_limits: Optional[InsertRowsLimitsConfig] = None
@@ -76,8 +76,6 @@ class TableBenchmarkPlan(_FrozenModel):
     source_insert_rows_limits: Optional[InsertRowsLimitsConfig] = None
     insert_rows_limits: Optional[InsertRowsLimitsConfig]
     max_benchmarks_limits: Optional[InsertRowsLimitsConfig] = None
-    max_type_benchmarks: Optional[int] = None
-    max_index_benchmarks: Optional[int] = None
     index_granularity_values: Optional[List[int]] = None
     column_order_mode: Optional[ColumnOrderMode]
     order_by_first: Optional[str] = None
@@ -104,7 +102,7 @@ class VariantJob(_FrozenModel):
     variant_table: str
     variant_meta: VariantMeta
     mode: BenchmarkMode
-    max_iterations: int
+    insert_operations_count: int
     insert_rows_limit: Optional[int]
     total_variants: int
     variant_ddl: TableDDL
@@ -128,7 +126,7 @@ class SourceBenchmarkJob(_FrozenModel):
     source_table: str
     source_table_ddl: TableDDL
     query_plan: QueryPlan
-    max_iterations: int
+    insert_operations_count: int
     insert_rows_limit: Optional[int]
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     celery: CeleryConfig
@@ -294,6 +292,7 @@ class BenchmarkVariantResult(_FrozenModel):
         ),
         serialization_alias="tested_table_consumed_compressed_size_bytes_with_indexes_readable",
     )
+    tested_table_primary_index_size_json: Optional[str] = None
     source_table_consumed_compressed_size_bytes_overall: Optional[float] = None
     source_table_consumed_compressed_size_bytes_overall_readable: Optional[str] = None
     tested_table_compression_overall_coef: Optional[float] = None
@@ -302,7 +301,6 @@ class BenchmarkVariantResult(_FrozenModel):
     tested_table_n_rows_in_size_test: Optional[int] = None
     tested_table_cols_sizes: Optional[str] = None
     tested_table_indexes_sizes: Optional[str] = None
-    tested_table_indexes_sizes_percent_from_col_size: Optional[str] = None
     extra_json: Optional[str] = None
     score_calculation_json: Optional[str] = None
     score: Optional[float] = None
@@ -468,6 +466,7 @@ class StoredBenchmarkResult(_FrozenModel):
         ),
         serialization_alias="tested_table_consumed_compressed_size_bytes_with_indexes_readable",
     )
+    tested_table_primary_index_size_json: Optional[str] = None
     source_table_consumed_compressed_size_bytes_overall: Optional[float] = None
     source_table_consumed_compressed_size_bytes_overall_readable: Optional[str] = None
     tested_table_compression_overall_coef: Optional[float] = None
@@ -478,7 +477,6 @@ class StoredBenchmarkResult(_FrozenModel):
     # ---------------------------  Indexes results  ----------------------------
     tested_table_cols_sizes: Optional[str] = None
     tested_table_indexes_sizes: Optional[str] = None
-    tested_table_indexes_sizes_percent_from_col_size: Optional[str] = None
 
     # ---------------------------  Unified JSON Metrics  ----------------------------
     size_bytes_total: Optional[float] = None
@@ -564,12 +562,26 @@ def build_variant_params(variant_meta: VariantMeta) -> Dict[str, Any]:
             "granularity": index_def.granularity,
         }
 
+    stage_column_name = (
+        str(variant_meta.stage_column_name).strip()
+        if variant_meta.stage_column_name is not None
+        else ""
+    )
+    merged_columns: List[str] = []
+    for raw_value in (variant_meta.merged_columns or []):
+        normalized = str(raw_value or "").strip()
+        if not normalized or normalized in merged_columns:
+            continue
+        merged_columns.append(normalized)
+
     return {
         "mode": variant_meta.mode,
         "global_index": variant_meta.global_index,
         "execution_uuid": variant_meta.execution_uuid,
         "parent_variant_table": variant_meta.parent_variant_table,
         "phase_name": variant_meta.phase_name,
+        "stage_column_name": stage_column_name or None,
+        "merged_columns": merged_columns,
         "table_index_granularity": variant_meta.table_index_granularity,
         "column_choices": column_choices,
         "index_choices": index_choices,

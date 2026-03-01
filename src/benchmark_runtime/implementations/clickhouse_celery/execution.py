@@ -112,6 +112,7 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
             self._source_task_name,
             kwargs={"payload": source_payload.model_dump(mode="json")},
             task_id=f"source-{uuid.uuid4().hex}",
+            expires=None,
             ignore_result=False,
         )
         raw_result = async_result.get(timeout=self._source_result_timeout_sec)
@@ -144,6 +145,7 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
             self._variant_task_name,
             kwargs={"payload": variant_payload.model_dump(mode="json")},
             task_id=task_id,
+            expires=None,
             ignore_result=True,
         )
         self._register_dispatched_task(task_id=task_id)
@@ -272,7 +274,7 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
                     for query in job.query_plan.test_queries
                 ],
             ),
-            max_iterations=job.max_iterations,
+            insert_operations_count=job.insert_operations_count,
             insert_rows_limit=job.insert_rows_limit,
             scoring=job.scoring,
             measured_percentiles=list(self._measured_percentiles),
@@ -300,7 +302,7 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
             variant_mode=job.variant_meta.mode,
             variant_params=build_variant_params(job.variant_meta),
             variant_ddl=job.variant_ddl.to_ddl(),
-            max_iterations=job.max_iterations,
+            insert_operations_count=job.insert_operations_count,
             insert_rows_limit=job.insert_rows_limit,
             scoring=job.scoring,
             query_plan=QueryPlanPayload(

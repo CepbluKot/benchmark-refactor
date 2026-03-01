@@ -252,7 +252,7 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             },
             clear=False,
         ):
-            with self.assertRaisesRegex(RuntimeError, "Redis обязателен"):
+            with self.assertRaisesRegex(RuntimeError, "Redis"):
                 _FailFastStore()
 
     def test_store_contains_per_query_select_columns_and_values(self) -> None:
@@ -296,6 +296,10 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             ),
             tested_table_consumed_compressed_size_bytes_with_indexes=1234.0,
             tested_table_consumed_compressed_size_bytes_with_indexes_readable="1.21 KiB",
+            tested_table_primary_index_size_json=(
+                '{"size_bytes":321.0,"size_bytes_readable":"321 B",'
+                '"size_percent_from_total_size":26.0129}'
+            ),
             score_calculation_json='{"mode":"expression","final_score":1.0}',
             score=1.0,
         )
@@ -337,6 +341,7 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             "tested_table_consumed_compressed_size_bytes_with_indexes_readable",
             columns,
         )
+        self.assertIn("tested_table_primary_index_size_json", columns)
         tested_per_query_json = json.loads(
             row_by_column["tested_table_select_metrics_by_query_json"] or "{}"
         )
@@ -381,6 +386,10 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             row_by_column["tested_table_consumed_compressed_size_bytes_with_indexes_readable"],
             "1.21 KiB",
         )
+        primary_index_json = json.loads(row_by_column["tested_table_primary_index_size_json"] or "{}")
+        self.assertEqual(primary_index_json.get("size_bytes"), 321.0)
+        self.assertEqual(primary_index_json.get("size_bytes_readable"), "321 B")
+        self.assertEqual(primary_index_json.get("size_percent_from_total_size"), 26.0129)
 
     def test_store_formats_sql_ddl_and_queries_before_insert(self) -> None:
         store = _CapturingStore()
@@ -581,6 +590,145 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
         store.store_worker_result(**payload_kwargs)
 
         self.assertEqual(len(store.capturing_client.insert_calls), 1)
+
+    def test_store_phased_does_not_include_legacy_indexes_percent_column(self) -> None:
+        store = _CapturingStore()
+
+        result = BenchmarkVariantResult(
+            benchmark_run_id=13,
+            benchmark_started_at=datetime(2026, 2, 24, 16, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_phased_indexes_percent",
+            source_database="analytics",
+            source_table="events",
+            variant_table="events__bench__bench_phased_indexes_percent__0001",
+            variant_mode="indexes_validation",
+            tested_table_ddl=(
+                "CREATE TABLE benchmark_tmp.events__bench__bench_phased_indexes_percent__0001 "
+                "(`user_id` Int32) ENGINE = MergeTree ORDER BY user_id"
+            ),
+            score=1.0,
+        )
+
+        store.store_worker_result(
+            benchmark_run_id=13,
+            benchmark_started_at=datetime(2026, 2, 24, 16, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_phased_indexes_percent",
+            benchmark_strategy="sequential_phased_topn_strategy",
+            source_database="analytics",
+            source_table="events",
+            variant_table="events__bench__bench_phased_indexes_percent__0001",
+            variant_mode="indexes_validation",
+            variant_params={"mode": "indexes_validation"},
+            tested_table_ddl_fallback=result.tested_table_ddl or "",
+            source_table_ddl_fallback=None,
+            result=result,
+        )
+
+        self.assertEqual(len(store.capturing_client.insert_calls), 1)
+        phased_insert_call = store.capturing_client.insert_calls[0]
+        columns = list(phased_insert_call["column_names"])
+
+        self.assertNotIn("tested_table_indexes_sizes_percent_from_col_size", columns)
+        self.assertIn("tested_table_primary_index_size_json", columns)
+
+    def test_store_phased_size_bytes_indexes_json_contains_percent_from_source_table(self) -> None:
+        store = _CapturingStore()
+
+        result = BenchmarkVariantResult(
+            benchmark_run_id=13,
+            benchmark_started_at=datetime(2026, 2, 24, 16, 5, tzinfo=timezone.utc),
+            benchmark_id="bench_phased_indexes_size_ratio",
+            source_database="analytics",
+            source_table="events",
+            variant_table="events__bench__bench_phased_indexes_size_ratio__0001",
+            variant_mode="indexes_validation",
+            tested_table_ddl=(
+                "CREATE TABLE benchmark_tmp.events__bench__bench_phased_indexes_size_ratio__0001 "
+                "(`country` String) ENGINE = MergeTree ORDER BY country"
+            ),
+            source_table_consumed_compressed_size_bytes_overall=1_000.0,
+            tested_table_indexes_sizes=json.dumps(
+                {
+                    "idx_country_tokenbf": {
+                        "column": "country",
+                        "size_compressed_bytes": 50,
+                        "size_compressed_bytes_readable": "50 B",
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            score=1.0,
+        )
+
+        store.store_worker_result(
+            benchmark_run_id=13,
+            benchmark_started_at=datetime(2026, 2, 24, 16, 5, tzinfo=timezone.utc),
+            benchmark_id="bench_phased_indexes_size_ratio",
+            benchmark_strategy="sequential_phased_topn_strategy",
+            source_database="analytics",
+            source_table="events",
+            variant_table="events__bench__bench_phased_indexes_size_ratio__0001",
+            variant_mode="indexes_validation",
+            variant_params={"mode": "indexes_validation"},
+            tested_table_ddl_fallback=result.tested_table_ddl or "",
+            source_table_ddl_fallback=None,
+            result=result,
+        )
+
+        self.assertEqual(len(store.capturing_client.insert_calls), 1)
+        phased_insert_call = store.capturing_client.insert_calls[0]
+        columns = list(phased_insert_call["column_names"])
+        row = list(phased_insert_call["data"][0])
+        row_by_column = dict(zip(columns, row))
+
+        self.assertIn("size_bytes_indexes_json", columns)
+        size_indexes_json = json.loads(row_by_column["size_bytes_indexes_json"] or "{}")
+        idx_payload = size_indexes_json.get("idx_country_tokenbf") or {}
+        self.assertEqual(idx_payload.get("size_compressed_bytes"), 50)
+        self.assertEqual(idx_payload.get("size_percent_from_source_table"), 5.0)
+
+    def test_store_phased_source_baseline_keeps_compression_coef_empty(self) -> None:
+        store = _CapturingStore()
+
+        result = BenchmarkVariantResult(
+            benchmark_run_id=14,
+            benchmark_started_at=datetime(2026, 2, 24, 17, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_source_baseline_coef",
+            source_database="analytics",
+            source_table="events",
+            variant_table="events__source_baseline__abc123",
+            variant_mode="source_baseline",
+            tested_table_ddl=(
+                "CREATE TABLE benchmark_tmp.events__source_baseline__abc123 "
+                "(`user_id` Int32) ENGINE = MergeTree ORDER BY user_id"
+            ),
+            source_table_consumed_compressed_size_bytes_overall=220_000_000,
+            tested_table_consumed_compressed_size_bytes_with_indexes=10_000_000,
+            tested_table_compression_overall_coef=None,
+            score=1.0,
+        )
+
+        store.store_worker_result(
+            benchmark_run_id=14,
+            benchmark_started_at=datetime(2026, 2, 24, 17, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_source_baseline_coef",
+            benchmark_strategy="sequential_phased_topn_strategy",
+            source_database="analytics",
+            source_table="events",
+            variant_table="events__source_baseline__abc123",
+            variant_mode="source_baseline",
+            variant_params={"mode": "source_baseline"},
+            tested_table_ddl_fallback=result.tested_table_ddl or "",
+            source_table_ddl_fallback=None,
+            result=result,
+        )
+
+        self.assertEqual(len(store.capturing_client.insert_calls), 1)
+        phased_insert_call = store.capturing_client.insert_calls[0]
+        columns = list(phased_insert_call["column_names"])
+        row = list(phased_insert_call["data"][0])
+        row_by_column = dict(zip(columns, row))
+        self.assertIsNone(row_by_column["tested_table_compression_overall_coef"])
 
     def test_recalculate_phase_ranking_scopes_to_variant_mode(self) -> None:
         store = _RankingStore()

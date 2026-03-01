@@ -7,12 +7,12 @@ from typing import Iterable, List, Optional, Sequence
 from src.benchmark_runtime.implementations.clickhouse_celery.scoring import (
     validate_score_expression,
 )
-from src.models import BenchmarkConfig, ScoringConfig, TableRuleConfig
+from src.models import BenchmarkConfig, ScoringConfig, StageScoringConfig, TableRuleConfig
 
 
 def _issues_for_scoring(
     *,
-    scoring: ScoringConfig,
+    scoring: ScoringConfig | StageScoringConfig,
     scope: str,
 ) -> List[str]:
     """Возвращает список проблем для одного scoring-блока."""
@@ -56,6 +56,13 @@ def collect_scoring_formula_issues(
                 scope=f"benchmark={benchmark.id}",
             )
         )
+        for stage_name, stage_scoring in (benchmark.scoring.by_stage or {}).items():
+            issues.extend(
+                _issues_for_scoring(
+                    scoring=stage_scoring,
+                    scope=f"benchmark={benchmark.id}, stage={stage_name}",
+                )
+            )
 
         for table_rule in benchmark.table_rules:
             if table_rule.scoring is None:
@@ -66,5 +73,12 @@ def collect_scoring_formula_issues(
                     scope=_scope_for_table_rule(benchmark, table_rule),
                 )
             )
+            for stage_name, stage_scoring in (table_rule.scoring.by_stage or {}).items():
+                issues.extend(
+                    _issues_for_scoring(
+                        scoring=stage_scoring,
+                        scope=f"{_scope_for_table_rule(benchmark, table_rule)}, stage={stage_name}",
+                    )
+                )
 
     return issues

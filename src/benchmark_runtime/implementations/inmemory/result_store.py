@@ -239,9 +239,6 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
                 size_bytes_indexes_json=result.tested_table_indexes_sizes,
                 tested_table_cols_sizes=result.tested_table_cols_sizes,
                 tested_table_indexes_sizes=result.tested_table_indexes_sizes,
-                tested_table_indexes_sizes_percent_from_col_size=(
-                    result.tested_table_indexes_sizes_percent_from_col_size
-                ),
                 insert_metrics_json=result.tested_table_insert_metrics_json,
                 extra_json=result.extra_json,
                 variant_table=job.variant_table,

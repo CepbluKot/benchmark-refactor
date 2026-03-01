@@ -433,6 +433,8 @@ def _build_job(
     table_index_granularity: Optional[int] = None,
     parent_variant_table: Optional[str] = None,
     phase_name: Optional[str] = None,
+    stage_column_name: Optional[str] = None,
+    merged_columns: Optional[Sequence[str]] = None,
 ) -> VariantJob:
     """Строит VariantJob с нужным phase-mode."""
     variant_meta = VariantMeta(
@@ -440,6 +442,8 @@ def _build_job(
         mode=variant_mode,
         parent_variant_table=parent_variant_table,
         phase_name=phase_name,
+        stage_column_name=stage_column_name,
+        merged_columns=list(merged_columns or []),
         table_index_granularity=table_index_granularity,
         column_meta=column_meta,
         index_meta=index_meta,
@@ -770,6 +774,30 @@ def _resolve_stage_max_winners_per_parent(
     return 1
 
 
+def _resolve_stage_generation_limit(
+    table_plan: TableBenchmarkPlan,
+    stage_mode: str,
+) -> Optional[int]:
+    """
+    Возвращает cap числа benchmark jobs для конкретной phased-стадии.
+
+    Использует `max_benchmarks_limits`:
+      1) limit для `stage_mode`;
+      2) fallback limit для `sequential`.
+    Если лимит не задан, возвращает `None` (без cap для стадии).
+    """
+    limits = table_plan.max_benchmarks_limits
+    if limits is None:
+        return None
+    stage_limit = limits.for_mode(stage_mode)
+    if stage_limit is not None:
+        return max(1, int(stage_limit))
+    sequential_limit = limits.for_mode("sequential")
+    if sequential_limit is not None:
+        return max(1, int(sequential_limit))
+    return None
+
+
 def _candidate_from_summary(
     summary: StoredVariantSummary,
     fallback_ddl: Optional[TableDDL] = None,
@@ -994,6 +1022,22 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             table_plan,
             "indexes",
         )
+        stage_generation_limit_types = _resolve_stage_generation_limit(
+            table_plan,
+            "types",
+        )
+        stage_generation_limit_codecs = _resolve_stage_generation_limit(
+            table_plan,
+            "codecs",
+        )
+        stage_generation_limit_indexes = _resolve_stage_generation_limit(
+            table_plan,
+            "indexes",
+        )
+        stage_generation_limit_final_validation = _resolve_stage_generation_limit(
+            table_plan,
+            "final_validation",
+        )
         global_index_counter = [0]
 
         logger.info(
@@ -1003,7 +1047,11 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             "top_n_indexes=%d, top_n_final_validation=%d, "
             "max_winners_per_parent_types=%d, "
             "max_winners_per_parent_codecs=%d, "
-            "max_winners_per_parent_indexes=%d)",
+            "max_winners_per_parent_indexes=%d, "
+            "stage_generation_limit_types=%s, "
+            "stage_generation_limit_codecs=%s, "
+            "stage_generation_limit_indexes=%s, "
+            "stage_generation_limit_final_validation=%s)",
             benchmark_run_id,
             table_plan.benchmark_id,
             table_plan.database,
@@ -1016,6 +1064,10 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             max_winners_per_parent_types,
             max_winners_per_parent_codecs,
             max_winners_per_parent_indexes,
+            stage_generation_limit_types,
+            stage_generation_limit_codecs,
+            stage_generation_limit_indexes,
+            stage_generation_limit_final_validation,
         )
 
         # ------------------------------------------------------------------
@@ -1143,12 +1195,18 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             table=table_plan.table,
         )
         type_winners: list[_PhaseCandidate] = []
+        remaining_type_stage_budget = stage_generation_limit_types
         for parent in order_winners:
+            if remaining_type_stage_budget is not None and remaining_type_stage_budget <= 0:
+                type_winners.append(parent)
+                continue
             base_ddl = _build_effective_candidate_ddl(parent)
             jobs: list[VariantJob] = []
             context_by_variant_table: dict[str, _TypeJobContext] = {}
 
             for column in base_ddl.columns:
+                if remaining_type_stage_budget is not None and remaining_type_stage_budget <= 0:
+                    break
                 type_candidates = _resolve_type_candidates_for_column(
                     table_plan=table_plan,
                     column_name=column.name,
@@ -1157,6 +1215,11 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 if len(type_candidates) <= 1:
                     continue
                 for tested_type in type_candidates:
+                    if (
+                        remaining_type_stage_budget is not None
+                        and remaining_type_stage_budget <= 0
+                    ):
+                        break
                     variant_ddl = base_ddl.copy()
                     tested_column = variant_ddl.column(column.name)
                     if tested_column is None:
@@ -1181,6 +1244,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                         global_index_counter=global_index_counter,
                         column_meta=column_meta,
                         parent_variant_table=parent.variant_table,
+                        stage_column_name=column.name,
                     )
                     jobs.append(job)
                     context_by_variant_table[job.variant_table] = _TypeJobContext(
@@ -1188,6 +1252,8 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                         column_name=column.name,
                         tested_type=tested_type,
                     )
+                    if remaining_type_stage_budget is not None:
+                        remaining_type_stage_budget -= 1
 
             if not jobs:
                 type_winners.append(parent)
@@ -1324,12 +1390,18 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             table=table_plan.table,
         )
         codec_winners: list[_PhaseCandidate] = []
+        remaining_codec_stage_budget = stage_generation_limit_codecs
         for parent in type_winners:
+            if remaining_codec_stage_budget is not None and remaining_codec_stage_budget <= 0:
+                codec_winners.append(parent)
+                continue
             base_ddl = _build_effective_candidate_ddl(parent)
             jobs: list[VariantJob] = []
             context_by_variant_table: dict[str, _CodecJobContext] = {}
 
             for column in base_ddl.columns:
+                if remaining_codec_stage_budget is not None and remaining_codec_stage_budget <= 0:
+                    break
                 codec_candidates = _resolve_codec_candidates_for_column(
                     table_plan=table_plan,
                     column_name=column.name,
@@ -1339,6 +1411,11 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 if len(codec_candidates) <= 1:
                     continue
                 for tested_codec in codec_candidates:
+                    if (
+                        remaining_codec_stage_budget is not None
+                        and remaining_codec_stage_budget <= 0
+                    ):
+                        break
                     variant_ddl = base_ddl.copy()
                     tested_column = variant_ddl.column(column.name)
                     if tested_column is None:
@@ -1362,6 +1439,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                         global_index_counter=global_index_counter,
                         column_meta=column_meta,
                         parent_variant_table=parent.variant_table,
+                        stage_column_name=column.name,
                     )
                     jobs.append(job)
                     context_by_variant_table[job.variant_table] = _CodecJobContext(
@@ -1369,6 +1447,8 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                         column_name=column.name,
                         tested_codec=tested_codec,
                     )
+                    if remaining_codec_stage_budget is not None:
+                        remaining_codec_stage_budget -= 1
 
             if not jobs:
                 codec_winners.append(parent)
@@ -1502,7 +1582,11 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             table=table_plan.table,
         )
         index_winners: list[_PhaseCandidate] = []
+        remaining_index_stage_budget = stage_generation_limit_indexes
         for parent in codec_winners:
+            if remaining_index_stage_budget is not None and remaining_index_stage_budget <= 0:
+                index_winners.append(parent)
+                continue
             base_ddl = _build_effective_candidate_ddl(parent)
             order_by_components = {
                 _normalize_identifier(component)
@@ -1527,12 +1611,19 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             jobs: list[VariantJob] = []
             context_by_variant_table: dict[str, _IndexJobContext] = {}
             for column_name in candidate_columns:
+                if remaining_index_stage_budget is not None and remaining_index_stage_budget <= 0:
+                    break
                 options = _resolve_index_options_for_column(
                     table_plan=table_plan,
                     base_ddl=base_ddl,
                     column_name=column_name,
                 )
                 for option in options:
+                    if (
+                        remaining_index_stage_budget is not None
+                        and remaining_index_stage_budget <= 0
+                    ):
+                        break
                     index_def = option.index_def.copy() if option.index_def is not None else None
                     table_index_granularity = option.table_index_granularity
                     variant_ddl = base_ddl.copy()
@@ -1564,6 +1655,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                         index_meta=index_meta,
                         table_index_granularity=table_index_granularity,
                         parent_variant_table=parent.variant_table,
+                        stage_column_name=column_name,
                     )
                     jobs.append(job)
                     context_by_variant_table[job.variant_table] = _IndexJobContext(
@@ -1577,6 +1669,8 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                             else None
                         ),
                     )
+                    if remaining_index_stage_budget is not None:
+                        remaining_index_stage_budget -= 1
 
             if not jobs:
                 index_winners.append(parent)
@@ -1713,7 +1807,10 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
         final_jobs: list[VariantJob] = []
         fallback_ddls_by_table: dict[str, TableDDL] = {}
         final_candidates_source = index_winners[:top_n_final_validation]
+        remaining_final_stage_budget = stage_generation_limit_final_validation
         for candidate in final_candidates_source:
+            if remaining_final_stage_budget is not None and remaining_final_stage_budget <= 0:
+                break
             assembled_ddl = _build_effective_candidate_ddl(candidate)
             preferred_granularity_candidates: list[int] = []
             granularity_constraints: list[set[int]] = []
@@ -1757,6 +1854,11 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 table_granularity_candidates = [None]
 
             for table_granularity in table_granularity_candidates:
+                if (
+                    remaining_final_stage_budget is not None
+                    and remaining_final_stage_budget <= 0
+                ):
+                    break
                 final_ddl = assembled_ddl.copy()
                 if table_granularity is not None:
                     final_ddl.set_index_granularity(int(table_granularity))
@@ -1773,9 +1875,18 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                     source_benchmark=source_benchmark,
                     global_index_counter=global_index_counter,
                     parent_variant_table=candidate.variant_table,
+                    merged_columns=sorted(
+                        {
+                            *candidate.type_choices.keys(),
+                            *candidate.codec_choices.keys(),
+                            *candidate.index_choices.keys(),
+                        }
+                    ),
                 )
                 final_jobs.append(job)
                 fallback_ddls_by_table[job.variant_table] = final_ddl.copy()
+                if remaining_final_stage_budget is not None:
+                    remaining_final_stage_budget -= 1
 
         final_scope = (
             f"phase5 final: {table_plan.benchmark_id} "

@@ -286,7 +286,7 @@ class BenchmarkPlanner:
     На этом этапе происходит ключевой merge:
       - выбор целевых таблиц;
       - merge global/local rules;
-      - выбор strategy/max_iterations/queries с учетом table override;
+      - выбор strategy/insert_operations_count/queries с учетом table override;
       - привязка глобального celery-конфига.
     """
 
@@ -365,10 +365,10 @@ class BenchmarkPlanner:
                 strategy: BenchmarkStrategy = (
                     self._resolve_strategy(benchmark=benchmark, table_rule=table_rule)
                 )
-                max_iterations = (
-                    table_rule.max_iterations
-                    if table_rule and table_rule.max_iterations is not None
-                    else benchmark.max_iterations
+                insert_operations_count = (
+                    table_rule.insert_operations_count
+                    if table_rule and table_rule.insert_operations_count is not None
+                    else benchmark.insert_operations_count
                 )
                 sequential_top_n = (
                     table_rule.sequential_top_n
@@ -402,16 +402,6 @@ class BenchmarkPlanner:
                     table_insert_rows_limits=(
                         table_rule.source_insert_rows_limits if table_rule else None
                     ),
-                )
-                max_type_benchmarks = (
-                    table_rule.max_type_benchmarks
-                    if table_rule and table_rule.max_type_benchmarks is not None
-                    else benchmark.max_type_benchmarks
-                )
-                max_index_benchmarks = (
-                    table_rule.max_index_benchmarks
-                    if table_rule and table_rule.max_index_benchmarks is not None
-                    else benchmark.max_index_benchmarks
                 )
                 index_granularity_values = (
                     table_rule.index_granularity_values
@@ -480,7 +470,7 @@ class BenchmarkPlanner:
                     table=target.table,
                     strategy=strategy,
                     mode=mode,
-                    max_iterations=max_iterations,
+                    insert_operations_count=insert_operations_count,
                     sequential_top_n=sequential_top_n,
                     sequential_top_n_limits=sequential_top_n_limits,
                     max_winners_per_parent_limits=max_winners_per_parent_limits,
@@ -489,8 +479,6 @@ class BenchmarkPlanner:
                     source_insert_rows_limits=source_insert_rows_limits,
                     insert_rows_limits=insert_rows_limits,
                     max_benchmarks_limits=max_benchmarks_limits,
-                    max_type_benchmarks=max_type_benchmarks,
-                    max_index_benchmarks=max_index_benchmarks,
                     index_granularity_values=index_granularity_values,
                     column_order_mode=column_order_mode,
                     order_by_first=order_by_first,
@@ -702,7 +690,7 @@ class BenchmarkEngine:
             source_table=table_plan.table,
             source_table_ddl=prepared_source_ddl,
             query_plan=rendered_query_plan,
-            max_iterations=table_plan.max_iterations,
+            insert_operations_count=table_plan.insert_operations_count,
             insert_rows_limit=source_insert_rows_limit,
             scoring=table_plan.scoring,
             celery=table_plan.celery,
@@ -806,7 +794,7 @@ class BenchmarkEngine:
             variant_table=variant_table,
             variant_meta=effective_variant_meta,
             mode=job_mode if job_mode is not None else table_plan.mode,
-            max_iterations=table_plan.max_iterations,
+            insert_operations_count=table_plan.insert_operations_count,
             insert_rows_limit=effective_insert_rows_limit,
             total_variants=total_variants,
             variant_ddl=prepared_ddl,
@@ -857,8 +845,7 @@ class BenchmarkEngine:
         Приоритет:
           1) `max_benchmarks_limits[variant_mode]`;
           2) `max_benchmarks_limits[job_mode or table_plan.mode]`;
-          3) legacy `max_type_benchmarks`/`max_index_benchmarks`;
-          4) legacy fallback `max_iterations`.
+          3) fallback `insert_operations_count`.
         """
         normalized_variant_mode = str(variant_mode).strip().lower()
         limits_by_mode = table_plan.max_benchmarks_limits
@@ -871,11 +858,7 @@ class BenchmarkEngine:
             if job_mode_limit is not None:
                 return job_mode_limit
 
-        if normalized_variant_mode == "types" and table_plan.max_type_benchmarks is not None:
-            return table_plan.max_type_benchmarks
-        if normalized_variant_mode == "indexes" and table_plan.max_index_benchmarks is not None:
-            return table_plan.max_index_benchmarks
-        return table_plan.max_iterations
+        return table_plan.insert_operations_count
 
     def iter_variant_jobs_for_table_plan(
         self,
@@ -1484,7 +1467,7 @@ class BenchmarkRunner:
             variant_mode=variant_mode,
         )
         if variant_generation_limit is None:
-            return max(0, int(table_plan.max_iterations))
+            return max(0, int(table_plan.insert_operations_count))
         return max(0, int(variant_generation_limit))
 
     def _estimate_sequential_topn_jobs_upper_bound(
@@ -1504,7 +1487,7 @@ class BenchmarkRunner:
             job_mode="sequential",
         )
         if type_generation_limit is None:
-            type_total = max(0, int(table_plan.max_iterations))
+            type_total = max(0, int(table_plan.insert_operations_count))
         else:
             type_total = max(0, int(type_generation_limit))
         if type_total <= 0:
@@ -1520,7 +1503,7 @@ class BenchmarkRunner:
             job_mode="sequential",
         )
         if index_generation_limit is None:
-            index_total_per_variant_upper = max(0, int(table_plan.max_iterations))
+            index_total_per_variant_upper = max(0, int(table_plan.insert_operations_count))
         else:
             index_total_per_variant_upper = max(0, int(index_generation_limit))
 

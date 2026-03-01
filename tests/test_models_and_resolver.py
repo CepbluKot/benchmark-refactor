@@ -232,8 +232,57 @@ class ModelsValidationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ScoringConfig(mode="builtin", expression="1 + 1")
 
-    def test_benchmark_config_accepts_scoring_sql_expression_alias(self) -> None:
-        """Проверяет alias `sql_expression` для scoring.expression."""
+    def test_scoring_allows_stage_expression_overrides(self) -> None:
+        """Проверяет, что stage-specific expression работает при глобальном builtin."""
+        scoring = ScoringConfig.model_validate(
+            {
+                "mode": "builtin",
+                "by_stage": {
+                    "types": {
+                        "mode": "expression",
+                        "expression": "2 + 2",
+                    }
+                },
+            }
+        )
+        self.assertIsNotNone(scoring.by_stage)
+        self.assertIn("types", scoring.by_stage or {})
+        self.assertEqual(scoring.stage_override("types").expression, "2 + 2")
+
+    def test_scoring_by_stage_normalizes_stage_name(self) -> None:
+        """Проверяет нормализацию ключей scoring.by_stage."""
+        scoring = ScoringConfig.model_validate(
+            {
+                "mode": "builtin",
+                "by_stage": {
+                    "  TyPeS  ": {
+                        "mode": "expression",
+                        "expression": "2 + 2",
+                    }
+                },
+            }
+        )
+        self.assertIsNotNone(scoring.by_stage)
+        self.assertIn("types", scoring.by_stage or {})
+        self.assertIsNotNone(scoring.stage_override("types"))
+
+    def test_scoring_by_stage_rejects_empty_stage_name(self) -> None:
+        """Проверяет, что пустой ключ в scoring.by_stage запрещён."""
+        with self.assertRaises(ValidationError):
+            ScoringConfig.model_validate(
+                {
+                    "mode": "builtin",
+                    "by_stage": {
+                        "   ": {
+                            "mode": "expression",
+                            "expression": "2 + 2",
+                        }
+                    },
+                }
+            )
+
+    def test_benchmark_config_accepts_scoring_expression(self) -> None:
+        """Проверяет заполнение scoring.expression."""
         benchmark = BenchmarkConfig.model_validate(
             {
                 "id": "bench_scoring_alias",
@@ -246,7 +295,7 @@ class ModelsValidationTests(unittest.TestCase):
                 },
                 "scoring": {
                     "mode": "expression",
-                    "sql_expression": "safe_div(2, 1)",
+                    "expression": "safe_div(2, 1)",
                     "on_error_score": -1.0,
                 },
             }
@@ -343,7 +392,7 @@ class ModelsValidationTests(unittest.TestCase):
                         ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
                     ]
                 ),
-                insert_rows_limit=0,
+                insert_rows_per_operation_limit=0,
             )
 
         with self.assertRaises(ValidationError):
@@ -358,51 +407,21 @@ class ModelsValidationTests(unittest.TestCase):
                         ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
                     ]
                 ),
-                source_insert_rows_limit=0,
+                source_insert_rows_per_operation_limit=0,
             )
 
         with self.assertRaises(ValidationError):
             TableRuleConfig(
                 database="analytics",
                 table="events",
-                insert_rows_limit=0,
+                insert_rows_per_operation_limit=0,
             )
 
         with self.assertRaises(ValidationError):
             TableRuleConfig(
                 database="analytics",
                 table="events",
-                source_insert_rows_limit=0,
-            )
-
-        with self.assertRaises(ValidationError):
-            BenchmarkConfig(
-                id="bench",
-                connection_id="conn",
-                strategy="types_strategy",
-                databases=["analytics"],
-                tables=["events"],
-                global_rules=RulesConfig(
-                    column_rules=[
-                        ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
-                    ]
-                ),
-                max_type_benchmarks=0,
-            )
-
-        with self.assertRaises(ValidationError):
-            BenchmarkConfig(
-                id="bench",
-                connection_id="conn",
-                strategy="types_strategy",
-                databases=["analytics"],
-                tables=["events"],
-                global_rules=RulesConfig(
-                    column_rules=[
-                        ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
-                    ]
-                ),
-                max_index_benchmarks=0,
+                source_insert_rows_per_operation_limit=0,
             )
 
     def test_insert_rows_limits_by_mode_must_be_positive_when_set(self) -> None:
@@ -419,14 +438,14 @@ class ModelsValidationTests(unittest.TestCase):
                         ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
                     ]
                 ),
-                insert_rows_limits=InsertRowsLimitsConfig(types=0),
+                insert_rows_per_operation_limits=InsertRowsLimitsConfig(types=0),
             )
 
         with self.assertRaises(ValidationError):
             TableRuleConfig(
                 database="analytics",
                 table="events",
-                insert_rows_limits=InsertRowsLimitsConfig(indexes=0),
+                insert_rows_per_operation_limits=InsertRowsLimitsConfig(indexes=0),
             )
 
     def test_insert_rows_limits_accepts_future_mode_keys(self) -> None:
@@ -441,7 +460,7 @@ class ModelsValidationTests(unittest.TestCase):
                 "global_rules": {
                     "column_rules": [{"by_type": "UInt64", "types": ["UInt64"]}]
                 },
-                "insert_rows_limits": {
+                "insert_rows_per_operation_limits": {
                     "types": 100,
                     "future_mode_x": 55,
                 },
@@ -464,7 +483,7 @@ class ModelsValidationTests(unittest.TestCase):
                     "global_rules": {
                         "column_rules": [{"by_type": "UInt64", "types": ["UInt64"]}]
                     },
-                    "insert_rows_limits": {
+                    "insert_rows_per_operation_limits": {
                         "future_mode_x": 0,
                     },
                 }
@@ -510,9 +529,7 @@ class ModelsValidationTests(unittest.TestCase):
                     "indexes": 11,
                     "sequential": 8,
                 },
-                "max_type_benchmarks": 9,
-                "max_index_benchmarks": 11,
-                "table_index_granularity_values": [8192, 16384],
+                "index_granularity_values": [8192, 16384],
                 "table_rules": [
                     {
                         "database": "analytics",
@@ -540,15 +557,13 @@ class ModelsValidationTests(unittest.TestCase):
                             "types": 6,
                             "indexes": 7,
                         },
-                        "max_type_benchmarks": 6,
-                        "max_index_benchmarks": 7,
-                        "table_index_granularity_values": [4096, 8192, 4096],
+                        "index_granularity_values": [4096, 8192, 4096],
                     }
                 ],
             }
         )
 
-        self.assertEqual(bench.max_iterations, 7)
+        self.assertEqual(bench.insert_operations_count, 7)
         self.assertEqual(bench.sequential_top_n, 3)
         self.assertIsNotNone(bench.sequential_top_n_limits)
         self.assertEqual(bench.sequential_top_n_limits.for_mode("order_by"), 4)
@@ -567,8 +582,6 @@ class ModelsValidationTests(unittest.TestCase):
         self.assertEqual(bench.max_benchmarks_limits.types, 9)
         self.assertEqual(bench.max_benchmarks_limits.indexes, 11)
         self.assertEqual(bench.max_benchmarks_limits.sequential, 8)
-        self.assertEqual(bench.max_type_benchmarks, 9)
-        self.assertEqual(bench.max_index_benchmarks, 11)
         self.assertEqual(bench.index_granularity_values, [8192, 16384])
         self.assertIsNotNone(bench.insert_rows_limits)
         self.assertEqual(bench.insert_rows_limits.for_mode("types"), 100)
@@ -576,7 +589,7 @@ class ModelsValidationTests(unittest.TestCase):
 
         self.assertEqual(len(bench.table_rules), 1)
         table_rule = bench.table_rules[0]
-        self.assertEqual(table_rule.max_iterations, 4)
+        self.assertEqual(table_rule.insert_operations_count, 4)
         self.assertEqual(table_rule.sequential_top_n, 2)
         self.assertIsNotNone(table_rule.sequential_top_n_limits)
         self.assertEqual(table_rule.sequential_top_n_limits.for_mode("types"), 2)
@@ -591,8 +604,6 @@ class ModelsValidationTests(unittest.TestCase):
         self.assertIsNotNone(table_rule.max_benchmarks_limits)
         self.assertEqual(table_rule.max_benchmarks_limits.types, 6)
         self.assertEqual(table_rule.max_benchmarks_limits.indexes, 7)
-        self.assertEqual(table_rule.max_type_benchmarks, 6)
-        self.assertEqual(table_rule.max_index_benchmarks, 7)
         self.assertEqual(table_rule.index_granularity_values, [4096, 8192])
         self.assertIsNotNone(table_rule.insert_rows_limits)
         self.assertEqual(table_rule.insert_rows_limits.for_mode("types"), 88)
@@ -1052,12 +1063,12 @@ class RuleResolverTests(unittest.TestCase):
                         IndexConfig(
                             type="minmax",
                             granularity=4,
-                            table_index_granularity_values=[8192],
+                            index_granularity_values=[8192],
                         ),
                         IndexConfig(
                             type="minmax",
                             granularity=4,
-                            table_index_granularity_values=[16384],
+                            index_granularity_values=[16384],
                         ),
                     ],
                 )

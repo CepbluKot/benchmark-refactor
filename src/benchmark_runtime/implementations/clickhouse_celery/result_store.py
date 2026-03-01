@@ -101,6 +101,11 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_total_size_bytes_with_indexes",
         "tested_table_total_size_bytes_with_indexes_readable",
     )
+    _LEGACY_PRIMARY_INDEX_SPLIT_COLUMNS: tuple[str, ...] = (
+        "tested_table_primary_index_size_bytes",
+        "tested_table_primary_index_size_bytes_readable",
+        "tested_table_primary_index_size_percent_from_total_size",
+    )
 
     _LEGACY_MEMORY_COLUMNS: tuple[str, ...] = (
         "tested_table_insert_memory_usage_measurements",
@@ -202,6 +207,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_consumed_compressed_size_bytes_overall_readable",
         "tested_table_consumed_compressed_size_bytes_with_indexes",
         "tested_table_consumed_compressed_size_bytes_with_indexes_readable",
+        "tested_table_primary_index_size_json",
         "source_table_consumed_compressed_size_bytes_overall",
         "source_table_consumed_compressed_size_bytes_overall_readable",
         "tested_table_compression_overall_coef",
@@ -213,7 +219,6 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "size_bytes_indexes_json",
         "tested_table_cols_sizes",
         "tested_table_indexes_sizes",
-        "tested_table_indexes_sizes_percent_from_col_size",
         "insert_metrics_json",
         "extra_json",
         "variant_table",
@@ -243,11 +248,13 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "variant_table",
         "variant_mode",
         "variant_params",
+        "total_n_rows_in_tested_table",
         "size_bytes_total",
         "size_bytes_by_column_json",
         "size_bytes_indexes_json",
         "tested_table_consumed_compressed_size_bytes_with_indexes",
         "tested_table_consumed_compressed_size_bytes_with_indexes_readable",
+        "tested_table_primary_index_size_json",
         "source_table_consumed_compressed_size_bytes_overall",
         "source_table_consumed_compressed_size_bytes_overall_readable",
         "tested_table_compression_overall_coef",
@@ -274,6 +281,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "source_table_consumed_compressed_size_bytes_by_each_column",
         "tested_table_compression_by_each_column_coef",
         "tested_table_cols_sizes",
+        "tested_table_primary_index_size_json",
         "score_calculation_json",
     )
     _SQL_TEXT_COLUMNS: tuple[str, ...] = (
@@ -449,11 +457,13 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `variant_table` String,
                 `variant_mode` String,
                 `variant_params` String,
+                `total_n_rows_in_tested_table` Nullable(Int64),
                 `size_bytes_total` Nullable(Float64),
                 `size_bytes_by_column_json` Nullable(String),
                 `size_bytes_indexes_json` Nullable(String),
                 `tested_table_consumed_compressed_size_bytes_with_indexes` Nullable(Float64),
                 `tested_table_consumed_compressed_size_bytes_with_indexes_readable` Nullable(String),
+                `tested_table_primary_index_size_json` Nullable(String),
                 `source_table_consumed_compressed_size_bytes_overall` Nullable(Float64),
                 `source_table_consumed_compressed_size_bytes_overall_readable` Nullable(String),
                 `tested_table_compression_overall_coef` Nullable(Float64),
@@ -479,11 +489,13 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `started_at` Nullable(DateTime64(3, 'Europe/Moscow')),
                 ADD COLUMN IF NOT EXISTS `finished_at` Nullable(DateTime64(3, 'Europe/Moscow')),
                 ADD COLUMN IF NOT EXISTS `variant_params_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `total_n_rows_in_tested_table` Nullable(Int64),
                 ADD COLUMN IF NOT EXISTS `size_bytes_total` Nullable(Float64),
                 ADD COLUMN IF NOT EXISTS `size_bytes_by_column_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `size_bytes_indexes_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes` Nullable(Float64),
                 ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes_readable` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_primary_index_size_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `source_table_consumed_compressed_size_bytes_overall` Nullable(Float64),
                 ADD COLUMN IF NOT EXISTS `source_table_consumed_compressed_size_bytes_overall_readable` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_compression_overall_coef` Nullable(Float64),
@@ -501,6 +513,12 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 "started_at": "DateTime64(3, 'Europe/Moscow')",
                 "finished_at": "Nullable(DateTime64(3, 'Europe/Moscow'))",
             },
+        )
+        self._execute(
+            f"""
+            ALTER TABLE `{self._database}`.`{table_name}`
+                DROP COLUMN IF EXISTS `stage_column_info_json`
+            """
         )
 
     def _ensure_results_table_schema(self, table_name: str) -> None:
@@ -563,6 +581,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `tested_table_consumed_compressed_size_bytes_overall_readable` Nullable(String),
                 `tested_table_consumed_compressed_size_bytes_with_indexes` Nullable(Float64),
                 `tested_table_consumed_compressed_size_bytes_with_indexes_readable` Nullable(String),
+                `tested_table_primary_index_size_json` Nullable(String),
                 `source_table_consumed_compressed_size_bytes_overall` Nullable(Float64),
                 `source_table_consumed_compressed_size_bytes_overall_readable` Nullable(String),
                 `tested_table_compression_overall_coef` Nullable(Float64),
@@ -574,7 +593,6 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `size_bytes_indexes_json` Nullable(String),
                 `tested_table_cols_sizes` Nullable(String),
                 `tested_table_indexes_sizes` Nullable(String),
-                `tested_table_indexes_sizes_percent_from_col_size` Nullable(String),
                 `extra_json` Nullable(String),
                 `variant_table` String,
                 `variant_mode` String,
@@ -602,6 +620,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `select_metrics_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes` Nullable(Float64),
                 ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes_readable` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_primary_index_size_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `score_calculation_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `parent_id` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `phase` Nullable(Int32),
@@ -626,6 +645,12 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 "finished_at": "Nullable(DateTime64(3, 'Europe/Moscow'))",
             },
         )
+        self._execute(
+            f"""
+            ALTER TABLE `{self._database}`.`{table_name}`
+                DROP COLUMN IF EXISTS `stage_column_info_json`
+            """
+        )
         # Удаляем дублирующие legacy-поля размеров (дублируют consumed_compressed_*_with_indexes).
         for column_name in self._LEGACY_DUPLICATE_SIZE_COLUMNS:
             self._execute(
@@ -645,6 +670,13 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             )
         # Удаляем legacy memory-колонки (раньше были отдельными полями в таблице).
         for column_name in self._LEGACY_MEMORY_COLUMNS:
+            self._execute(
+                f"""
+                ALTER TABLE `{self._database}`.`{table_name}`
+                    DROP COLUMN IF EXISTS `{column_name}`
+                """
+            )
+        for column_name in self._LEGACY_PRIMARY_INDEX_SPLIT_COLUMNS:
             self._execute(
                 f"""
                 ALTER TABLE `{self._database}`.`{table_name}`
@@ -1306,7 +1338,12 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             result.tested_table_consumed_compressed_size_bytes_by_each_column
             or result.tested_table_cols_sizes
         )
-        size_bytes_indexes_json = result.tested_table_indexes_sizes
+        size_bytes_indexes_json = self._build_size_bytes_indexes_json(
+            tested_table_indexes_sizes=result.tested_table_indexes_sizes,
+            source_table_size_bytes_overall=(
+                result.source_table_consumed_compressed_size_bytes_overall
+            ),
+        )
         execution_uuid = ""
         if isinstance(variant_params, dict):
             execution_uuid = str(variant_params.get("execution_uuid") or "").strip()
@@ -1435,6 +1472,9 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             tested_table_consumed_compressed_size_bytes_with_indexes_readable=(
                 result.tested_table_consumed_compressed_size_bytes_with_indexes_readable
             ),
+            tested_table_primary_index_size_json=(
+                result.tested_table_primary_index_size_json
+            ),
             source_table_consumed_compressed_size_bytes_overall=(
                 result.source_table_consumed_compressed_size_bytes_overall
             ),
@@ -1452,9 +1492,6 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             size_bytes_indexes_json=size_bytes_indexes_json,
             tested_table_cols_sizes=result.tested_table_cols_sizes,
             tested_table_indexes_sizes=result.tested_table_indexes_sizes,
-            tested_table_indexes_sizes_percent_from_col_size=(
-                result.tested_table_indexes_sizes_percent_from_col_size
-            ),
             extra_json=result.extra_json,
             variant_table=variant_table,
             variant_mode=variant_mode,
@@ -1567,6 +1604,61 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             query_map,
             ensure_ascii=False,
             indent=2,
+            sort_keys=True,
+            default=str,
+        )
+
+    @classmethod
+    def _build_size_bytes_indexes_json(
+        cls,
+        *,
+        tested_table_indexes_sizes: Optional[str],
+        source_table_size_bytes_overall: Optional[float],
+    ) -> Optional[str]:
+        """
+        Строит JSON размеров skip-индексов для `size_bytes_indexes_json`.
+
+        Добавляет только в этот JSON поле `size_percent_from_source_table`,
+        рассчитанное как `index_size_bytes / source_table_size_bytes_overall * 100`.
+        """
+        if tested_table_indexes_sizes is None:
+            return None
+        if not isinstance(tested_table_indexes_sizes, str):
+            return tested_table_indexes_sizes
+        if not tested_table_indexes_sizes.strip():
+            return tested_table_indexes_sizes
+
+        try:
+            parsed = json.loads(tested_table_indexes_sizes)
+        except Exception:
+            return tested_table_indexes_sizes
+        if not isinstance(parsed, dict):
+            return tested_table_indexes_sizes
+
+        try:
+            source_size_bytes = float(source_table_size_bytes_overall or 0.0)
+        except Exception:
+            source_size_bytes = 0.0
+        if source_size_bytes <= 0:
+            return tested_table_indexes_sizes
+
+        for _, index_stats in parsed.items():
+            if not isinstance(index_stats, dict):
+                continue
+            try:
+                index_size_bytes = float(index_stats.get("size_compressed_bytes", 0.0) or 0.0)
+            except Exception:
+                index_size_bytes = 0.0
+            if index_size_bytes <= 0:
+                continue
+            index_stats["size_percent_from_source_table"] = round(
+                (index_size_bytes / source_size_bytes) * 100.0,
+                6,
+            )
+
+        return json.dumps(
+            parsed,
+            ensure_ascii=False,
             sort_keys=True,
             default=str,
         )
@@ -2236,7 +2328,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
 
     def _init_redis_lock_client(self) -> None:
         """Инициализирует Redis-клиент для межпроцессного lock."""
-        redis_url = str(self._record_lock_redis_url or "").strip()
+        redis_url = str(self._record_lock_redis_url or 'redis://localhost:6379/0').strip()
         if not redis_url:
             raise RuntimeError(
                 "ClickHouseBenchmarkResultStore: Redis обязателен для запуска. "
@@ -2418,7 +2510,11 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             tested_size_with_indexes = record.size_bytes_total
         source_size_overall = record.source_table_consumed_compressed_size_bytes_overall
         compression_coef = record.tested_table_compression_overall_coef
-        if compression_coef is None:
+        variant_mode_normalized = str(record.variant_mode or "").strip().lower()
+        is_source_baseline_mode = (
+            variant_mode_normalized == "source_baseline" or int(record.phase or 0) == 0
+        )
+        if compression_coef is None and not is_source_baseline_mode:
             try:
                 source_size_numeric = float(source_size_overall or 0.0)
                 tested_size_numeric = float(tested_size_with_indexes or 0.0)
@@ -2447,12 +2543,16 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             "variant_table": str(record.variant_table),
             "variant_mode": str(record.variant_mode),
             "variant_params": variant_params,
+            "total_n_rows_in_tested_table": record.total_n_rows_in_tested_table,
             "size_bytes_total": record.size_bytes_total,
             "size_bytes_by_column_json": size_bytes_by_column_json,
             "size_bytes_indexes_json": size_bytes_indexes_json,
             "tested_table_consumed_compressed_size_bytes_with_indexes": tested_size_with_indexes,
             "tested_table_consumed_compressed_size_bytes_with_indexes_readable": (
                 record.tested_table_consumed_compressed_size_bytes_with_indexes_readable
+            ),
+            "tested_table_primary_index_size_json": self._pretty_json_string_or_as_is(
+                record.tested_table_primary_index_size_json
             ),
             "source_table_consumed_compressed_size_bytes_overall": source_size_overall,
             "source_table_consumed_compressed_size_bytes_overall_readable": (
@@ -2780,5 +2880,5 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         """Определяет, что запрос возвращает строки."""
         normalized = cls._strip_leading_sql_comments(query).lower()
         return normalized.startswith(
-            ("select", "with", "show", "describe", "desc", "explain")
+            ("select", "with", "show", "describe", "desc", "explain", "exists")
         )

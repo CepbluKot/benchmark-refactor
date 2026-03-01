@@ -103,6 +103,71 @@ def _is_identifier_char(ch: str) -> bool:
     return ch.isalnum() or ch == "_"
 
 
+def _extract_base_identifier(token: str) -> str:
+    """Возвращает имя идентификатора без бэктиков и префикса `db.`."""
+    cleaned = str(token or "").strip().strip("`").strip()
+    if "." in cleaned:
+        cleaned = cleaned.rsplit(".", 1)[-1]
+    return cleaned.strip().strip("`")
+
+
+def _extract_index_column_from_expr(expr: Any) -> Optional[str]:
+    """
+    Пытается извлечь имя колонки из `expr` skip-индекса.
+
+    Поддерживает частые формы:
+      - `country`
+      - `` `country` ``
+      - `db.country`
+      - `lowerUTF8(message)`
+      - `tokenbf_v1(message, ...)`
+    """
+    text = str(expr or "").strip()
+    if not text:
+        return None
+
+    direct_match = re.fullmatch(
+        r"(?:`?[A-Za-z_][A-Za-z0-9_]*`?\.)*`?([A-Za-z_][A-Za-z0-9_]*)`?",
+        text,
+    )
+    if direct_match:
+        return _extract_base_identifier(direct_match.group(1))
+
+    backtick_identifiers = re.findall(r"`([^`]+)`", text)
+    if backtick_identifiers:
+        return _extract_base_identifier(backtick_identifiers[-1])
+
+    bare_identifiers = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text)
+    if not bare_identifiers:
+        return None
+    reserved = {
+        "AND",
+        "OR",
+        "NOT",
+        "NULL",
+        "TRUE",
+        "FALSE",
+        "AS",
+        "CAST",
+        "LOWER",
+        "UPPER",
+        "LOWERUTF8",
+        "UPPERUTF8",
+        "TOKENBF_V1",
+        "NGRAMBF_V1",
+        "BLOOM_FILTER",
+        "SET",
+        "MINMAX",
+    }
+    for token in reversed(bare_identifiers):
+        if token.upper() in reserved:
+            continue
+        candidate = _extract_base_identifier(token)
+        if candidate:
+            return candidate
+    return None
+
+
 def _skip_sql_line_comment(text: str, i: int) -> int:
     """Сдвигает позицию в конец SQL line-comment `-- ...`."""
     i += 2
@@ -676,6 +741,207 @@ def _build_metric_bucket(
     }
 
 
+def _median_positive_finite(values: Sequence[Any]) -> Optional[float]:
+    """Считает медиану по валидным значениям (>0, finite)."""
+    valid: list[float] = []
+    for value in values:
+        try:
+            numeric = float(value)
+        except Exception:
+            continue
+        if math.isfinite(numeric) and numeric > 0:
+            valid.append(numeric)
+    if not valid:
+        return None
+    valid.sort()
+    mid = len(valid) // 2
+    if len(valid) % 2 == 1:
+        return float(valid[mid])
+    return float((valid[mid - 1] + valid[mid]) / 2.0)
+
+
+def _median_from_measurements_or_percentiles(
+    measurements: Sequence[Any],
+    percentiles: Sequence[Any],
+) -> Optional[float]:
+    """Берёт медиану из measurements, при их отсутствии fallback на percentiles."""
+    direct = _median_positive_finite(measurements)
+    if direct is not None:
+        return direct
+    return _median_positive_finite(percentiles)
+
+
+def _build_score_context_medians(
+    *,
+    source_insert_time_ms: Sequence[Any],
+    tested_insert_time_ms: Sequence[Any],
+    source_select_time_ms: Sequence[Any],
+    tested_select_time_ms: Sequence[Any],
+    source_insert_rows_per_second: Sequence[Any],
+    tested_insert_rows_per_second: Sequence[Any],
+    source_select_rows_per_second: Sequence[Any],
+    tested_select_rows_per_second: Sequence[Any],
+    source_insert_bytes_per_second: Sequence[Any],
+    tested_insert_bytes_per_second: Sequence[Any],
+    source_select_bytes_per_second: Sequence[Any],
+    tested_select_bytes_per_second: Sequence[Any],
+    insert_time_speedup: Sequence[Any],
+    select_time_speedup: Sequence[Any],
+    source_per_query: Sequence[Dict[str, Any]],
+    tested_per_query: Sequence[Dict[str, Any]],
+    speedup_per_query: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Собирает медианы всех ключевых метрик для score_calculation_json."""
+
+    def _query_id(entry: Dict[str, Any], fallback_index: int) -> str:
+        raw_id = str(entry.get("query_id", "")).strip()
+        if raw_id:
+            return raw_id
+        try:
+            idx = int(entry.get("query_index", fallback_index))
+        except Exception:
+            idx = fallback_index
+        return f"query_{idx}"
+
+    def _entry_map(entries: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        mapped: Dict[str, Dict[str, Any]] = {}
+        for fallback_index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            mapped[_query_id(entry, fallback_index)] = entry
+        return mapped
+
+    source_by_query_id = _entry_map(source_per_query)
+    tested_by_query_id = _entry_map(tested_per_query)
+    speedup_by_query_id = _entry_map(speedup_per_query)
+
+    ordered_query_ids: list[str] = []
+    seen_query_ids: set[str] = set()
+    for entries in (source_per_query, tested_per_query, speedup_per_query):
+        for fallback_index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            query_id = _query_id(entry, fallback_index)
+            if query_id in seen_query_ids:
+                continue
+            seen_query_ids.add(query_id)
+            ordered_query_ids.append(query_id)
+
+    per_query_medians: Dict[str, Dict[str, Any]] = {}
+    for query_id in ordered_query_ids:
+        source_entry = source_by_query_id.get(query_id, {})
+        tested_entry = tested_by_query_id.get(query_id, {})
+        speedup_entry = speedup_by_query_id.get(query_id, {})
+
+        source_elapsed_ms = _median_from_measurements_or_percentiles(
+            source_entry.get("elapsed_ms_measurements", []) or [],
+            source_entry.get("elapsed_ms_percentiles", []) or [],
+        )
+        tested_elapsed_ms = _median_from_measurements_or_percentiles(
+            tested_entry.get("elapsed_ms_measurements", []) or [],
+            tested_entry.get("elapsed_ms_percentiles", []) or [],
+        )
+        elapsed_ms_speedup = _median_from_measurements_or_percentiles(
+            speedup_entry.get("elapsed_ms_measurements_speed_up_coefs", []) or [],
+            speedup_entry.get("elapsed_ms_percentiles_speed_up_coefs", []) or [],
+        )
+        source_rows_per_second = _median_from_measurements_or_percentiles(
+            source_entry.get("rows_per_second_measurements", []) or [],
+            source_entry.get("rows_per_second_percentiles", []) or [],
+        )
+        tested_rows_per_second = _median_from_measurements_or_percentiles(
+            tested_entry.get("rows_per_second_measurements", []) or [],
+            tested_entry.get("rows_per_second_percentiles", []) or [],
+        )
+        source_bytes_per_second = _median_from_measurements_or_percentiles(
+            source_entry.get("bytes_per_second_measurements", []) or [],
+            source_entry.get("bytes_per_second_percentiles", []) or [],
+        )
+        tested_bytes_per_second = _median_from_measurements_or_percentiles(
+            tested_entry.get("bytes_per_second_measurements", []) or [],
+            tested_entry.get("bytes_per_second_percentiles", []) or [],
+        )
+
+        per_query_medians[query_id] = {
+            "source_elapsed_ms": source_elapsed_ms,
+            "tested_elapsed_ms": tested_elapsed_ms,
+            "elapsed_ms_speedup": elapsed_ms_speedup,
+            "source_rows_per_second": source_rows_per_second,
+            "tested_rows_per_second": tested_rows_per_second,
+            "source_bytes_per_second": source_bytes_per_second,
+            "source_bytes_per_second_readable": (
+                make_readable_bytes(source_bytes_per_second)
+                if source_bytes_per_second is not None
+                else None
+            ),
+            "tested_bytes_per_second": tested_bytes_per_second,
+            "tested_bytes_per_second_readable": (
+                make_readable_bytes(tested_bytes_per_second)
+                if tested_bytes_per_second is not None
+                else None
+            ),
+        }
+
+    source_insert_bytes_per_second_median = _median_positive_finite(
+        source_insert_bytes_per_second
+    )
+    tested_insert_bytes_per_second_median = _median_positive_finite(
+        tested_insert_bytes_per_second
+    )
+    source_select_bytes_per_second_median = _median_positive_finite(
+        source_select_bytes_per_second
+    )
+    tested_select_bytes_per_second_median = _median_positive_finite(
+        tested_select_bytes_per_second
+    )
+
+    return {
+        "source_insert_time_ms": _median_positive_finite(source_insert_time_ms),
+        "tested_insert_time_ms": _median_positive_finite(tested_insert_time_ms),
+        "source_select_time_ms": _median_positive_finite(source_select_time_ms),
+        "tested_select_time_ms": _median_positive_finite(tested_select_time_ms),
+        "source_insert_rows_per_second": _median_positive_finite(
+            source_insert_rows_per_second
+        ),
+        "tested_insert_rows_per_second": _median_positive_finite(
+            tested_insert_rows_per_second
+        ),
+        "source_select_rows_per_second": _median_positive_finite(
+            source_select_rows_per_second
+        ),
+        "tested_select_rows_per_second": _median_positive_finite(
+            tested_select_rows_per_second
+        ),
+        "source_insert_bytes_per_second": source_insert_bytes_per_second_median,
+        "source_insert_bytes_per_second_readable": (
+            make_readable_bytes(source_insert_bytes_per_second_median)
+            if source_insert_bytes_per_second_median is not None
+            else None
+        ),
+        "tested_insert_bytes_per_second": tested_insert_bytes_per_second_median,
+        "tested_insert_bytes_per_second_readable": (
+            make_readable_bytes(tested_insert_bytes_per_second_median)
+            if tested_insert_bytes_per_second_median is not None
+            else None
+        ),
+        "source_select_bytes_per_second": source_select_bytes_per_second_median,
+        "source_select_bytes_per_second_readable": (
+            make_readable_bytes(source_select_bytes_per_second_median)
+            if source_select_bytes_per_second_median is not None
+            else None
+        ),
+        "tested_select_bytes_per_second": tested_select_bytes_per_second_median,
+        "tested_select_bytes_per_second_readable": (
+            make_readable_bytes(tested_select_bytes_per_second_median)
+            if tested_select_bytes_per_second_median is not None
+            else None
+        ),
+        "insert_time_speedup": _median_positive_finite(insert_time_speedup),
+        "select_time_speedup": _median_positive_finite(select_time_speedup),
+        "per_query": per_query_medians,
+    }
+
+
 def _compute_builtin_source_score(
     *,
     select_time_ms_percentiles: Sequence[float],
@@ -811,6 +1077,7 @@ def _compute_builtin_variant_score(
 def _resolve_score(
     *,
     scoring: ScoringConfig,
+    stage_name: Optional[str],
     builtin_score: Optional[float],
     builtin_score_details: Optional[Dict[str, Any]],
     expression_context: Dict[str, Any],
@@ -822,27 +1089,41 @@ def _resolve_score(
     - `builtin` -> возвращает `builtin_score`;
     - `expression` -> вычисляет безопасное expression.
     """
-    if scoring.mode == "builtin":
+    stage_override = scoring.stage_override(stage_name)
+    effective_mode = stage_override.mode if stage_override is not None else scoring.mode
+    effective_expression = (
+        stage_override.expression if stage_override is not None else scoring.expression
+    )
+    effective_on_error_score = (
+        stage_override.on_error_score
+        if stage_override is not None
+        else scoring.on_error_score
+    )
+    if effective_mode == "builtin":
         details: Dict[str, Any] = {
             "mode": "builtin",
             "status": "ok" if builtin_score is not None else "empty",
             "final_score": builtin_score,
-            "on_error_score": scoring.on_error_score,
+            "on_error_score": effective_on_error_score,
+            "stage_name": stage_name,
+            "stage_override_used": stage_override is not None,
             "details": builtin_score_details or {},
         }
         return builtin_score, _to_pretty_score_calculation_json(details)
 
     base_details: Dict[str, Any] = {
         "mode": "expression",
-        "expression": scoring.expression,
-        "on_error_score": scoring.on_error_score,
+        "expression": effective_expression,
+        "on_error_score": effective_on_error_score,
+        "stage_name": stage_name,
+        "stage_override_used": stage_override is not None,
         "builtin_score_fallback": builtin_score,
         "context": expression_context,
     }
 
     try:
         score = evaluate_score_expression(
-            scoring.expression or "",
+            effective_expression or "",
             expression_context,
         )
     except ScoreEvaluationError as exc:
@@ -851,8 +1132,8 @@ def _resolve_score(
             context_label,
             exc,
         )
-        if scoring.on_error_score is not None:
-            fallback_score = float(scoring.on_error_score)
+        if effective_on_error_score is not None:
+            fallback_score = float(effective_on_error_score)
             return fallback_score, _to_pretty_score_calculation_json(
                 {
                     **base_details,
@@ -872,8 +1153,8 @@ def _resolve_score(
 
     if not math.isfinite(score):
         logger.warning("%s: scoring.expression вернуло неfinite score=%s", context_label, score)
-        if scoring.on_error_score is not None:
-            fallback_score = float(scoring.on_error_score)
+        if effective_on_error_score is not None:
+            fallback_score = float(effective_on_error_score)
             return fallback_score, _to_pretty_score_calculation_json(
                 {
                     **base_details,
@@ -1028,7 +1309,7 @@ class SourceBenchmarkTaskPayload(BaseModel):
     result_table_phased: Optional[str] = None
     result_runs_table_phased: Optional[str] = None
     query_plan: QueryPlanPayload
-    max_iterations: int
+    insert_operations_count: int
     insert_rows_limit: Optional[int] = None
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     measured_percentiles: List[int] = Field(default_factory=lambda: list(DEFAULT_MEASURED_PERCENTILES))
@@ -1061,7 +1342,7 @@ class VariantBenchmarkTaskPayload(BaseModel):
     variant_params: Dict[str, Any] = Field(default_factory=dict)
     variant_ddl: str
 
-    max_iterations: int
+    insert_operations_count: int
     insert_rows_limit: Optional[int] = None
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     query_plan: QueryPlanPayload
@@ -1469,24 +1750,203 @@ class _ClickHouseRuntimeClient:
 
     def get_index_sizes(self, database: str, table: str) -> Dict[str, Dict[str, Any]]:
         """Размеры skip-индексов в bytes."""
-        rows = self.execute(
-            """
-            SELECT
-                expr,
-                data_compressed_bytes
-            FROM system.data_skipping_indices
-            WHERE database = %(database)s
-              AND table = %(table)s
-            """,
-            {"database": database, "table": table},
-        )
+        params = {"database": database, "table": table}
+        rows: list[Any] = []
+        last_error: Optional[Exception] = None
+        used_query_label: str = ""
+
+        # Порядок: сначала строгие варианты с active=1; затем fallback без active.
+        query_candidates: list[tuple[str, str]] = [
+            (
+                "active_direct_named",
+                """
+                SELECT
+                    name,
+                    expr,
+                    data_compressed_bytes
+                FROM system.data_skipping_indices
+                WHERE database = %(database)s
+                  AND table = %(table)s
+                  AND active = 1
+                """,
+            ),
+            (
+                "active_direct_expr",
+                """
+                SELECT
+                    expr,
+                    data_compressed_bytes
+                FROM system.data_skipping_indices
+                WHERE database = %(database)s
+                  AND table = %(table)s
+                  AND active = 1
+                """,
+            ),
+            (
+                "active_join_part_name_named",
+                """
+                SELECT
+                    d.name,
+                    d.expr,
+                    d.data_compressed_bytes
+                FROM system.data_skipping_indices AS d
+                INNER JOIN system.parts AS p
+                    ON p.database = d.database
+                   AND p.table = d.table
+                   AND p.name = d.part_name
+                WHERE d.database = %(database)s
+                  AND d.table = %(table)s
+                  AND p.active = 1
+                """,
+            ),
+            (
+                "active_join_part_name_expr",
+                """
+                SELECT
+                    d.expr,
+                    d.data_compressed_bytes
+                FROM system.data_skipping_indices AS d
+                INNER JOIN system.parts AS p
+                    ON p.database = d.database
+                   AND p.table = d.table
+                   AND p.name = d.part_name
+                WHERE d.database = %(database)s
+                  AND d.table = %(table)s
+                  AND p.active = 1
+                """,
+            ),
+            (
+                "active_join_part_named",
+                """
+                SELECT
+                    d.name,
+                    d.expr,
+                    d.data_compressed_bytes
+                FROM system.data_skipping_indices AS d
+                INNER JOIN system.parts AS p
+                    ON p.database = d.database
+                   AND p.table = d.table
+                   AND p.name = d.part
+                WHERE d.database = %(database)s
+                  AND d.table = %(table)s
+                  AND p.active = 1
+                """,
+            ),
+            (
+                "active_join_part_expr",
+                """
+                SELECT
+                    d.expr,
+                    d.data_compressed_bytes
+                FROM system.data_skipping_indices AS d
+                INNER JOIN system.parts AS p
+                    ON p.database = d.database
+                   AND p.table = d.table
+                   AND p.name = d.part
+                WHERE d.database = %(database)s
+                  AND d.table = %(table)s
+                  AND p.active = 1
+                """,
+            ),
+            # Последний fallback (когда active-filter технически недоступен в этой версии CH).
+            (
+                "no_active_named",
+                """
+                SELECT
+                    name,
+                    expr,
+                    data_compressed_bytes
+                FROM system.data_skipping_indices
+                WHERE database = %(database)s
+                  AND table = %(table)s
+                """,
+            ),
+            (
+                "no_active_expr",
+                """
+                SELECT
+                    expr,
+                    data_compressed_bytes
+                FROM system.data_skipping_indices
+                WHERE database = %(database)s
+                  AND table = %(table)s
+                """,
+            ),
+        ]
+
+        for query_label, query_text in query_candidates:
+            try:
+                rows = self.execute(query_text, params)
+                used_query_label = query_label
+                break
+            except Exception as exc:
+                last_error = exc
+                continue
+        else:
+            if last_error is not None:
+                logger.error(
+                    "Не удалось получить размеры skip-индексов для %s.%s: %s",
+                    database,
+                    table,
+                    last_error,
+                )
+            else:
+                logger.error(
+                    "Не удалось получить размеры skip-индексов для %s.%s",
+                    database,
+                    table,
+                )
+            rows = []
+
+        if used_query_label.startswith("no_active_"):
+            logger.warning(
+                "Размеры skip-индексов для %s.%s получены без active=1 "
+                "(в этой версии CH active-filter недоступен для system.data_skipping_indices)",
+                database,
+                table,
+            )
+
         result: dict[str, dict[str, Any]] = {}
-        for expr, compressed_bytes in rows:
+        for row in rows:
+            if not isinstance(row, (list, tuple)):
+                continue
+            if len(row) >= 3:
+                raw_name, raw_expr, compressed_bytes = row[0], row[1], row[2]
+            elif len(row) >= 2:
+                raw_name, raw_expr, compressed_bytes = row[0], row[0], row[1]
+            else:
+                continue
+
+            index_name = str(raw_name or "").strip()
+            expr = str(raw_expr or "").strip()
+            if not index_name:
+                index_name = expr
+
             bytes_value = int(compressed_bytes or 0)
-            result[str(expr)] = {
-                "size_compressed_bytes": bytes_value,
-                "size_compressed_bytes_readable": make_readable_bytes(bytes_value),
-            }
+            column_name = _extract_index_column_from_expr(expr) or _extract_index_column_from_expr(
+                index_name
+            )
+
+            existing = result.get(index_name)
+            if existing is None:
+                result[index_name] = {
+                    "expr": expr or None,
+                    "column": column_name,
+                    "size_compressed_bytes": bytes_value,
+                }
+                continue
+
+            existing["size_compressed_bytes"] = int(
+                existing.get("size_compressed_bytes", 0) or 0
+            ) + bytes_value
+            if expr and not existing.get("expr"):
+                existing["expr"] = expr
+            if column_name and not existing.get("column"):
+                existing["column"] = column_name
+
+        for stats in result.values():
+            bytes_value = int(stats.get("size_compressed_bytes", 0) or 0)
+            stats["size_compressed_bytes_readable"] = make_readable_bytes(bytes_value)
         return result
 
     @staticmethod
@@ -2216,6 +2676,12 @@ def _build_select_per_query_metrics(
             bytes_per_second_measurements,
             measured_percentiles,
         )
+        bytes_per_second_measurements_readable = [
+            make_readable_bytes(value) for value in bytes_per_second_measurements
+        ]
+        bytes_per_second_percentiles_readable = [
+            make_readable_bytes(value) for value in bytes_per_second_percentiles
+        ]
 
         result.append(
             {
@@ -2235,7 +2701,9 @@ def _build_select_per_query_metrics(
                 "rows_per_second_measurements": rows_per_second_measurements,
                 "rows_per_second_percentiles": rows_per_second_percentiles,
                 "bytes_per_second_measurements": bytes_per_second_measurements,
+                "bytes_per_second_measurements_readable": bytes_per_second_measurements_readable,
                 "bytes_per_second_percentiles": bytes_per_second_percentiles,
+                "bytes_per_second_percentiles_readable": bytes_per_second_percentiles_readable,
             }
         )
     return result
@@ -2281,8 +2749,18 @@ def _extract_source_select_per_query_metrics(
     legacy_bytes_per_second_measurements = list(
         source_metrics.get("source_table_select_bytes_per_second_measurements", []) or []
     )
+    legacy_bytes_per_second_measurements_readable = list(
+        source_metrics.get("source_table_select_bytes_per_second_measurements_readable", []) or []
+    )
     legacy_bytes_per_second_percentiles = list(
         source_metrics.get("source_table_select_bytes_per_second_measurements_percentiles", []) or []
+    )
+    legacy_bytes_per_second_percentiles_readable = list(
+        source_metrics.get(
+            "source_table_select_bytes_per_second_measurements_percentiles_readable",
+            [],
+        )
+        or []
     )
     if (
         not legacy_query
@@ -2292,8 +2770,19 @@ def _extract_source_select_per_query_metrics(
         and not legacy_rows_per_second_percentiles
         and not legacy_bytes_per_second_measurements
         and not legacy_bytes_per_second_percentiles
+        and not legacy_bytes_per_second_measurements_readable
+        and not legacy_bytes_per_second_percentiles_readable
     ):
         return []
+
+    if not legacy_bytes_per_second_measurements_readable:
+        legacy_bytes_per_second_measurements_readable = [
+            make_readable_bytes(float(v)) for v in legacy_bytes_per_second_measurements
+        ]
+    if not legacy_bytes_per_second_percentiles_readable:
+        legacy_bytes_per_second_percentiles_readable = [
+            make_readable_bytes(float(v)) for v in legacy_bytes_per_second_percentiles
+        ]
 
     return [
         {
@@ -2308,7 +2797,13 @@ def _extract_source_select_per_query_metrics(
             "rows_per_second_measurements": [float(v) for v in legacy_rows_per_second_measurements],
             "rows_per_second_percentiles": [float(v) for v in legacy_rows_per_second_percentiles],
             "bytes_per_second_measurements": [float(v) for v in legacy_bytes_per_second_measurements],
+            "bytes_per_second_measurements_readable": [
+                str(v) for v in legacy_bytes_per_second_measurements_readable
+            ],
             "bytes_per_second_percentiles": [float(v) for v in legacy_bytes_per_second_percentiles],
+            "bytes_per_second_percentiles_readable": [
+                str(v) for v in legacy_bytes_per_second_percentiles_readable
+            ],
         }
     ]
 
@@ -2517,6 +3012,31 @@ def _to_legacy_pretty_json_or_none(value: Any) -> Optional[str]:
     )
 
 
+def _build_primary_index_size_json(
+    *,
+    size_bytes: float,
+    total_size_bytes_with_indexes: Optional[float],
+) -> Optional[str]:
+    """Собирает JSON для метрик primary index."""
+    normalized_size_bytes = _to_positive_finite_float(size_bytes)
+    if normalized_size_bytes <= 0:
+        return None
+    normalized_total_size = _to_positive_finite_float(total_size_bytes_with_indexes)
+    percent_from_total_size: Optional[float] = None
+    if normalized_total_size > 0:
+        percent_from_total_size = round(
+            (normalized_size_bytes / normalized_total_size) * 100.0,
+            4,
+        )
+    return _to_json_or_none(
+        {
+            "size_bytes": normalized_size_bytes,
+            "size_bytes_readable": make_readable_bytes(normalized_size_bytes),
+            "size_percent_from_total_size": percent_from_total_size,
+        }
+    )
+
+
 def _build_baseline_variant_result(
     *,
     payload: SourceBenchmarkTaskPayload,
@@ -2525,7 +3045,6 @@ def _build_baseline_variant_result(
     baseline_ddl: str,
     metrics: Dict[str, Any],
     baseline_score: Optional[float],
-    baseline_score_calculation_json: Optional[str],
 ) -> BenchmarkVariantResult:
     """
     Строит `BenchmarkVariantResult` для baseline-замера исходного DDL.
@@ -2596,16 +3115,33 @@ def _build_baseline_variant_result(
         )
         or tested_total_size_bytes
     )
+    tested_table_primary_index_size_json = metrics.get("tested_table_primary_index_size_json")
+    if tested_table_primary_index_size_json is None:
+        tested_table_primary_index_size_json = _build_primary_index_size_json(
+            size_bytes=float(metrics.get("tested_table_primary_index_size_bytes", 0.0) or 0.0),
+            total_size_bytes_with_indexes=tested_total_size_bytes_with_indexes,
+        )
+    elif not isinstance(tested_table_primary_index_size_json, str):
+        tested_table_primary_index_size_json = _to_json_or_none(
+            tested_table_primary_index_size_json
+        )
     source_rows = int(metrics.get("total_n_rows_in_source_table", 0) or 0)
     tested_rows = int(metrics.get("total_n_rows_in_tested_table", source_rows) or source_rows)
     tested_columns_size_map = (
         metrics.get("tested_table_consumed_compressed_size_bytes_by_each_column")
         or metrics.get("source_table_consumed_compressed_size_bytes_by_each_column")
     )
-    compression_overall_coef: Optional[float] = None
-    if source_total_size_bytes > 0:
-        compression_overall_coef = tested_total_size_bytes / source_total_size_bytes
-
+    baseline_row_score_calculation_json = _to_pretty_score_calculation_json(
+        {
+            "mode": "source_baseline",
+            "status": "ok" if baseline_score is not None else "empty",
+            "final_score": baseline_score,
+            "note": (
+                "source_baseline row does not store self-comparison metrics "
+                "(speedup/compression comparison fields are empty by design)"
+            ),
+        }
+    )
     return BenchmarkVariantResult(
         benchmark_run_id=payload.benchmark_run_id,
         benchmark_started_at=payload.benchmark_started_at,
@@ -2630,9 +3166,8 @@ def _build_baseline_variant_result(
         source_table_insert_time_ms_measurements=source_insert_ms,
         tested_table_insert_time_ms_measurements_percentiles=source_insert_ms_percentiles,
         source_table_insert_time_ms_measurements_percentiles=source_insert_ms_percentiles,
-        tested_table_insert_time_ms_measurements_percentiles_speed_up_coefs=(
-            compute_speedup_coefficients(source_insert_ms_percentiles, source_insert_ms_percentiles)
-        ),
+        # baseline не сравнивается сам с собой: поля сравнений храним пустыми.
+        tested_table_insert_time_ms_measurements_percentiles_speed_up_coefs=[],
         tested_table_insert_rows_per_second_measurements=source_insert_rows_per_sec,
         source_table_insert_rows_per_second_measurements=source_insert_rows_per_sec,
         tested_table_insert_rows_per_second_measurements_percentiles=(
@@ -2665,9 +3200,8 @@ def _build_baseline_variant_result(
         source_table_select_time_ms_measurements=source_select_ms,
         tested_table_select_time_ms_measurements_percentiles=source_select_ms_percentiles,
         source_table_select_time_ms_measurements_percentiles=source_select_ms_percentiles,
-        tested_table_select_time_ms_measurements_percentiles_speed_up_coefs=(
-            compute_speedup_coefficients(source_select_ms_percentiles, source_select_ms_percentiles)
-        ),
+        # baseline не сравнивается сам с собой: поля сравнений храним пустыми.
+        tested_table_select_time_ms_measurements_percentiles_speed_up_coefs=[],
         tested_table_select_rows_per_second_measurements=source_select_rows_per_sec,
         source_table_select_rows_per_second_measurements=source_select_rows_per_sec,
         tested_table_select_rows_per_second_measurements_percentiles=(
@@ -2700,12 +3234,8 @@ def _build_baseline_variant_result(
         source_table_select_metrics_by_query_json=_to_legacy_pretty_json_or_none(
             metrics.get("source_table_select_metrics_by_query")
         ),
-        tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json=_to_legacy_pretty_json_or_none(
-            _compute_select_time_speedup_by_query(
-                metrics.get("source_table_select_metrics_by_query", []) or [],
-                metrics.get("source_table_select_metrics_by_query", []) or [],
-            )
-        ),
+        # baseline не сравнивается сам с собой: per-query speedup не заполняем.
+        tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json=None,
         tested_table_consumed_compressed_size_bytes_by_each_column=_to_legacy_pretty_json_or_none(
             tested_columns_size_map
         ),
@@ -2720,17 +3250,19 @@ def _build_baseline_variant_result(
         tested_table_consumed_compressed_size_bytes_with_indexes_readable=make_readable_bytes(
             tested_total_size_bytes_with_indexes
         ),
+        tested_table_primary_index_size_json=tested_table_primary_index_size_json,
         source_table_consumed_compressed_size_bytes_overall=source_total_size_bytes,
         source_table_consumed_compressed_size_bytes_overall_readable=make_readable_bytes(
             source_total_size_bytes
         ),
-        tested_table_compression_overall_coef=compression_overall_coef,
-        tested_table_compression_by_each_column_coef=_to_legacy_pretty_json_or_none({}),
+        # baseline не сравнивается сам с собой: коэффициенты сравнения пустые.
+        tested_table_compression_overall_coef=None,
+        tested_table_compression_by_each_column_coef=None,
         source_table_n_rows_in_size_test=source_rows,
         tested_table_n_rows_in_size_test=int(
             metrics.get("tested_table_n_rows_in_size_test", tested_rows) or tested_rows
         ),
-        score_calculation_json=baseline_score_calculation_json,
+        score_calculation_json=baseline_row_score_calculation_json,
         score=baseline_score,
         extra_json=_to_json_or_none(
             {
@@ -2773,7 +3305,6 @@ def _store_source_benchmark_result_if_configured(
             baseline_ddl=baseline_ddl,
             metrics=result.metrics,
             baseline_score=result.score,
-            baseline_score_calculation_json=result.score_calculation_json,
         )
         store.store_worker_result(
             benchmark_run_id=payload.benchmark_run_id,
@@ -2867,7 +3398,7 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             target_database=baseline_database,
             target_table=baseline_table,
             n_rows=payload.insert_rows_limit,
-            n_measurements=payload.max_iterations,
+            n_measurements=payload.insert_operations_count,
         )
         insert_time_ms_measurements = [
             value / 1_000_000.0 for value in insert_stats["elapsed_ns"]
@@ -2888,7 +3419,7 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
         select_stats = _measure_select_queries(
             client,
             test_queries=baseline_test_queries,
-            n_measurements=payload.max_iterations,
+            n_measurements=payload.insert_operations_count,
         )
         source_select_per_query_metrics = _build_select_per_query_metrics(
             select_stats.get("per_query", []),
@@ -2911,93 +3442,71 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             payload.measured_percentiles,
         )
 
-        source_total_rows = client.count_rows(payload.source_database, payload.source_table)
-        tested_total_rows = client.count_rows(baseline_database, baseline_table)
-        source_columns_sizes = client.get_column_sizes(payload.source_database, payload.source_table)
-        source_indexes_sizes = client.get_index_sizes(payload.source_database, payload.source_table)
-        source_total_size_bytes = client.get_total_compressed_size_bytes(
-            payload.source_database,
-            payload.source_table,
-        )
-        source_columns_sizes, source_indexes_sizes, source_total_size_bytes = (
-            _wait_for_table_size_materialization_if_needed(
-                client,
-                database=payload.source_database,
-                table=payload.source_table,
-                column_sizes=source_columns_sizes,
-                index_sizes=source_indexes_sizes,
-                total_size_bytes=source_total_size_bytes,
-            )
-        )
-        source_total_size_bytes = _normalize_total_size_bytes(
-            source_total_size_bytes,
-            column_sizes=source_columns_sizes,
-            context=f"run_source_benchmark source {payload.source_database}.{payload.source_table}",
-        )
-        source_parts_metrics = client.get_table_parts_size_metrics(
-            payload.source_database,
-            payload.source_table,
-        )
-        source_parts_data_size = _to_positive_finite_float(
-            source_parts_metrics.get("data_compressed_bytes")
-        )
-        if source_parts_data_size > 0:
-            source_total_size_bytes = _normalize_total_size_bytes(
-                source_parts_data_size,
-                column_sizes=source_columns_sizes,
-                context=(
-                    f"run_source_benchmark source(parts) "
-                    f"{payload.source_database}.{payload.source_table}"
-                ),
-            )
-
-        tested_columns_sizes = client.get_column_sizes(baseline_database, baseline_table)
-        tested_indexes_sizes = client.get_index_sizes(baseline_database, baseline_table)
-        tested_total_size_bytes = client.get_total_compressed_size_bytes(
+        # В baseline-режиме "source" и "tested" метрики должны измеряться
+        # на одном и том же объёме данных (копия исходного DDL), чтобы избежать
+        # перекоса при сравнении полной source-таблицы vs test-копии.
+        baseline_total_rows = client.count_rows(baseline_database, baseline_table)
+        baseline_columns_sizes = client.get_column_sizes(baseline_database, baseline_table)
+        baseline_indexes_sizes = client.get_index_sizes(baseline_database, baseline_table)
+        baseline_total_size_bytes = client.get_total_compressed_size_bytes(
             baseline_database,
             baseline_table,
         )
-        tested_columns_sizes, tested_indexes_sizes, tested_total_size_bytes = (
-            _wait_for_table_size_materialization_if_needed(
-                client,
-                database=baseline_database,
-                table=baseline_table,
-                column_sizes=tested_columns_sizes,
-                index_sizes=tested_indexes_sizes,
-                total_size_bytes=tested_total_size_bytes,
-            )
+        (
+            baseline_columns_sizes,
+            baseline_indexes_sizes,
+            baseline_total_size_bytes,
+        ) = _wait_for_table_size_materialization_if_needed(
+            client,
+            database=baseline_database,
+            table=baseline_table,
+            column_sizes=baseline_columns_sizes,
+            index_sizes=baseline_indexes_sizes,
+            total_size_bytes=baseline_total_size_bytes,
         )
-        tested_total_size_bytes = _normalize_total_size_bytes(
-            tested_total_size_bytes,
-            column_sizes=tested_columns_sizes,
+        baseline_total_size_bytes = _normalize_total_size_bytes(
+            baseline_total_size_bytes,
+            column_sizes=baseline_columns_sizes,
             context=f"run_source_benchmark baseline {baseline_database}.{baseline_table}",
         )
-        tested_parts_metrics = client.get_table_parts_size_metrics(
+        baseline_parts_metrics = client.get_table_parts_size_metrics(
             baseline_database,
             baseline_table,
         )
-        tested_parts_data_size = _to_positive_finite_float(
-            tested_parts_metrics.get("data_compressed_bytes")
+        baseline_parts_data_size = _to_positive_finite_float(
+            baseline_parts_metrics.get("data_compressed_bytes")
         )
-        if tested_parts_data_size > 0:
-            tested_total_size_bytes = _normalize_total_size_bytes(
-                tested_parts_data_size,
-                column_sizes=tested_columns_sizes,
+        if baseline_parts_data_size > 0:
+            baseline_total_size_bytes = _normalize_total_size_bytes(
+                baseline_parts_data_size,
+                column_sizes=baseline_columns_sizes,
                 context=(
                     f"run_source_benchmark baseline(parts) "
                     f"{baseline_database}.{baseline_table}"
                 ),
             )
-        if tested_total_size_bytes <= 0 and source_total_size_bytes > 0:
-            tested_total_size_bytes = source_total_size_bytes
-        source_total_size_bytes_with_indexes = _resolve_total_size_with_indexes_bytes(
-            parts_metrics=source_parts_metrics,
-            normalized_data_size_bytes=source_total_size_bytes,
+        baseline_total_size_bytes_with_indexes = _resolve_total_size_with_indexes_bytes(
+            parts_metrics=baseline_parts_metrics,
+            normalized_data_size_bytes=baseline_total_size_bytes,
         )
-        tested_total_size_bytes_with_indexes = _resolve_total_size_with_indexes_bytes(
-            parts_metrics=tested_parts_metrics,
-            normalized_data_size_bytes=tested_total_size_bytes,
+        baseline_primary_index_size_bytes = _to_positive_finite_float(
+            baseline_parts_metrics.get("primary_key_bytes_in_memory")
         )
+        baseline_primary_index_size_json = _build_primary_index_size_json(
+            size_bytes=baseline_primary_index_size_bytes,
+            total_size_bytes_with_indexes=baseline_total_size_bytes_with_indexes,
+        )
+
+        source_total_rows = baseline_total_rows
+        tested_total_rows = baseline_total_rows
+        source_columns_sizes = baseline_columns_sizes
+        tested_columns_sizes = baseline_columns_sizes
+        source_indexes_sizes = baseline_indexes_sizes
+        tested_indexes_sizes = baseline_indexes_sizes
+        source_total_size_bytes = baseline_total_size_bytes
+        tested_total_size_bytes = baseline_total_size_bytes
+        source_total_size_bytes_with_indexes = baseline_total_size_bytes_with_indexes
+        tested_total_size_bytes_with_indexes = baseline_total_size_bytes_with_indexes
 
         metrics: dict[str, Any] = {
             "measured_percentiles": list(payload.measured_percentiles),
@@ -3048,6 +3557,7 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             "tested_table_consumed_compressed_size_bytes_with_indexes_readable": make_readable_bytes(
                 tested_total_size_bytes_with_indexes
             ),
+            "tested_table_primary_index_size_json": baseline_primary_index_size_json,
             # Backward-compatible internal aliases for older runs/tests.
             "tested_table_total_size_bytes_with_indexes": tested_total_size_bytes_with_indexes,
             "tested_table_total_size_bytes_with_indexes_readable": make_readable_bytes(
@@ -3094,7 +3604,34 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             source_select_per_query_metrics,
             source_select_per_query_metrics,
         )
+        baseline_insert_time_speedup = compute_speedup_coefficients(
+            insert_time_ms_percentiles,
+            insert_time_ms_percentiles,
+        )
+        baseline_select_time_speedup = compute_speedup_coefficients(
+            select_time_ms_percentiles,
+            select_time_ms_percentiles,
+        )
         baseline_per_query_context = _build_per_query_expression_context(
+            source_per_query=source_select_per_query_metrics,
+            tested_per_query=source_select_per_query_metrics,
+            speedup_per_query=baseline_select_time_speedup_by_query,
+        )
+        baseline_context_medians = _build_score_context_medians(
+            source_insert_time_ms=insert_time_ms_measurements,
+            tested_insert_time_ms=insert_time_ms_measurements,
+            source_select_time_ms=select_time_ms_measurements,
+            tested_select_time_ms=select_time_ms_measurements,
+            source_insert_rows_per_second=insert_stats["rows_per_second"],
+            tested_insert_rows_per_second=insert_stats["rows_per_second"],
+            source_select_rows_per_second=select_stats["rows_per_second"],
+            tested_select_rows_per_second=select_stats["rows_per_second"],
+            source_insert_bytes_per_second=insert_stats["bytes_per_second"],
+            tested_insert_bytes_per_second=insert_stats["bytes_per_second"],
+            source_select_bytes_per_second=select_stats["bytes_per_second"],
+            tested_select_bytes_per_second=select_stats["bytes_per_second"],
+            insert_time_speedup=baseline_insert_time_speedup,
+            select_time_speedup=baseline_select_time_speedup,
             source_per_query=source_select_per_query_metrics,
             tested_per_query=source_select_per_query_metrics,
             speedup_per_query=baseline_select_time_speedup_by_query,
@@ -3102,6 +3639,7 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
 
         baseline_score, baseline_score_calculation_json = _resolve_score(
             scoring=payload.scoring,
+            stage_name="source_baseline",
             builtin_score=builtin_baseline_score,
             builtin_score_details=builtin_baseline_score_details,
             expression_context={
@@ -3116,29 +3654,17 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
                 },
                 "speedup": {
                     "insert": {
-                        "time_ms_percentiles": compute_speedup_coefficients(
-                            insert_time_ms_percentiles,
-                            insert_time_ms_percentiles,
-                        ),
+                        "time_ms_percentiles": baseline_insert_time_speedup,
                         "time_ms_by_percentile": build_percentile_lookup(
                             payload.measured_percentiles,
-                            compute_speedup_coefficients(
-                                insert_time_ms_percentiles,
-                                insert_time_ms_percentiles,
-                            ),
+                            baseline_insert_time_speedup,
                         ),
                     },
                     "select": {
-                        "time_ms_percentiles": compute_speedup_coefficients(
-                            select_time_ms_percentiles,
-                            select_time_ms_percentiles,
-                        ),
+                        "time_ms_percentiles": baseline_select_time_speedup,
                         "time_ms_by_percentile": build_percentile_lookup(
                             payload.measured_percentiles,
-                            compute_speedup_coefficients(
-                                select_time_ms_percentiles,
-                                select_time_ms_percentiles,
-                            ),
+                            baseline_select_time_speedup,
                         ),
                     },
                 },
@@ -3154,20 +3680,7 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
                         "compression_ratio"
                     ),
                 },
-                "medians": {
-                    "source_insert_time_ms": baseline_geomean_details.get("inputs", {}).get(
-                        "source_insert_median_ms"
-                    ),
-                    "tested_insert_time_ms": baseline_geomean_details.get("inputs", {}).get(
-                        "tested_insert_median_ms"
-                    ),
-                    "source_select_time_ms": baseline_geomean_details.get("inputs", {}).get(
-                        "source_select_median_ms"
-                    ),
-                    "tested_select_time_ms": baseline_geomean_details.get("inputs", {}).get(
-                        "tested_select_median_ms"
-                    ),
-                },
+                "medians": baseline_context_medians,
                 "source_size_bytes": source_total_size_bytes_with_indexes,
                 "tested_size_bytes": tested_total_size_bytes_with_indexes,
                 "source_insert_time_ms_percentiles": list(insert_time_ms_percentiles),
@@ -3290,7 +3803,7 @@ def run_variant_benchmark(
             target_database=payload.variant_database,
             target_table=payload.variant_table,
             n_rows=payload.insert_rows_limit,
-            n_measurements=payload.max_iterations,
+            n_measurements=payload.insert_operations_count,
             tested_cols=insert_tested_cols,
         )
 
@@ -3301,19 +3814,21 @@ def run_variant_benchmark(
             tested_insert_time_ms,
             measured_percentiles,
         )
+        tested_insert_rows_per_second = list(insert_stats.get("rows_per_second", []) or [])
         tested_insert_rows_per_second_percentiles = compute_percentiles(
-            insert_stats["rows_per_second"],
+            tested_insert_rows_per_second,
             measured_percentiles,
         )
+        tested_insert_bytes_per_second = list(insert_stats.get("bytes_per_second", []) or [])
         tested_insert_bytes_per_second_percentiles = compute_percentiles(
-            insert_stats["bytes_per_second"],
+            tested_insert_bytes_per_second,
             measured_percentiles,
         )
 
         select_stats = _measure_select_queries(
             client,
             test_queries=payload.query_plan.test_queries,
-            n_measurements=payload.max_iterations,
+            n_measurements=payload.insert_operations_count,
         )
         tested_select_per_query_metrics = _build_select_per_query_metrics(
             select_stats.get("per_query", []),
@@ -3327,12 +3842,14 @@ def run_variant_benchmark(
             tested_select_time_ms,
             measured_percentiles,
         )
+        tested_select_rows_per_second = list(select_stats.get("rows_per_second", []) or [])
         tested_select_rows_per_second_percentiles = compute_percentiles(
-            select_stats["rows_per_second"],
+            tested_select_rows_per_second,
             measured_percentiles,
         )
+        tested_select_bytes_per_second = list(select_stats.get("bytes_per_second", []) or [])
         tested_select_bytes_per_second_percentiles = compute_percentiles(
-            select_stats["bytes_per_second"],
+            tested_select_bytes_per_second,
             measured_percentiles,
         )
 
@@ -3379,6 +3896,13 @@ def run_variant_benchmark(
         tested_total_size_bytes_with_indexes = _resolve_total_size_with_indexes_bytes(
             parts_metrics=tested_parts_metrics,
             normalized_data_size_bytes=tested_total_size_bytes,
+        )
+        tested_primary_index_size_bytes = _to_positive_finite_float(
+            tested_parts_metrics.get("primary_key_bytes_in_memory")
+        )
+        tested_primary_index_size_json = _build_primary_index_size_json(
+            size_bytes=tested_primary_index_size_bytes,
+            total_size_bytes_with_indexes=tested_total_size_bytes_with_indexes,
         )
         source_total_size_bytes = float(
             source_metrics.get("source_table_consumed_compressed_size_bytes_overall", 0.0) or 0.0
@@ -3457,19 +3981,6 @@ def run_variant_benchmark(
                 source_total_size_bytes_with_indexes = live_source_total_size_bytes_with_indexes
         if source_total_size_bytes_with_indexes <= 0 and source_total_size_bytes > 0:
             source_total_size_bytes_with_indexes = source_total_size_bytes
-
-        tested_table_indexes_sizes_percent_from_col_size: dict[str, float] = {}
-        for index_name, index_stats in tested_indexes_sizes.items():
-            col_stats = tested_columns_sizes.get(index_name)
-            if not col_stats:
-                continue
-            col_size = float(col_stats.get("size_compressed_bytes", 0.0) or 0.0)
-            index_size = float(index_stats.get("size_compressed_bytes", 0.0) or 0.0)
-            if col_size > 0:
-                tested_table_indexes_sizes_percent_from_col_size[index_name] = round(
-                    (index_size / col_size) * 100.0,
-                    2,
-                )
 
         source_insert_time_ms_percentiles = list(
             source_metrics.get("source_table_insert_time_ms_measurements_percentiles", []) or []
@@ -3566,11 +4077,39 @@ def run_variant_benchmark(
         )
         if not source_insert_ms_for_score:
             source_insert_ms_for_score = list(source_insert_time_ms_percentiles)
+        source_insert_rows_per_second_for_score = list(
+            source_metrics.get("source_table_insert_rows_per_second_measurements", []) or []
+        )
+        if not source_insert_rows_per_second_for_score:
+            source_insert_rows_per_second_for_score = list(
+                source_insert_bucket.get("rows_per_second_percentiles", []) or []
+            )
+        source_insert_bytes_per_second_for_score = list(
+            source_metrics.get("source_table_insert_bytes_per_second_measurements", []) or []
+        )
+        if not source_insert_bytes_per_second_for_score:
+            source_insert_bytes_per_second_for_score = list(
+                source_insert_bucket.get("bytes_per_second_percentiles", []) or []
+            )
         source_select_ms_for_score = list(
             source_metrics.get("source_table_select_time_ms_measurements", []) or []
         )
         if not source_select_ms_for_score:
             source_select_ms_for_score = list(source_select_time_ms_percentiles)
+        source_select_rows_per_second_for_score = list(
+            source_metrics.get("source_table_select_rows_per_second_measurements", []) or []
+        )
+        if not source_select_rows_per_second_for_score:
+            source_select_rows_per_second_for_score = list(
+                source_select_bucket.get("rows_per_second_percentiles", []) or []
+            )
+        source_select_bytes_per_second_for_score = list(
+            source_metrics.get("source_table_select_bytes_per_second_measurements", []) or []
+        )
+        if not source_select_bytes_per_second_for_score:
+            source_select_bytes_per_second_for_score = list(
+                source_select_bucket.get("bytes_per_second_percentiles", []) or []
+            )
         builtin_score, builtin_score_details = _compute_builtin_variant_score(
             source_insert_time_ms_measurements=source_insert_ms_for_score,
             tested_insert_time_ms_measurements=tested_insert_time_ms,
@@ -3584,8 +4123,28 @@ def run_variant_benchmark(
             tested_per_query=tested_select_per_query_metrics,
             speedup_per_query=tested_select_time_speedup_by_query,
         )
+        variant_context_medians = _build_score_context_medians(
+            source_insert_time_ms=source_insert_ms_for_score,
+            tested_insert_time_ms=tested_insert_time_ms,
+            source_select_time_ms=source_select_ms_for_score,
+            tested_select_time_ms=tested_select_time_ms,
+            source_insert_rows_per_second=source_insert_rows_per_second_for_score,
+            tested_insert_rows_per_second=tested_insert_rows_per_second,
+            source_select_rows_per_second=source_select_rows_per_second_for_score,
+            tested_select_rows_per_second=tested_select_rows_per_second,
+            source_insert_bytes_per_second=source_insert_bytes_per_second_for_score,
+            tested_insert_bytes_per_second=tested_insert_bytes_per_second,
+            source_select_bytes_per_second=source_select_bytes_per_second_for_score,
+            tested_select_bytes_per_second=tested_select_bytes_per_second,
+            insert_time_speedup=tested_insert_time_speedup,
+            select_time_speedup=tested_select_time_speedup,
+            source_per_query=source_select_per_query_metrics,
+            tested_per_query=tested_select_per_query_metrics,
+            speedup_per_query=tested_select_time_speedup_by_query,
+        )
         score, score_calculation_json = _resolve_score(
             scoring=payload.scoring,
+            stage_name=(payload.variant_mode or "").strip().lower() or None,
             builtin_score=builtin_score,
             builtin_score_details=builtin_score_details,
             expression_context={
@@ -3614,20 +4173,7 @@ def run_variant_benchmark(
                         "compression_ratio"
                     ),
                 },
-                "medians": {
-                    "source_insert_time_ms": builtin_score_details.get("inputs", {}).get(
-                        "source_insert_median_ms"
-                    ),
-                    "tested_insert_time_ms": builtin_score_details.get("inputs", {}).get(
-                        "tested_insert_median_ms"
-                    ),
-                    "source_select_time_ms": builtin_score_details.get("inputs", {}).get(
-                        "source_select_median_ms"
-                    ),
-                    "tested_select_time_ms": builtin_score_details.get("inputs", {}).get(
-                        "tested_select_median_ms"
-                    ),
-                },
+                "medians": variant_context_medians,
                 "source_size_bytes": source_total_size_bytes_with_indexes,
                 "tested_size_bytes": tested_total_size_bytes_with_indexes,
                 "source_insert_time_ms_percentiles": source_insert_bucket[
@@ -3698,14 +4244,6 @@ def run_variant_benchmark(
                 force_score_to_minus_one_reason = (
                     "tested_table_indexes_sizes пустой при variant_mode=indexes; "
                     "вариант принудительно помечен score=-1"
-                )
-            elif not tested_table_indexes_sizes_percent_from_col_size:
-                force_score_to_minus_one_status = (
-                    "forced_missing_tested_table_indexes_sizes_percent_from_col_size"
-                )
-                force_score_to_minus_one_reason = (
-                    "tested_table_indexes_sizes_percent_from_col_size пустой при "
-                    "variant_mode=indexes; вариант принудительно помечен score=-1"
                 )
 
         if force_score_to_minus_one_reason is not None:
@@ -3925,6 +4463,7 @@ def run_variant_benchmark(
             tested_table_consumed_compressed_size_bytes_with_indexes_readable=make_readable_bytes(
                 tested_total_size_bytes_with_indexes
             ),
+            tested_table_primary_index_size_json=tested_primary_index_size_json,
             source_table_consumed_compressed_size_bytes_overall=source_total_size_bytes,
             source_table_consumed_compressed_size_bytes_overall_readable=make_readable_bytes(
                 source_total_size_bytes
@@ -3951,13 +4490,6 @@ def run_variant_benchmark(
             # Legacy-совместимый формат хранения: человекочитаемый JSON с отступами.
             tested_table_indexes_sizes=json.dumps(
                 tested_indexes_sizes,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            ),
-            # Legacy-совместимый формат хранения: человекочитаемый JSON с отступами.
-            tested_table_indexes_sizes_percent_from_col_size=json.dumps(
-                tested_table_indexes_sizes_percent_from_col_size,
                 ensure_ascii=False,
                 indent=2,
                 sort_keys=True,
@@ -4007,8 +4539,9 @@ def _build_default_celery_app():
     """Создаёт default Celery app для worker-процесса."""
     try:
         from celery import Celery
+        from kombu import Queue
     except ImportError:
-        logger.warning("Celery не установлен: worker app не создан")
+        logger.warning("Celery/Kombu не установлен: worker app не создан")
         return None
 
     settings = get_clickhouse_celery_worker_settings()
@@ -4017,18 +4550,71 @@ def _build_default_celery_app():
         broker=settings.broker_url,
         backend=settings.backend_url,
     )
+    broker_transport_options: Dict[str, Any] = {}
+    broker_url_lower = settings.broker_url.lower()
+    if broker_url_lower.startswith("redis://") or broker_url_lower.startswith("rediss://"):
+        # Для Redis broker увеличиваем visibility timeout, чтобы long-running задачи
+        # не возвращались в очередь как "потерянные" до фактического завершения.
+        broker_transport_options["visibility_timeout"] = (
+            settings.celery_broker_visibility_timeout_sec
+        )
+    queue_name = settings.celery_queue_name
+    task_queues = (
+        Queue(
+            name=queue_name,
+            exchange=queue_name,
+            routing_key=queue_name,
+            durable=True,
+            auto_delete=False,
+        ),
+    )
     app.conf.update(
         worker_concurrency=settings.celery_worker_concurrency,
         # Важный guard: для ignore_result задач ошибки тоже не должны
         # накапливаться в backend (иначе снова растет потребление памяти).
         task_store_errors_even_if_ignored=False,
-        # Ограничиваем TTL результатов baseline-задач, которые всё же читаются launcher-ом.
-        result_expires=600,
+        # Сообщения задач должны быть persistent, чтобы не теряться при рестартах broker.
+        task_default_delivery_mode="persistent",
+        # Используем выделенную durable queue для benchmark-задач.
+        task_default_queue=queue_name,
+        task_default_exchange=queue_name,
+        task_default_exchange_type="direct",
+        task_default_routing_key=queue_name,
+        task_queues=task_queues,
+        task_routes={
+            SOURCE_BENCHMARK_TASK_NAME: {"queue": queue_name, "routing_key": queue_name},
+            VARIANT_BENCHMARK_TASK_NAME: {"queue": queue_name, "routing_key": queue_name},
+        },
+        # Явно отключаем queue-level TTL/expiry на стороне Celery, чтобы
+        # RabbitMQ не удалял задачи из очереди по сроку жизни.
+        task_queue_ttl=None,
+        task_queue_expires=None,
+        # Явно отключаем default task expiry (если не задано через env),
+        # чтобы long-running/долго ожидающие задачи не протухали.
+        task_default_expires=settings.celery_task_default_expires_sec,
+        # TTL результатов настраивается через env; по умолчанию не ограничен.
+        result_expires=settings.celery_result_expires_sec,
+        # Тайм-лимиты задач опциональны и по умолчанию отключены.
+        task_soft_time_limit=settings.celery_task_soft_time_limit_sec,
+        task_time_limit=settings.celery_task_time_limit_sec,
+        broker_transport_options=broker_transport_options,
     )
     logger.info(
-        "Celery app инициализирован (broker=%s, concurrency=%d)",
+        "Celery app инициализирован "
+        "(broker=%s, concurrency=%d, task_default_expires=%s, result_expires=%s, "
+        "task_soft_time_limit=%s, task_time_limit=%s, queue_ttl=%s, "
+        "queue_expires=%s, delivery_mode=%s, queue_name=%s, visibility_timeout=%s)",
         settings.broker_url,
         settings.celery_worker_concurrency,
+        settings.celery_task_default_expires_sec,
+        settings.celery_result_expires_sec,
+        settings.celery_task_soft_time_limit_sec,
+        settings.celery_task_time_limit_sec,
+        app.conf.task_queue_ttl,
+        app.conf.task_queue_expires,
+        app.conf.task_default_delivery_mode,
+        queue_name,
+        broker_transport_options.get("visibility_timeout"),
     )
     return app
 

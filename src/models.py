@@ -126,10 +126,7 @@ class IndexConfig(_Base):
     )
     table_index_granularity_values: Optional[List[int]] = Field(
         default=None,
-        validation_alias=AliasChoices(
-            "index_granularity_values",
-            "table_index_granularity_values",
-        ),
+        validation_alias=AliasChoices("index_granularity_values"),
         serialization_alias="index_granularity_values",
     )
 
@@ -426,7 +423,7 @@ class TestQueryConfig(_Base):
 
     query_id: Optional[str] = Field(
         default=None,
-        validation_alias=AliasChoices("query_id", "id"),
+        validation_alias=AliasChoices("query_id"),
         serialization_alias="query_id",
     )
     query: str
@@ -498,6 +495,35 @@ class QueriesConfig(_Base):
         return self
 
 
+def _normalize_scoring_expression(
+    value: Optional[str],
+    *,
+    field_path: str,
+) -> Optional[str]:
+    """Нормализует и валидирует текст scoring expression."""
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError(f"{field_path} не должен быть пустым")
+    if len(cleaned) > 4000:
+        raise ValueError(f"{field_path} слишком длинный (максимум 4000 символов)")
+    return cleaned
+
+
+def _validate_scoring_mode_and_expression(
+    *,
+    mode: ScoringMode,
+    expression: Optional[str],
+    field_path: str,
+) -> None:
+    """Проверяет согласованность пары scoring.mode/scoring.expression."""
+    if mode == "expression" and expression is None:
+        raise ValueError(f"{field_path}.mode=expression требует непустой {field_path}.expression")
+    if mode == "builtin" and expression is not None:
+        raise ValueError(f"{field_path}.expression нельзя задавать при {field_path}.mode=builtin")
+
+
 class ScoringConfig(_Base):
     """
     Конфигурация вычисления итогового `score`.
@@ -510,7 +536,68 @@ class ScoringConfig(_Base):
     mode: ScoringMode = "builtin"
     expression: Optional[str] = Field(
         default=None,
-        validation_alias=AliasChoices("expression", "score_expression", "sql_expression"),
+        validation_alias=AliasChoices("expression"),
+        serialization_alias="expression",
+    )
+    on_error_score: Optional[float] = None
+    by_stage: Optional[Dict[str, "StageScoringConfig"]] = Field(
+        default=None,
+        validation_alias=AliasChoices("by_stage"),
+        serialization_alias="by_stage",
+    )
+
+    @field_validator("expression")
+    @classmethod
+    def normalize_expression(cls, value: Optional[str]) -> Optional[str]:
+        """Нормализует и валидирует строку expression."""
+        return _normalize_scoring_expression(value, field_path="scoring.expression")
+
+    @field_validator("by_stage")
+    @classmethod
+    def normalize_by_stage(
+        cls,
+        value: Optional[Dict[str, "StageScoringConfig"]],
+    ) -> Optional[Dict[str, "StageScoringConfig"]]:
+        """Нормализует словарь stage-specific scoring overrides."""
+        if value is None:
+            return None
+        normalized: dict[str, StageScoringConfig] = {}
+        for raw_stage_name, stage_scoring in value.items():
+            stage_name = raw_stage_name.strip().lower()
+            if not stage_name:
+                raise ValueError("scoring.by_stage содержит пустое имя стадии")
+            normalized[stage_name] = stage_scoring
+        if not normalized:
+            raise ValueError("scoring.by_stage не должен быть пустым")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_mode_fields(self) -> "ScoringConfig":
+        """Проверяет согласованность `mode` и полей expression."""
+        _validate_scoring_mode_and_expression(
+            mode=self.mode,
+            expression=self.expression,
+            field_path="scoring",
+        )
+        return self
+
+    def stage_override(self, stage_name: Optional[str]) -> Optional["StageScoringConfig"]:
+        """Возвращает override scoring для стадии (если задан)."""
+        if stage_name is None or self.by_stage is None:
+            return None
+        normalized_stage_name = stage_name.strip().lower()
+        if not normalized_stage_name:
+            return None
+        return self.by_stage.get(normalized_stage_name)
+
+
+class StageScoringConfig(_Base):
+    """Stage-specific override формулы score."""
+
+    mode: ScoringMode = "builtin"
+    expression: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("expression"),
         serialization_alias="expression",
     )
     on_error_score: Optional[float] = None
@@ -518,25 +605,20 @@ class ScoringConfig(_Base):
     @field_validator("expression")
     @classmethod
     def normalize_expression(cls, value: Optional[str]) -> Optional[str]:
-        """Нормализует и валидирует строку expression."""
-        if value is None:
-            return None
-        cleaned = value.strip()
-        if not cleaned:
-            raise ValueError("scoring.expression не должен быть пустым")
-        if len(cleaned) > 4000:
-            raise ValueError("scoring.expression слишком длинный (максимум 4000 символов)")
-        return cleaned
+        """Нормализует и валидирует строку stage expression."""
+        return _normalize_scoring_expression(
+            value,
+            field_path="scoring.by_stage.*.expression",
+        )
 
     @model_validator(mode="after")
-    def validate_mode_fields(self) -> "ScoringConfig":
+    def validate_mode_fields(self) -> "StageScoringConfig":
         """Проверяет согласованность `mode` и полей expression."""
-        if self.mode == "expression" and self.expression is None:
-            raise ValueError("scoring.mode=expression требует непустой scoring.expression")
-        if self.mode == "builtin" and self.expression is not None:
-            raise ValueError(
-                "scoring.expression нельзя задавать при scoring.mode=builtin"
-            )
+        _validate_scoring_mode_and_expression(
+            mode=self.mode,
+            expression=self.expression,
+            field_path="scoring.by_stage.*",
+        )
         return self
 
 
@@ -617,17 +699,16 @@ class TableRuleConfig(_Base):
     Может переопределять:
       - rules;
       - column_order_mode;
-      - insert_operations_count (legacy: max_iterations);
-      - sequential_types_top_n_for_indexes (legacy: sequential_top_n);
+      - insert_operations_count;
+      - sequential_types_top_n_for_indexes;
       - sequential_top_n_limits (top-N лимиты победителей по фазам).
       - max_winners_per_parent_limits (лимиты числа победителей на одного parent
         по фазам для `sequential_phased_topn_strategy`).
-      - insert_rows_per_operation_limit (legacy: insert_rows_limit);
-      - source_insert_rows_per_operation_limit (legacy: source_insert_rows_limit);
+      - insert_rows_per_operation_limit;
+      - source_insert_rows_per_operation_limit;
       - source_insert_rows_per_operation_limits;
-      - insert_rows_per_operation_limits (legacy: insert_rows_limits);
+      - insert_rows_per_operation_limits;
       - max_benchmarks_limits;
-      - max_type_benchmarks/max_index_benchmarks (legacy compatibility);
       - index_granularity_values (перебор `SETTINGS index_granularity`);
       - test_database;
       - strategy;
@@ -643,19 +724,16 @@ class TableRuleConfig(_Base):
     column_order_mode: Optional[ColumnOrderMode] = None
     queries: Optional[QueriesConfig] = None
     scoring: Optional[ScoringConfig] = None
-    max_iterations: Optional[int] = Field(
+    insert_operations_count: Optional[int] = Field(
         default=None,
         gt=0,
-        validation_alias=AliasChoices("insert_operations_count", "max_iterations"),
+        validation_alias=AliasChoices("insert_operations_count"),
         serialization_alias="insert_operations_count",
     )
     sequential_top_n: Optional[int] = Field(
         default=None,
         gt=0,
-        validation_alias=AliasChoices(
-            "sequential_types_top_n_for_indexes",
-            "sequential_top_n",
-        ),
+        validation_alias=AliasChoices("sequential_types_top_n_for_indexes"),
         serialization_alias="sequential_types_top_n_for_indexes",
     )
     sequential_top_n_limits: Optional[InsertRowsLimitsConfig] = Field(
@@ -671,46 +749,29 @@ class TableRuleConfig(_Base):
     insert_rows_limit: Optional[int] = Field(
         default=None,
         gt=0,
-        validation_alias=AliasChoices(
-            "insert_rows_per_operation_limit",
-            "insert_rows_limit",
-        ),
+        validation_alias=AliasChoices("insert_rows_per_operation_limit"),
         serialization_alias="insert_rows_per_operation_limit",
     )
     source_insert_rows_limit: Optional[int] = Field(
         default=None,
         gt=0,
-        validation_alias=AliasChoices(
-            "source_insert_rows_per_operation_limit",
-            "source_insert_rows_limit",
-        ),
+        validation_alias=AliasChoices("source_insert_rows_per_operation_limit"),
         serialization_alias="source_insert_rows_per_operation_limit",
     )
     source_insert_rows_limits: Optional[InsertRowsLimitsConfig] = Field(
         default=None,
-        validation_alias=AliasChoices(
-            "source_insert_rows_per_operation_limits",
-            "source_insert_rows_limits",
-        ),
+        validation_alias=AliasChoices("source_insert_rows_per_operation_limits"),
         serialization_alias="source_insert_rows_per_operation_limits",
     )
     insert_rows_limits: Optional[InsertRowsLimitsConfig] = Field(
         default=None,
-        validation_alias=AliasChoices(
-            "insert_rows_per_operation_limits",
-            "insert_rows_limits",
-        ),
+        validation_alias=AliasChoices("insert_rows_per_operation_limits"),
         serialization_alias="insert_rows_per_operation_limits",
     )
     max_benchmarks_limits: Optional[InsertRowsLimitsConfig] = None
-    max_type_benchmarks: Optional[int] = Field(default=None, gt=0)
-    max_index_benchmarks: Optional[int] = Field(default=None, gt=0)
     index_granularity_values: Optional[List[int]] = Field(
         default=None,
-        validation_alias=AliasChoices(
-            "index_granularity_values",
-            "table_index_granularity_values",
-        ),
+        validation_alias=AliasChoices("index_granularity_values"),
         serialization_alias="index_granularity_values",
     )
     strategy: Optional[BenchmarkStrategy] = None
@@ -815,21 +876,20 @@ class BenchmarkConfig(_Base):
       - режим вычисления `column_order` (опционально);
       - режим вычисления `score` (встроенный или expression);
       - ограничение по числу insert-замеров и режим комбинатора.
-      - `sequential_types_top_n_for_indexes` (legacy: `sequential_top_n`) для двухфазного режима sequential.
+      - `sequential_types_top_n_for_indexes` для двухфазного режима sequential.
       - `sequential_top_n_limits` — top-N лимиты победителей по фазам
         (`order_by`, `types`, `codecs`, `indexes`, `final_validation`).
       - `max_winners_per_parent_limits` — лимиты числа победителей на одного
         parent-варианта по фазам (`types`, `codecs`, `indexes`).
-      - `insert_rows_per_operation_limit` (legacy: `insert_rows_limit`) — сколько строк
+      - `insert_rows_per_operation_limit` — сколько строк
         копировать за один insert-замер из source-таблицы в variant.
-      - `source_insert_rows_per_operation_limit` (legacy: `source_insert_rows_limit`) —
+      - `source_insert_rows_per_operation_limit` —
         сколько строк копировать за один insert-замер в baseline-копию
         исходной таблицы (source benchmark) перед запуском вариантов.
       - `source_insert_rows_per_operation_limits` — лимиты baseline-вставки по mode.
-      - `insert_rows_per_operation_limits` (legacy: `insert_rows_limits`) —
+      - `insert_rows_per_operation_limits` —
         лимиты копирования за один insert-замер по конкретным mode.
       - `max_benchmarks_limits` — лимиты числа variant jobs по mode.
-      - `max_type_benchmarks`/`max_index_benchmarks` — legacy-совместимость.
       - `index_granularity_values` — перебор `SETTINGS index_granularity`
         (декартово произведение с индексными вариантами).
       - `test_database` — БД для создания variant-таблиц (по умолчанию source БД).
@@ -848,19 +908,16 @@ class BenchmarkConfig(_Base):
     tables: TablesSelector = "*"
     test_database: Optional[str] = None
 
-    max_iterations: int = Field(
+    insert_operations_count: int = Field(
         default=100,
         gt=0,
-        validation_alias=AliasChoices("insert_operations_count", "max_iterations"),
+        validation_alias=AliasChoices("insert_operations_count"),
         serialization_alias="insert_operations_count",
     )
     sequential_top_n: int = Field(
         default=1,
         gt=0,
-        validation_alias=AliasChoices(
-            "sequential_types_top_n_for_indexes",
-            "sequential_top_n",
-        ),
+        validation_alias=AliasChoices("sequential_types_top_n_for_indexes"),
         serialization_alias="sequential_types_top_n_for_indexes",
     )
     sequential_top_n_limits: Optional[InsertRowsLimitsConfig] = Field(
@@ -876,46 +933,29 @@ class BenchmarkConfig(_Base):
     insert_rows_limit: Optional[int] = Field(
         default=None,
         gt=0,
-        validation_alias=AliasChoices(
-            "insert_rows_per_operation_limit",
-            "insert_rows_limit",
-        ),
+        validation_alias=AliasChoices("insert_rows_per_operation_limit"),
         serialization_alias="insert_rows_per_operation_limit",
     )
     source_insert_rows_limit: Optional[int] = Field(
         default=None,
         gt=0,
-        validation_alias=AliasChoices(
-            "source_insert_rows_per_operation_limit",
-            "source_insert_rows_limit",
-        ),
+        validation_alias=AliasChoices("source_insert_rows_per_operation_limit"),
         serialization_alias="source_insert_rows_per_operation_limit",
     )
     source_insert_rows_limits: Optional[InsertRowsLimitsConfig] = Field(
         default=None,
-        validation_alias=AliasChoices(
-            "source_insert_rows_per_operation_limits",
-            "source_insert_rows_limits",
-        ),
+        validation_alias=AliasChoices("source_insert_rows_per_operation_limits"),
         serialization_alias="source_insert_rows_per_operation_limits",
     )
     insert_rows_limits: Optional[InsertRowsLimitsConfig] = Field(
         default=None,
-        validation_alias=AliasChoices(
-            "insert_rows_per_operation_limits",
-            "insert_rows_limits",
-        ),
+        validation_alias=AliasChoices("insert_rows_per_operation_limits"),
         serialization_alias="insert_rows_per_operation_limits",
     )
     max_benchmarks_limits: Optional[InsertRowsLimitsConfig] = None
-    max_type_benchmarks: Optional[int] = Field(default=None, gt=0)
-    max_index_benchmarks: Optional[int] = Field(default=None, gt=0)
     index_granularity_values: Optional[List[int]] = Field(
         default=None,
-        validation_alias=AliasChoices(
-            "index_granularity_values",
-            "table_index_granularity_values",
-        ),
+        validation_alias=AliasChoices("index_granularity_values"),
         serialization_alias="index_granularity_values",
     )
     column_rules_mode: Optional[RuleSourceMode] = None

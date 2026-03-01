@@ -50,6 +50,31 @@ class ClickHouseCeleryWorkerSettings(BaseSettings):
         default="rpc://guest:guest@localhost:5672//",
         validation_alias="BENCH_CELERY_BACKEND_URL",
     )
+    celery_queue_name: str = Field(
+        default="bench.benchmark",
+        validation_alias="BENCH_CELERY_QUEUE_NAME",
+    )
+    celery_task_default_expires_sec: float | None = Field(
+        default=None,
+        validation_alias="BENCH_CELERY_TASK_DEFAULT_EXPIRES_SEC",
+    )
+    celery_result_expires_sec: float | None = Field(
+        default=None,
+        validation_alias="BENCH_CELERY_RESULT_EXPIRES_SEC",
+    )
+    celery_task_soft_time_limit_sec: float | None = Field(
+        default=None,
+        validation_alias="BENCH_CELERY_TASK_SOFT_TIME_LIMIT_SEC",
+    )
+    celery_task_time_limit_sec: float | None = Field(
+        default=None,
+        validation_alias="BENCH_CELERY_TASK_TIME_LIMIT_SEC",
+    )
+    celery_broker_visibility_timeout_sec: int = Field(
+        default=86_400,
+        validation_alias="BENCH_CELERY_BROKER_VISIBILITY_TIMEOUT_SEC",
+        gt=0,
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -75,6 +100,42 @@ class ClickHouseCeleryWorkerSettings(BaseSettings):
         if not cleaned:
             raise ValueError("BENCH_CELERY_BACKEND_URL не должен быть пустым")
         return cleaned
+
+    @field_validator("celery_queue_name", mode="before")
+    @classmethod
+    def validate_celery_queue_name(cls, value: object) -> str:
+        """Проверяет, что имя очереди не пустое."""
+        cleaned = str(value).strip()
+        if not cleaned:
+            raise ValueError("BENCH_CELERY_QUEUE_NAME не должен быть пустым")
+        return cleaned
+
+    @field_validator(
+        "celery_task_default_expires_sec",
+        "celery_result_expires_sec",
+        "celery_task_soft_time_limit_sec",
+        "celery_task_time_limit_sec",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_positive_seconds(cls, value: object) -> float | None:
+        """
+        Нормализует optional timeout/TTL.
+
+        Пустые/нулевые/отрицательные значения трактуются как `None` (без ограничения).
+        """
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = float(text)
+        except Exception as exc:
+            raise ValueError("Ожидалось число секунд или пустое значение") from exc
+        if parsed <= 0:
+            return None
+        return parsed
 
     @property
     def broker_url(self) -> str:

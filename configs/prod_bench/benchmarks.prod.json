@@ -39,7 +39,33 @@
       "scoring": {
         "mode": "expression",
         "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)",
-        "on_error_score": -1.0
+        "on_error_score": -1.0,
+        "by_stage": {
+          "source_baseline": {
+            "mode": "expression",
+            "expression": "1.0"
+          },
+          "order_by": {
+            "mode": "expression",
+            "expression": "pow(safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0), 0.9) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.1)"
+          },
+          "types": {
+            "mode": "expression",
+            "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0), 0.2) * pow(safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0), 0.6) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.2)"
+          },
+          "codecs": {
+            "mode": "expression",
+            "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0), 0.1) * pow(safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0), 0.4) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.5)"
+          },
+          "indexes": {
+            "mode": "expression",
+            "expression": "pow(safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0), 0.95) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.05)"
+          },
+          "final_validation": {
+            "mode": "expression",
+            "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)"
+          }
+        }
       },
       "max_benchmarks_limits": {
         "order_by": 6,

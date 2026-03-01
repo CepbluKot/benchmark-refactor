@@ -81,6 +81,30 @@ class ClickHouseCeleryScoringExpressionTests(unittest.TestCase):
         score = evaluate_score_expression("median(values, -1)", {"values": [float("nan"), None]})
         self.assertEqual(score, -1.0)
 
+    def test_expression_supports_min_function_for_array(self) -> None:
+        score = evaluate_score_expression("min(values)", {"values": [10.0, 3.0, 7.0]})
+        self.assertEqual(score, 3.0)
+
+    def test_expression_supports_max_function_for_array(self) -> None:
+        score = evaluate_score_expression("max(values)", {"values": [10.0, 3.0, 7.0]})
+        self.assertEqual(score, 10.0)
+
+    def test_expression_supports_min_function_for_variadic_values(self) -> None:
+        score = evaluate_score_expression("min(10, 3, 7)", {})
+        self.assertEqual(score, 3.0)
+
+    def test_expression_supports_max_function_for_variadic_values(self) -> None:
+        score = evaluate_score_expression("max(10, 3, 7)", {})
+        self.assertEqual(score, 10.0)
+
+    def test_expression_min_supports_array_fallback(self) -> None:
+        score = evaluate_score_expression("min(values, -1)", {"values": [float("nan"), None]})
+        self.assertEqual(score, -1.0)
+
+    def test_expression_max_supports_array_fallback(self) -> None:
+        score = evaluate_score_expression("max(values, -1)", {"values": [float("nan"), None]})
+        self.assertEqual(score, -1.0)
+
     def test_static_validation_accepts_supported_expression(self) -> None:
         issues = validate_score_expression(
             "safe_div(pct(tested_select_time_ms_by_percentile, 95), 2)",
@@ -89,6 +113,10 @@ class ClickHouseCeleryScoringExpressionTests(unittest.TestCase):
 
     def test_static_validation_accepts_median_expression(self) -> None:
         issues = validate_score_expression("median(tested.select.time_ms_percentiles)")
+        self.assertEqual(issues, [])
+
+    def test_static_validation_accepts_min_max_expression(self) -> None:
+        issues = validate_score_expression("max(tested.select.time_ms_percentiles[0], min(1, 2))")
         self.assertEqual(issues, [])
 
     def test_static_validation_accepts_per_query_expression(self) -> None:

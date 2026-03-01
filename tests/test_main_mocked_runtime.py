@@ -76,7 +76,7 @@ class _FakeSettings:
                     "strategy": "types_strategy",
                     "databases": ["analytics"],
                     "tables": ["events"],
-                    "max_iterations": 1,
+                    "insert_operations_count": 1,
                     "global_rules": {
                         "column_rules": [
                             {"by_type": "UInt64", "types": ["UInt64", "UInt32"]}

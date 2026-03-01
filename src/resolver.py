@@ -99,7 +99,7 @@ def _expand_index_granularity_configs(
                 IndexConfig(
                     type=value.type,
                     granularity=granularity,
-                    table_index_granularity_values=value.table_index_granularity_values,
+                    index_granularity_values=value.table_index_granularity_values,
                 )
             )
     return _deduplicate_index_configs_preserve_order(expanded)

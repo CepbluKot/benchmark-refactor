@@ -68,6 +68,7 @@ class _FakeRuntimeClient:
         column_sizes_map: Optional[Dict[tuple[str, str], Dict[str, Dict[str, Any]]]] = None,
         index_sizes_map: Optional[Dict[tuple[str, str], Dict[str, Dict[str, Any]]]] = None,
         total_size_map: Optional[Dict[tuple[str, str], float]] = None,
+        primary_key_bytes_map: Optional[Dict[tuple[str, str], float]] = None,
         raise_on_execute_query: Optional[str] = None,
         retry_policy: tuple[int, float, float] = (0, 0.0, 0.0),
     ) -> None:
@@ -76,6 +77,7 @@ class _FakeRuntimeClient:
         self.column_sizes_map = dict(column_sizes_map or {})
         self.index_sizes_map = dict(index_sizes_map or {})
         self.total_size_map = dict(total_size_map or {})
+        self.primary_key_bytes_map = dict(primary_key_bytes_map or {})
         self.raise_on_execute_query = raise_on_execute_query
         self.retry_policy = retry_policy
 
@@ -141,27 +143,55 @@ class _FakeRuntimeClient:
         return 0
 
     def get_column_sizes(self, database: str, table: str) -> Dict[str, Dict[str, Any]]:
-        return dict(self.column_sizes_map.get((database, table), {}))
+        exact = self.column_sizes_map.get((database, table))
+        if exact is not None:
+            return dict(exact)
+
+        if "__source_baseline__" in table:
+            source_table = table.split("__source_baseline__", 1)[0]
+            for (_db, tbl), value in self.column_sizes_map.items():
+                if tbl == source_table:
+                    return dict(value)
+        return {}
 
     def get_index_sizes(self, database: str, table: str) -> Dict[str, Dict[str, Any]]:
-        return dict(self.index_sizes_map.get((database, table), {}))
+        exact = self.index_sizes_map.get((database, table))
+        if exact is not None:
+            return dict(exact)
+
+        if "__source_baseline__" in table:
+            source_table = table.split("__source_baseline__", 1)[0]
+            for (_db, tbl), value in self.index_sizes_map.items():
+                if tbl == source_table:
+                    return dict(value)
+        return {}
 
     def get_total_compressed_size_bytes(self, database: str, table: str) -> float:
-        return float(self.total_size_map.get((database, table), 0.0))
+        exact = self.total_size_map.get((database, table))
+        if exact is not None:
+            return float(exact)
+
+        if "__source_baseline__" in table:
+            source_table = table.split("__source_baseline__", 1)[0]
+            for (_db, tbl), value in self.total_size_map.items():
+                if tbl == source_table:
+                    return float(value)
+        return 0.0
 
     def get_table_parts_size_metrics(self, database: str, table: str) -> Dict[str, float]:
-        total_size = float(self.total_size_map.get((database, table), 0.0) or 0.0)
-        index_sizes = self.index_sizes_map.get((database, table), {})
+        total_size = float(self.get_total_compressed_size_bytes(database, table) or 0.0)
+        index_sizes = self.get_index_sizes(database, table)
         secondary_indexes_size = float(
             sum(float(stats.get("size_compressed_bytes", 0.0) or 0.0) for stats in index_sizes.values())
         )
+        primary_key_size = float(self.primary_key_bytes_map.get((database, table), 0.0) or 0.0)
         return {
-            "rows": float(self.count_rows_map.get((database, table), 0) or 0.0),
+            "rows": float(self.count_rows(database, table) or 0.0),
             "data_compressed_bytes": total_size,
             "data_uncompressed_bytes": total_size,
             "bytes_on_disk": total_size + secondary_indexes_size,
             "parts_count": 1.0 if (total_size > 0 or secondary_indexes_size > 0) else 0.0,
-            "primary_key_bytes_in_memory": 0.0,
+            "primary_key_bytes_in_memory": primary_key_size,
             "secondary_indices_compressed_bytes": secondary_indexes_size,
         }
 
@@ -263,7 +293,7 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             "variant_mode": "types",
             "variant_params": {},
             "variant_ddl": VALID_VARIANT_DDL,
-            "max_iterations": 1,
+            "insert_operations_count": 1,
             "insert_rows_limit": 1000,
             "query_plan": {
                 "test_queries": ["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
@@ -339,7 +369,7 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
                     }
                 ],
             ),
-            max_iterations=2,
+            insert_operations_count=2,
             measured_percentiles=[50, 100],
         )
 
@@ -364,7 +394,15 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
         self.assertEqual(len(per_query_metrics), 1)
         self.assertIn("SELECT count()", per_query_metrics[0]["query"])
         self.assertEqual(per_query_metrics[0]["elapsed_ms_percentiles"], [150.0, 200.0])
-        self.assertEqual(result.metrics["total_n_rows_in_source_table"], 321)
+        self.assertEqual(
+            per_query_metrics[0]["bytes_per_second_measurements_readable"],
+            [make_readable_bytes(100_000.0), make_readable_bytes(50_000.0)],
+        )
+        self.assertEqual(
+            per_query_metrics[0]["bytes_per_second_percentiles_readable"],
+            [make_readable_bytes(75_000.0), make_readable_bytes(100_000.0)],
+        )
+        self.assertEqual(result.metrics["total_n_rows_in_source_table"], 642)
         self.assertEqual(
             result.metrics["tested_table_consumed_compressed_size_bytes_with_indexes"],
             1024.0,
@@ -426,7 +464,7 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             query_plan=QueryPlanPayload(
                 test_queries=["SELECT count() FROM `analytics`.`events`"],
             ),
-            max_iterations=1,
+            insert_operations_count=1,
             measured_percentiles=[100],
         )
 
@@ -490,7 +528,7 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
                     },
                 ],
             ),
-            max_iterations=1,
+            insert_operations_count=1,
             measured_percentiles=[100],
         )
 
@@ -540,7 +578,7 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             query_plan=QueryPlanPayload(
                 test_queries=["SELECT count() FROM `analytics`.`events`"],
             ),
-            max_iterations=1,
+            insert_operations_count=1,
             scoring={
                 "mode": "expression",
                 "expression": "safe_div(source_select_time_ms_by_percentile[100], tested_select_time_ms_by_percentile[100])",
@@ -599,7 +637,7 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             query_plan=QueryPlanPayload(
                 test_queries=["SELECT count() FROM `analytics`.`events`"],
             ),
-            max_iterations=1,
+            insert_operations_count=1,
             scoring={
                 "mode": "expression",
                 "expression": (
@@ -670,7 +708,7 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             query_plan=QueryPlanPayload(
                 test_queries=["SELECT count() FROM `analytics`.`events`"],
             ),
-            max_iterations=1,
+            insert_operations_count=1,
             measured_percentiles=[50, 100],
         )
 
@@ -696,6 +734,19 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
         self.assertEqual(stored_result.score, result.score)
         self.assertEqual(stored_result.total_n_rows_in_source_table, 321)
         self.assertEqual(stored_result.total_n_rows_in_tested_table, 321)
+        self.assertEqual(
+            stored_result.tested_table_insert_time_ms_measurements_percentiles_speed_up_coefs,
+            [],
+        )
+        self.assertEqual(
+            stored_result.tested_table_select_time_ms_measurements_percentiles_speed_up_coefs,
+            [],
+        )
+        self.assertIsNone(
+            stored_result.tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json
+        )
+        self.assertIsNone(stored_result.tested_table_compression_overall_coef)
+        self.assertIsNone(stored_result.tested_table_compression_by_each_column_coef)
         baseline_tested_cols_sizes = json.loads(
             stored_result.tested_table_consumed_compressed_size_bytes_by_each_column or "{}"
         )
@@ -764,7 +815,7 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             query_plan=QueryPlanPayload(
                 test_queries=["SELECT count() FROM `analytics`.`events`"],
             ),
-            max_iterations=1,
+            insert_operations_count=1,
             insert_rows_limit=100,
             measured_percentiles=[100],
         )
@@ -784,7 +835,7 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
         self.assertEqual(len(fake_store.store_calls), 1)
         stored_result = fake_store.store_calls[0]["result"]
         self.assertEqual(stored_result.insert_test_n_rows, 100)
-        self.assertEqual(stored_result.total_n_rows_in_source_table, 321)
+        self.assertEqual(stored_result.total_n_rows_in_source_table, 100)
         self.assertEqual(stored_result.total_n_rows_in_tested_table, 100)
 
     def test_run_variant_benchmark_calculates_metrics_score_and_stores_result(self) -> None:
@@ -849,6 +900,7 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
                 }
             },
             total_size_map={("bench_tmp", "events__bench__bench_var__0001"): 2000.0},
+            primary_key_bytes_map={("bench_tmp", "events__bench__bench_var__0001"): 205.0},
         )
         fake_store = _FakeResultStore()
 
@@ -919,7 +971,7 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
                 }
             },
             variant_ddl=VALID_VARIANT_DDL,
-            max_iterations=2,
+            insert_operations_count=2,
             insert_rows_limit=1000,
             query_plan=QueryPlanPayload(
                 test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
@@ -963,6 +1015,34 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
         self.assertEqual(len(source_select_per_query), 1)
         self.assertEqual(len(select_speedup_by_query), 1)
         self.assertEqual(
+            tested_select_per_query[0]["bytes_per_second_measurements_readable"],
+            [
+                make_readable_bytes(value)
+                for value in tested_select_per_query[0]["bytes_per_second_measurements"]
+            ],
+        )
+        self.assertEqual(
+            tested_select_per_query[0]["bytes_per_second_percentiles_readable"],
+            [
+                make_readable_bytes(value)
+                for value in tested_select_per_query[0]["bytes_per_second_percentiles"]
+            ],
+        )
+        self.assertEqual(
+            source_select_per_query[0]["bytes_per_second_measurements_readable"],
+            [
+                make_readable_bytes(value)
+                for value in source_select_per_query[0]["bytes_per_second_measurements"]
+            ],
+        )
+        self.assertEqual(
+            source_select_per_query[0]["bytes_per_second_percentiles_readable"],
+            [
+                make_readable_bytes(value)
+                for value in source_select_per_query[0]["bytes_per_second_percentiles"]
+            ],
+        )
+        self.assertEqual(
             select_speedup_by_query[0]["elapsed_ms_percentiles_speed_up_coefs"],
             [2.0, 2.0],
         )
@@ -986,12 +1066,14 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             result.tested_table_consumed_compressed_size_bytes_with_indexes_readable,
             make_readable_bytes(2050.0),
         )
+        primary_index_json = json.loads(result.tested_table_primary_index_size_json or "{}")
+        self.assertEqual(primary_index_json.get("size_bytes"), 205.0)
+        self.assertEqual(
+            primary_index_json.get("size_bytes_readable"),
+            make_readable_bytes(205.0),
+        )
+        self.assertEqual(primary_index_json.get("size_percent_from_total_size"), 10.0)
 
-        parsed_index_pct = json.loads(result.tested_table_indexes_sizes_percent_from_col_size or "{}")
-        self.assertEqual(parsed_index_pct.get("user_id"), 25.0)
-        # Legacy-совместимость: поле хранится как pretty JSON (indent=2).
-        self.assertIn("\n", result.tested_table_indexes_sizes_percent_from_col_size or "")
-        self.assertIn('"user_id": 25.0', result.tested_table_indexes_sizes_percent_from_col_size or "")
         parsed_indexes_sizes = json.loads(result.tested_table_indexes_sizes or "{}")
         self.assertEqual(parsed_indexes_sizes.get("user_id", {}).get("size_compressed_bytes"), 50)
         # Legacy-совместимость: tested_table_indexes_sizes тоже хранится как pretty JSON (indent=2).
@@ -1096,7 +1178,7 @@ CREATE TABLE bench_tmp.messages__bench__bench_var__0001
 ENGINE = MergeTree
 ORDER BY msg
 """,
-            max_iterations=1,
+            insert_operations_count=1,
             insert_rows_limit=1000,
             query_plan=QueryPlanPayload(
                 test_queries=["SELECT count() FROM `bench_tmp`.`messages__bench__bench_var__0001`"],
@@ -1205,7 +1287,7 @@ CREATE TABLE bench_tmp.messages__bench__bench_var__0002
 ENGINE = MergeTree
 ORDER BY msg
 """,
-            max_iterations=1,
+            insert_operations_count=1,
             insert_rows_limit=1000,
             query_plan=QueryPlanPayload(
                 test_queries=["SELECT count() FROM `bench_tmp`.`messages__bench__bench_var__0002`"],
@@ -1248,6 +1330,116 @@ ORDER BY msg
             result.tested_table_consumed_compressed_size_bytes_with_indexes_readable,
             make_readable_bytes(200.0),
         )
+
+    def test_run_variant_benchmark_aggregates_index_percent_by_column(self) -> None:
+        fake_client = _FakeRuntimeClient(
+            query_metrics_sequence=[
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 10_000.0,
+                },
+                {
+                    "elapsed_ns": 50_000_000.0,
+                    "read_rows": 500.0,
+                    "read_bytes": 5_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+            ],
+            count_rows_map={("bench_tmp", "events__bench__bench_var__idx_agg"): 1000},
+            column_sizes_map={
+                ("bench_tmp", "events__bench__bench_var__idx_agg"): {
+                    "country": {
+                        "name": "country",
+                        "datatype": "String",
+                        "size_compressed_bytes": 100,
+                        "size_compressed_bytes_readable": "100 B",
+                    }
+                }
+            },
+            index_sizes_map={
+                ("bench_tmp", "events__bench__bench_var__idx_agg"): {
+                    "idx_country_set": {
+                        "column": "country",
+                        "expr": "country",
+                        "size_compressed_bytes": 10,
+                        "size_compressed_bytes_readable": "10 B",
+                    },
+                    "idx_country_tokenbf": {
+                        "column": "country",
+                        "expr": "country",
+                        "size_compressed_bytes": 15,
+                        "size_compressed_bytes_readable": "15 B",
+                    },
+                }
+            },
+            total_size_map={("bench_tmp", "events__bench__bench_var__idx_agg"): 100.0},
+        )
+        fake_store = _FakeResultStore()
+
+        payload = VariantBenchmarkTaskPayload(
+            connection=self._connection_payload(),
+            result_connection=self._connection_payload(),
+            result_database="benchmark_results",
+            result_table="combined_benchmark_results",
+            benchmark_run_id=2,
+            benchmark_started_at=datetime(2026, 2, 24, 13, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_var_idx_agg",
+            source_database="analytics",
+            source_table="events",
+            variant_database="bench_tmp",
+            variant_table="events__bench__bench_var__idx_agg",
+            variant_mode="indexes",
+            variant_params={},
+            variant_ddl="""
+CREATE TABLE bench_tmp.events__bench__bench_var__idx_agg
+(
+    `country` String
+)
+ENGINE = MergeTree
+ORDER BY country
+""",
+            insert_operations_count=1,
+            insert_rows_limit=1000,
+            query_plan=QueryPlanPayload(
+                test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__idx_agg`"],
+            ),
+            source_benchmark={
+                "source_table_ddl": VALID_SOURCE_DDL,
+                "metrics": {
+                    "total_n_rows_in_source_table": 1000,
+                    "source_table_insert_time_ms_measurements_percentiles": [100.0],
+                    "source_table_select_time_ms_measurements_percentiles": [100.0],
+                    "source_table_consumed_compressed_size_bytes_overall": 200.0,
+                    "source_table_consumed_compressed_size_bytes_by_each_column": {
+                        "country": {
+                            "name": "country",
+                            "datatype": "String",
+                            "size_compressed_bytes": 200,
+                            "size_compressed_bytes_readable": "200 B",
+                        }
+                    },
+                    "source_table_select_test_query": "SELECT count() FROM source_events",
+                },
+            },
+            measured_percentiles=[100],
+        )
+
+        with patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks._ClickHouseRuntimeClient",
+            return_value=fake_client,
+        ), patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks.ClickHouseBenchmarkResultStore",
+            return_value=fake_store,
+        ):
+            result = run_variant_benchmark(payload)
+
+        parsed_indexes_sizes = json.loads(result.tested_table_indexes_sizes or "{}")
+        self.assertIn("idx_country_set", parsed_indexes_sizes)
+        self.assertIn("idx_country_tokenbf", parsed_indexes_sizes)
 
     def test_run_variant_benchmark_forces_score_minus_one_when_compression_by_column_empty(self) -> None:
         fake_client = _FakeRuntimeClient(
@@ -1297,7 +1489,7 @@ ORDER BY msg
             variant_mode="types",
             variant_params={},
             variant_ddl=VALID_VARIANT_DDL,
-            max_iterations=1,
+            insert_operations_count=1,
             insert_rows_limit=1000,
             query_plan=QueryPlanPayload(
                 test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
@@ -1403,7 +1595,7 @@ ORDER BY msg
                 }
             },
             variant_ddl=VALID_VARIANT_DDL,
-            max_iterations=1,
+            insert_operations_count=1,
             insert_rows_limit=1000,
             query_plan=QueryPlanPayload(
                 test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0002`"],
@@ -1538,7 +1730,7 @@ ORDER BY msg
             },
             variant_params={},
             variant_ddl=VALID_VARIANT_DDL,
-            max_iterations=2,
+            insert_operations_count=2,
             insert_rows_limit=1000,
             query_plan=QueryPlanPayload(
                 test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
@@ -1565,6 +1757,18 @@ ORDER BY msg
         parsed_score = json.loads(result.score_calculation_json or "{}")
         self.assertEqual(parsed_score.get("mode"), "expression")
         self.assertEqual(parsed_score.get("final_score"), 4.0)
+        medians = parsed_score.get("context", {}).get("medians", {})
+        self.assertEqual(medians.get("source_insert_time_ms"), 350.0)
+        self.assertEqual(medians.get("tested_insert_time_ms"), 150.0)
+        self.assertEqual(medians.get("source_select_time_ms"), 175.0)
+        self.assertEqual(medians.get("tested_select_time_ms"), 75.0)
+        self.assertIsNotNone(medians.get("source_insert_rows_per_second"))
+        self.assertIsNotNone(medians.get("tested_insert_rows_per_second"))
+        self.assertIsNotNone(medians.get("source_insert_bytes_per_second_readable"))
+        self.assertIsNotNone(medians.get("tested_insert_bytes_per_second_readable"))
+        self.assertIsNotNone(medians.get("insert_time_speedup"))
+        self.assertIsNotNone(medians.get("select_time_speedup"))
+        self.assertIn("query_0", medians.get("per_query", {}))
 
     def test_run_variant_benchmark_uses_custom_scoring_expression_by_percentile(self) -> None:
         fake_client = _FakeRuntimeClient(
@@ -1654,7 +1858,7 @@ ORDER BY msg
             },
             variant_params={},
             variant_ddl=VALID_VARIANT_DDL,
-            max_iterations=2,
+            insert_operations_count=2,
             insert_rows_limit=1000,
             query_plan=QueryPlanPayload(
                 test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
@@ -1766,7 +1970,7 @@ ORDER BY msg
             },
             variant_params={},
             variant_ddl=VALID_VARIANT_DDL,
-            max_iterations=2,
+            insert_operations_count=2,
             insert_rows_limit=1000,
             query_plan=QueryPlanPayload(
                 test_queries=[
@@ -1881,7 +2085,7 @@ ORDER BY msg
             },
             variant_params={},
             variant_ddl=VALID_VARIANT_DDL,
-            max_iterations=2,
+            insert_operations_count=2,
             insert_rows_limit=1000,
             query_plan=QueryPlanPayload(
                 test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
@@ -1903,6 +2107,124 @@ ORDER BY msg
             result = run_variant_benchmark(payload)
 
         self.assertEqual(result.score, -7.5)
+
+    def test_run_variant_benchmark_uses_stage_specific_scoring_expression(self) -> None:
+        fake_client = _FakeRuntimeClient(
+            query_metrics_sequence=[
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 10_000.0,
+                },
+                {
+                    "elapsed_ns": 200_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 10_000.0,
+                },
+                {
+                    "elapsed_ns": 50_000_000.0,
+                    "read_rows": 500.0,
+                    "read_bytes": 5_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 500.0,
+                    "read_bytes": 5_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+            ],
+            count_rows_map={("bench_tmp", "events__bench__bench_var__0001"): 222},
+            column_sizes_map={
+                ("bench_tmp", "events__bench__bench_var__0001"): {
+                    "user_id": {
+                        "name": "user_id",
+                        "datatype": "UInt64",
+                        "size_compressed_bytes": 200,
+                        "size_compressed_bytes_readable": "200 B",
+                    }
+                }
+            },
+            total_size_map={("bench_tmp", "events__bench__bench_var__0001"): 2000.0},
+        )
+        fake_store = _FakeResultStore()
+        source_metrics = {
+            "total_n_rows_in_source_table": 300,
+            "source_table_insert_time_ms_measurements_percentiles": [300.0, 400.0],
+            "source_table_select_time_ms_measurements_percentiles": [150.0, 200.0],
+            "source_table_consumed_compressed_size_bytes_overall": 4000.0,
+            "source_table_insert_rows_per_second_measurements_percentiles": [1.0, 1.0],
+            "source_table_insert_bytes_per_second_measurements_percentiles": [1.0, 1.0],
+            "source_table_insert_memory_usage_measurements_percentiles": [1.0, 1.0],
+            "source_table_select_rows_per_second_measurements_percentiles": [1.0, 1.0],
+            "source_table_select_bytes_per_second_measurements_percentiles": [1.0, 1.0],
+            "source_table_select_memory_usage_measurements_percentiles": [1.0, 1.0],
+            "source_table_consumed_compressed_size_bytes_by_each_column": {
+                "user_id": {
+                    "name": "user_id",
+                    "datatype": "UInt64",
+                    "size_compressed_bytes": 400,
+                    "size_compressed_bytes_readable": "400 B",
+                }
+            },
+        }
+
+        payload = VariantBenchmarkTaskPayload(
+            connection=self._connection_payload(),
+            result_connection=self._connection_payload(),
+            result_database="benchmark_results",
+            result_table="combined_benchmark_results",
+            benchmark_run_id=2,
+            benchmark_started_at=datetime(2026, 2, 24, 13, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_var",
+            source_database="analytics",
+            source_table="events",
+            variant_database="bench_tmp",
+            variant_table="events__bench__bench_var__0001",
+            variant_mode="types",
+            scoring={
+                "mode": "builtin",
+                "by_stage": {
+                    "types": {
+                        "mode": "expression",
+                        "expression": "42",
+                    }
+                },
+            },
+            variant_params={},
+            variant_ddl=VALID_VARIANT_DDL,
+            insert_operations_count=2,
+            insert_rows_limit=1000,
+            query_plan=QueryPlanPayload(
+                test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
+            ),
+            source_benchmark={
+                "source_table_ddl": VALID_SOURCE_DDL,
+                "metrics": source_metrics,
+            },
+            measured_percentiles=[50, 100],
+        )
+
+        with patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks._ClickHouseRuntimeClient",
+            return_value=fake_client,
+        ), patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks.ClickHouseBenchmarkResultStore",
+            return_value=fake_store,
+        ):
+            result = run_variant_benchmark(payload)
+
+        self.assertEqual(result.score, 42.0)
+        score_details = json.loads(result.score_calculation_json or "{}")
+        self.assertEqual(score_details.get("mode"), "expression")
+        self.assertEqual(score_details.get("stage_name"), "types")
+        self.assertTrue(score_details.get("stage_override_used"))
 
     def test_run_variant_benchmark_custom_scoring_error_without_on_error_returns_none(
         self,
@@ -1992,7 +2314,7 @@ ORDER BY msg
             },
             variant_params={},
             variant_ddl=VALID_VARIANT_DDL,
-            max_iterations=2,
+            insert_operations_count=2,
             insert_rows_limit=1000,
             query_plan=QueryPlanPayload(
                 test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
@@ -2052,7 +2374,7 @@ ORDER BY msg
             query_plan=QueryPlanPayload(
                 test_queries=["SELECT count() FROM `analytics`.`events`"],
             ),
-            max_iterations=1,
+            insert_operations_count=1,
             scoring={
                 "mode": "expression",
                 "expression": "source.select.time_ms_percentiles[999]",
@@ -2085,7 +2407,7 @@ ORDER BY msg
             query_plan=QueryPlanPayload(
                 test_queries=["SELECT count() FROM `analytics`.`events`"],
             ),
-            max_iterations=2,
+            insert_operations_count=2,
             measured_percentiles=[50, 100],
         )
 
@@ -2131,7 +2453,7 @@ ORDER BY msg
             variant_mode="combined",
             variant_params={},
             variant_ddl=variant_ddl,
-            max_iterations=1,
+            insert_operations_count=1,
             query_plan=QueryPlanPayload(test_queries=[]),
             measured_percentiles=[50, 100],
         )
@@ -2228,6 +2550,79 @@ ORDER BY msg
 
         total = client.get_total_compressed_size_bytes("bench_tmp", "messages")
         self.assertEqual(total, 2048.0)
+
+    def test_runtime_client_get_index_sizes_uses_index_name_and_preserves_duplicates(self) -> None:
+        client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
+
+        def _execute(query: str, params: Optional[Dict[str, Any]] = None):
+            del params
+            if "FROM system.data_skipping_indices" in query and "name," in query:
+                return [
+                    ("idx_country_set", "country", 10),
+                    ("idx_country_bf", "country", 20),
+                    ("idx_message_ngram", "lowerUTF8(`message`)", 30),
+                ]
+            return []
+
+        client.execute = _execute  # type: ignore[method-assign]
+
+        sizes = client.get_index_sizes("bench_tmp", "events")
+        self.assertEqual(sizes["idx_country_set"]["size_compressed_bytes"], 10)
+        self.assertEqual(sizes["idx_country_bf"]["size_compressed_bytes"], 20)
+        self.assertEqual(sizes["idx_country_set"].get("column"), "country")
+        self.assertEqual(sizes["idx_country_bf"].get("column"), "country")
+        self.assertEqual(sizes["idx_message_ngram"].get("column"), "message")
+
+    def test_runtime_client_get_index_sizes_falls_back_when_name_column_missing(self) -> None:
+        client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
+
+        def _execute(query: str, params: Optional[Dict[str, Any]] = None):
+            del params
+            if "FROM system.data_skipping_indices" in query and "name," in query:
+                raise RuntimeError("unknown identifier name")
+            if "FROM system.data_skipping_indices" in query:
+                return [("`country`", 50)]
+            return []
+
+        client.execute = _execute  # type: ignore[method-assign]
+
+        sizes = client.get_index_sizes("bench_tmp", "events")
+        self.assertIn("`country`", sizes)
+        self.assertEqual(sizes["`country`"]["size_compressed_bytes"], 50)
+        self.assertEqual(sizes["`country`"].get("column"), "country")
+
+    def test_runtime_client_get_index_sizes_falls_back_to_no_active_when_join_keys_missing(self) -> None:
+        client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
+        observed_queries: List[str] = []
+
+        def _execute(query: str, params: Optional[Dict[str, Any]] = None):
+            del params
+            observed_queries.append(query)
+            normalized = " ".join(query.split())
+            if "active = 1" in normalized:
+                raise RuntimeError("unknown identifier active")
+            if "d.part_name" in normalized:
+                raise RuntimeError("unknown identifier d.part_name")
+            if "p.name = d.part" in normalized:
+                raise RuntimeError("unknown identifier d.part")
+            if "FROM system.data_skipping_indices" in normalized and "name," in normalized:
+                return [("idx_country_tokenbf", "country", 25)]
+            return []
+
+        client.execute = _execute  # type: ignore[method-assign]
+
+        sizes = client.get_index_sizes("bench_tmp", "events")
+        self.assertIn("idx_country_tokenbf", sizes)
+        self.assertEqual(sizes["idx_country_tokenbf"]["size_compressed_bytes"], 25)
+        self.assertEqual(sizes["idx_country_tokenbf"].get("column"), "country")
+        self.assertTrue(any("active = 1" in " ".join(q.split()) for q in observed_queries))
+        self.assertTrue(
+            any(
+                "FROM system.data_skipping_indices" in " ".join(q.split())
+                and "active = 1" not in " ".join(q.split())
+                for q in observed_queries
+            )
+        )
 
     def test_runtime_client_get_table_parts_size_metrics_returns_total_on_disk(self) -> None:
         client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)

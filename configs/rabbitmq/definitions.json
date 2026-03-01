@@ -1,0 +1,24 @@
+{
+  "users": [
+    {
+      "name": "bench",
+      "password": "bench",
+      "tags": "administrator"
+    }
+  ],
+  "vhosts": [
+    {
+      "name": "bench"
+    }
+  ],
+  "permissions": [
+    {
+      "user": "bench",
+      "vhost": "bench",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "policies": []
+}

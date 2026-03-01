@@ -470,7 +470,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             databases=["analytics"],
             tables=["events"],
             test_database="bench_global",
-            max_iterations=10,
+            insert_operations_count=10,
             sequential_top_n_limits=InsertRowsLimitsConfig(
                 order_by=4,
                 types=3,
@@ -487,11 +487,11 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                 indexes=30,
                 sequential=20,
             ),
-            insert_rows_limit=1_000_000,
-            source_insert_rows_limit=600_000,
+            insert_rows_per_operation_limit=1_000_000,
+            source_insert_rows_per_operation_limit=600_000,
             index_granularity_values=[8192, 16384],
-            source_insert_rows_limits=InsertRowsLimitsConfig(sequential=500_000),
-            insert_rows_limits=InsertRowsLimitsConfig(
+            source_insert_rows_per_operation_limits=InsertRowsLimitsConfig(sequential=500_000),
+            insert_rows_per_operation_limits=InsertRowsLimitsConfig(
                 types=400_000,
                 indexes=200_000,
                 combined=800_000,
@@ -511,7 +511,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                     table="events",
                     test_database="bench_events",
                     strategy="sequential_topn_strategy",
-                    max_iterations=2,
+                    insert_operations_count=2,
                     sequential_top_n_limits=InsertRowsLimitsConfig(
                         types=2,
                         indexes=1,
@@ -524,11 +524,11 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                         types=5,
                         indexes=6,
                     ),
-                    insert_rows_limit=25_000,
-                    source_insert_rows_limit=120_000,
+                    insert_rows_per_operation_limit=25_000,
+                    source_insert_rows_per_operation_limit=120_000,
                     index_granularity_values=[4096, 8192, 4096],
-                    source_insert_rows_limits=InsertRowsLimitsConfig(sequential=90_000),
-                    insert_rows_limits=InsertRowsLimitsConfig(
+                    source_insert_rows_per_operation_limits=InsertRowsLimitsConfig(sequential=90_000),
+                    insert_rows_per_operation_limits=InsertRowsLimitsConfig(
                         indexes=50_000,
                         sequential=70_000,
                     ),
@@ -572,7 +572,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         plan = table_plans[0]
         self.assertEqual(plan.mode, "sequential")
         self.assertEqual(plan.test_database, "bench_events")
-        self.assertEqual(plan.max_iterations, 2)
+        self.assertEqual(plan.insert_operations_count, 2)
         self.assertIsNotNone(plan.sequential_top_n_limits)
         self.assertEqual(plan.sequential_top_n_limits.for_mode("order_by"), 4)
         self.assertEqual(plan.sequential_top_n_limits.for_mode("types"), 2)
@@ -804,9 +804,9 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             },
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
-            insert_rows_limit=777,
-            insert_rows_limits=InsertRowsLimitsConfig(types=123),
+            insert_operations_count=1,
+            insert_rows_per_operation_limit=777,
+            insert_rows_per_operation_limits=InsertRowsLimitsConfig(types=123),
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -866,10 +866,10 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="sequential_topn_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
-            insert_rows_limit=777,
-            source_insert_rows_limit=333,
-            insert_rows_limits=InsertRowsLimitsConfig(sequential=555),
+            insert_operations_count=1,
+            insert_rows_per_operation_limit=777,
+            source_insert_rows_per_operation_limit=333,
+            insert_rows_per_operation_limits=InsertRowsLimitsConfig(sequential=555),
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -912,10 +912,10 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="sequential_topn_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
-            insert_rows_limit=777,
-            insert_rows_limits=InsertRowsLimitsConfig(sequential=555),
-            source_insert_rows_limits=InsertRowsLimitsConfig(sequential=444),
+            insert_operations_count=1,
+            insert_rows_per_operation_limit=777,
+            insert_rows_per_operation_limits=InsertRowsLimitsConfig(sequential=555),
+            source_insert_rows_per_operation_limits=InsertRowsLimitsConfig(sequential=444),
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -958,9 +958,9 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="sequential_topn_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
-            insert_rows_limit=777,
-            insert_rows_limits=InsertRowsLimitsConfig(sequential=555),
+            insert_operations_count=1,
+            insert_rows_per_operation_limit=777,
+            insert_rows_per_operation_limits=InsertRowsLimitsConfig(sequential=555),
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -1004,7 +1004,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             databases=["analytics"],
             tables=["events"],
             test_database="bench_tmp",
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -1062,7 +1062,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             column_order_mode="compressed_size_desc",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=4,
+            insert_operations_count=4,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -1117,8 +1117,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             column_order_mode="compressed_size_desc",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=2,
-            insert_rows_limits=InsertRowsLimitsConfig(indexes=222),
+            insert_operations_count=2,
+            insert_rows_per_operation_limits=InsertRowsLimitsConfig(indexes=222),
             global_rules=RulesConfig(
                 index_rules=[
                     IndexRuleConfig(
@@ -1159,7 +1159,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             table="events",
             strategy="types_strategy",
             mode="types",
-            max_iterations=1,
+            insert_operations_count=1,
             sequential_top_n=1,
             insert_rows_limit=999,
             insert_rows_limits=InsertRowsLimitsConfig.model_validate(
@@ -1259,7 +1259,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
             ),
@@ -1319,7 +1319,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=2,
+            insert_operations_count=2,
             global_rules=RulesConfig(
                 column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
             ),
@@ -1384,7 +1384,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
@@ -1441,7 +1441,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="indexes_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=10,
+            insert_operations_count=10,
             index_granularity_values=[8192, 16384],
             global_rules=RulesConfig(
                 index_rules=[
@@ -1493,7 +1493,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
@@ -1539,7 +1539,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
@@ -1571,7 +1571,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
             ),
@@ -1625,7 +1625,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
@@ -1655,8 +1655,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="sequential_topn_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=10,
-            sequential_top_n=1,
+            insert_operations_count=10,
+            sequential_types_top_n_for_indexes=1,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -1760,7 +1760,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
@@ -1798,7 +1798,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
@@ -1858,7 +1858,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
@@ -1871,7 +1871,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
@@ -1911,7 +1911,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
             ),
@@ -1949,7 +1949,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
             ),
@@ -1993,7 +1993,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                 strategy="types_strategy",
                 databases=["analytics"],
                 tables=["events"],
-                max_iterations=1,
+                insert_operations_count=1,
                 global_rules=common_rules,
             ),
             BenchmarkConfig(
@@ -2002,7 +2002,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                 strategy="indexes_strategy",
                 databases=["analytics"],
                 tables=["events"],
-                max_iterations=1,
+                insert_operations_count=1,
                 global_rules=common_rules,
             ),
             BenchmarkConfig(
@@ -2011,7 +2011,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                 strategy="combined_strategy",
                 databases=["analytics"],
                 tables=["events"],
-                max_iterations=1,
+                insert_operations_count=1,
                 global_rules=common_rules,
             ),
         ]
@@ -2067,7 +2067,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
             ),
@@ -2103,7 +2103,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
             ),
@@ -2133,7 +2133,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])]
             ),
@@ -2163,8 +2163,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="sequential_topn_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
-            sequential_top_n=1,
+            insert_operations_count=1,
+            sequential_types_top_n_for_indexes=1,
             global_rules=RulesConfig(
                 column_rules=[ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])],
                 index_rules=[
@@ -2211,7 +2211,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=1,
+            insert_operations_count=1,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])
@@ -2266,10 +2266,10 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="sequential_topn_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=10,
-            sequential_top_n=1,
-            insert_rows_limit=999,
-            insert_rows_limits=InsertRowsLimitsConfig(
+            insert_operations_count=10,
+            sequential_types_top_n_for_indexes=1,
+            insert_rows_per_operation_limit=999,
+            insert_rows_per_operation_limits=InsertRowsLimitsConfig(
                 types=111,
                 indexes=222,
                 sequential=333,
@@ -2362,8 +2362,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="sequential_phased_topn_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=10,
-            sequential_top_n=1,
+            insert_operations_count=10,
+            sequential_types_top_n_for_indexes=1,
             index_granularity_values=[8192, 16384],
             order_by_first="event_time",
             order_by_candidates=["user_id"],
@@ -2466,8 +2466,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="sequential_phased_topn_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=10,
-            sequential_top_n=2,
+            insert_operations_count=10,
+            sequential_types_top_n_for_indexes=2,
             sequential_top_n_limits=InsertRowsLimitsConfig(
                 types=1,
                 codecs=1,
@@ -2540,7 +2540,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             if job.variant_meta.mode == "final_validation"
         ]
 
-        # При sequential_top_n=2 order_by остаётся 2 ветки.
+        # При sequential_types_top_n_for_indexes=2 order_by остаётся 2 ветки.
         self.assertEqual(len(order_jobs), 2)
         # Stage-specific лимиты должны сократить число кандидатов в следующих фазах.
         self.assertGreaterEqual(len(types_jobs), 1)
@@ -2559,8 +2559,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="sequential_phased_topn_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=10,
-            sequential_top_n=2,
+            insert_operations_count=10,
+            sequential_types_top_n_for_indexes=2,
             sequential_top_n_limits=InsertRowsLimitsConfig(
                 order_by=2,
                 types=2,
@@ -2648,8 +2648,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="sequential_phased_topn_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=10,
-            sequential_top_n=1,
+            insert_operations_count=10,
+            sequential_types_top_n_for_indexes=1,
             sequential_top_n_limits=InsertRowsLimitsConfig(
                 order_by=1,
                 types=1,
@@ -2728,8 +2728,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="sequential_phased_topn_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=10,
-            sequential_top_n=3,
+            insert_operations_count=10,
+            sequential_types_top_n_for_indexes=3,
             sequential_top_n_limits=InsertRowsLimitsConfig(
                 order_by=1,
                 types=2,
@@ -2844,6 +2844,109 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         }
         self.assertGreaterEqual(len(final_parent_tables), 2)
 
+    def test_sequential_phased_topn_strategy_respects_max_benchmarks_limits_per_stage(self) -> None:
+        """Проверяет, что `max_benchmarks_limits` ограничивает dispatch jobs на каждой фазе."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_phased_stage_caps",
+            connection_id="prod_ch",
+            strategy="sequential_phased_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            insert_operations_count=10,
+            sequential_types_top_n_for_indexes=3,
+            sequential_top_n_limits=InsertRowsLimitsConfig(
+                order_by=1,
+                types=3,
+                codecs=3,
+                indexes=3,
+                final_validation=3,
+            ),
+            max_winners_per_parent_limits=InsertRowsLimitsConfig(
+                types=3,
+                codecs=3,
+                indexes=3,
+            ),
+            max_benchmarks_limits=InsertRowsLimitsConfig(
+                order_by=1,
+                types=2,
+                codecs=2,
+                indexes=2,
+                final_validation=1,
+            ),
+            index_granularity_values=[8192, 16384],
+            order_by_first="event_time",
+            order_by_candidates=["event_time"],
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_name="user_id",
+                        by_type="UInt64",
+                        types=["UInt64", "UInt32", "UInt16"],
+                        codecs=["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+                    ),
+                    ColumnRuleConfig(
+                        by_name="revenue",
+                        by_type="Nullable(Decimal(18,4))",
+                        types=["Nullable(Decimal(18,4))", "Nullable(Float64)"],
+                        codecs=["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+                    ),
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_name="user_id",
+                        by_type="UInt64",
+                        indexes=[
+                            IndexConfig(type="minmax", granularity=[1, 2]),
+                        ],
+                    )
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[
+                    QueryConfigItem(
+                        query="SELECT count() FROM {table} WHERE user_id > 0"
+                    )
+                ],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = SequentialPhasedScoringAdapter()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=InMemoryBenchmarkResultStore(),
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+
+        order_by_jobs = [
+            job for job in adapter.executed_jobs if job.variant_meta.mode == "order_by"
+        ]
+        types_jobs = [
+            job for job in adapter.executed_jobs if job.variant_meta.mode == "types"
+        ]
+        codecs_jobs = [
+            job for job in adapter.executed_jobs if job.variant_meta.mode == "codecs"
+        ]
+        indexes_jobs = [
+            job for job in adapter.executed_jobs if job.variant_meta.mode == "indexes"
+        ]
+        final_jobs = [
+            job for job in adapter.executed_jobs if job.variant_meta.mode == "final_validation"
+        ]
+
+        self.assertEqual(len(order_by_jobs), 1)
+        self.assertEqual(len(types_jobs), 2)
+        self.assertEqual(len(codecs_jobs), 2)
+        self.assertEqual(len(indexes_jobs), 2)
+        self.assertEqual(len(final_jobs), 1)
+
     def test_wait_for_stage_summaries_matches_expected_execution_uuid(self) -> None:
         """Проверяет, что summary матчатся не только по table, но и по execution_uuid."""
         import src.benchmark_runtime.implementations.table_strategy.sequential_phased_topn as phased_strategy
@@ -2935,8 +3038,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="sequential_topn_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=10,
-            sequential_top_n=1,
+            insert_operations_count=10,
+            sequential_types_top_n_for_indexes=1,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -2997,10 +3100,10 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="combined_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=10,
-            sequential_top_n=1,
-            insert_rows_limit=999,
-            insert_rows_limits=InsertRowsLimitsConfig(
+            insert_operations_count=10,
+            sequential_types_top_n_for_indexes=1,
+            insert_rows_per_operation_limit=999,
+            insert_rows_per_operation_limits=InsertRowsLimitsConfig(
                 types=111,
                 indexes=222,
                 combined=444,
@@ -3031,7 +3134,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                     database="analytics",
                     table="events",
                     strategy="sequential_topn_strategy",
-                    insert_rows_limits=InsertRowsLimitsConfig(indexes=777),
+                    insert_rows_per_operation_limits=InsertRowsLimitsConfig(indexes=777),
                 )
             ],
             queries=QueriesConfig(
@@ -3081,8 +3184,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="sequential_topn_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=10,
-            sequential_top_n=1,
+            insert_operations_count=10,
+            sequential_types_top_n_for_indexes=1,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -3145,7 +3248,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="types_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=10,
+            insert_operations_count=10,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -3187,7 +3290,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="indexes_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=10,
+            insert_operations_count=10,
             global_rules=RulesConfig(
                 index_rules=[
                     IndexRuleConfig(
@@ -3234,7 +3337,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="combined_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=10,
+            insert_operations_count=10,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -3283,8 +3386,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="sequential_topn_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=10,
-            sequential_top_n=1,
+            insert_operations_count=10,
+            sequential_types_top_n_for_indexes=1,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -3346,10 +3449,10 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             strategy="sequential_topn_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=10,
-            sequential_top_n=1,
-            insert_rows_limit=777,
-            insert_rows_limits=InsertRowsLimitsConfig(sequential=555),
+            insert_operations_count=10,
+            sequential_types_top_n_for_indexes=1,
+            insert_rows_per_operation_limit=777,
+            insert_rows_per_operation_limits=InsertRowsLimitsConfig(sequential=555),
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(
@@ -3398,8 +3501,8 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             databases=["analytics"],
             tables=["events"],
             # Это число измерений, а не лимит числа variant jobs.
-            max_iterations=3,
-            sequential_top_n=1,
+            insert_operations_count=3,
+            sequential_types_top_n_for_indexes=1,
             max_benchmarks_limits=InsertRowsLimitsConfig(
                 types=2,
                 indexes=4,

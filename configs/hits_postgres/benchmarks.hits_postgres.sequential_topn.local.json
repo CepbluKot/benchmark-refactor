@@ -39,8 +39,8 @@
         "order_by": 10,
         "types": 10,
         "codecs": 10,
-        "indexes": 222,
-        "indexes_validation": 222,
+        "indexes": 10,
+        "indexes_validation": 10,
         "final_validation": 10,
         "sequential": 20
       },
@@ -125,45 +125,15 @@
         "mode": "manual",
         "test_queries": [
           {
-            "query_id": "q_url_like_help_delivery",
-            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%help/delivery%'",
+            "query_id": "select_everything_cold",
+            "query": "select * from `default`.hits_postgres hp  where page_url != ''",
             "cache_mode": "cold",
             "select_operations_count": 10
           },
           {
-            "query_id": "q_url_like_catalog_search",
-            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%catalog/search?q=phone%'",
-            "cache_mode": "cold",
-            "select_operations_count": 10
-          },
-          {
-            "query_id": "q_url_like_catalog_item",
-            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%catalog/item/%'",
-            "cache_mode": "cold",
-            "select_operations_count": 10
-          },
-          {
-            "query_id": "q_url_like_blog_post",
-            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%blog/post/new-features%'",
-            "cache_mode": "cold",
-            "select_operations_count": 10
-          },
-          {
-            "query_id": "q_country_eq_ru",
-            "query": "SELECT count() FROM {table} WHERE country = 'RU'",
-            "cache_mode": "cold",
-            "select_operations_count": 10
-          },
-          {
-            "query_id": "q_country_in_main",
-            "query": "SELECT count() FROM {table} WHERE country IN ('RU', 'US', 'DE', 'GB')",
-            "cache_mode": "cold",
-            "select_operations_count": 10
-          },
-          {
-            "query_id": "q_country_group_by",
-            "query": "SELECT country, count() FROM {table} WHERE country IN ('RU', 'US', 'DE', 'GB', 'KZ', 'CN', 'OTHER') GROUP BY country ORDER BY count() DESC",
-            "cache_mode": "cold",
+            "query_id": "select_everything_warm",
+            "query": "select * from `default`.hits_postgres hp  where page_url != ''",
+            "cache_mode": "warm",
             "select_operations_count": 10
           }
         ]

@@ -260,7 +260,7 @@ class ClickHouseCeleryRuntimeTests(unittest.TestCase):
                     )
                 ],
             ),
-            max_iterations=3,
+            insert_operations_count=3,
             insert_rows_limit=100,
             celery=CeleryConfig(workers=2, threads_per_worker=1),
         )
@@ -277,7 +277,7 @@ class ClickHouseCeleryRuntimeTests(unittest.TestCase):
                         strategy="types_strategy",
                         databases=["analytics"],
                         tables=["events"],
-                        max_iterations=1,
+                        insert_operations_count=1,
                         global_rules=RulesConfig(
                             column_rules=[
                                 ColumnRuleConfig(
@@ -311,6 +311,8 @@ class ClickHouseCeleryRuntimeTests(unittest.TestCase):
         self.assertEqual(fake_app.calls[1]["task_name"], "bench.variant_benchmark")
         self.assertFalse(fake_app.calls[0]["ignore_result"])
         self.assertTrue(fake_app.calls[1]["ignore_result"])
+        self.assertIsNone(fake_app.calls[0]["expires"])
+        self.assertIsNone(fake_app.calls[1]["expires"])
         self.assertEqual(
             fake_app.calls[0]["kwargs"]["payload"]["test_database"],
             "bench_tmp",
@@ -334,6 +336,11 @@ class ClickHouseCeleryRuntimeTests(unittest.TestCase):
         self.assertFalse(source_task.ignore_result)
         self.assertTrue(variant_task.ignore_result)
         self.assertFalse(celery_worker_app.conf.task_store_errors_even_if_ignored)
+        self.assertIsNone(celery_worker_app.conf.task_default_expires)
+        self.assertIsNone(celery_worker_app.conf.task_queue_ttl)
+        self.assertIsNone(celery_worker_app.conf.task_queue_expires)
+        self.assertEqual(celery_worker_app.conf.task_default_delivery_mode, "persistent")
+        self.assertEqual(celery_worker_app.conf.task_default_queue, "bench.benchmark")
 
     def test_sequential_strategy_calls_progress_wait_hooks(self) -> None:
         benchmark = BenchmarkConfig(
@@ -342,8 +349,8 @@ class ClickHouseCeleryRuntimeTests(unittest.TestCase):
             strategy="sequential_topn_strategy",
             databases=["analytics"],
             tables=["events"],
-            max_iterations=2,
-            sequential_top_n=1,
+            insert_operations_count=2,
+            sequential_types_top_n_for_indexes=1,
             global_rules=RulesConfig(
                 column_rules=[
                     ColumnRuleConfig(by_type="UInt64", types=["UInt64", "UInt32"])

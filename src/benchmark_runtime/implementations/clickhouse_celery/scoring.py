@@ -332,6 +332,94 @@ def _safe_median(values: Any, default: float = 0.0) -> float:
     return float((numeric_values[mid - 1] + numeric_values[mid]) / 2.0)
 
 
+def _is_non_string_sequence(value: Any) -> bool:
+    """Проверяет, что значение — последовательность, но не строка/байты."""
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+
+
+def _coerce_finite_floats(values: Sequence[Any]) -> list[float]:
+    """Преобразует значения в конечные float, отбрасывая мусор."""
+    numeric_values: list[float] = []
+    for value in values:
+        try:
+            numeric = float(value)
+        except Exception:
+            continue
+        if math.isfinite(numeric):
+            numeric_values.append(numeric)
+    return numeric_values
+
+
+def _safe_min(*values: Any, default: float = 0.0) -> float:
+    """Безопасный min для variadic/scalar и массивов с fallback."""
+    if not values:
+        return float(default)
+
+    # min(values) для массива
+    if len(values) == 1 and _is_non_string_sequence(values[0]):
+        numeric_values = _coerce_finite_floats(list(values[0]))
+        if numeric_values:
+            return float(min(numeric_values))
+        return float(default)
+
+    # Поддержка шаблона min(values, fallback) для массива.
+    if (
+        len(values) == 2
+        and _is_non_string_sequence(values[0])
+        and not _is_non_string_sequence(values[1])
+    ):
+        numeric_values = _coerce_finite_floats(list(values[0]))
+        if numeric_values:
+            return float(min(numeric_values))
+        try:
+            fallback = float(values[1])
+            if math.isfinite(fallback):
+                return fallback
+        except Exception:
+            pass
+        return float(default)
+
+    numeric_values = _coerce_finite_floats(list(values))
+    if numeric_values:
+        return float(min(numeric_values))
+    return float(default)
+
+
+def _safe_max(*values: Any, default: float = 0.0) -> float:
+    """Безопасный max для variadic/scalar и массивов с fallback."""
+    if not values:
+        return float(default)
+
+    # max(values) для массива
+    if len(values) == 1 and _is_non_string_sequence(values[0]):
+        numeric_values = _coerce_finite_floats(list(values[0]))
+        if numeric_values:
+            return float(max(numeric_values))
+        return float(default)
+
+    # Поддержка шаблона max(values, fallback) для массива.
+    if (
+        len(values) == 2
+        and _is_non_string_sequence(values[0])
+        and not _is_non_string_sequence(values[1])
+    ):
+        numeric_values = _coerce_finite_floats(list(values[0]))
+        if numeric_values:
+            return float(max(numeric_values))
+        try:
+            fallback = float(values[1])
+            if math.isfinite(fallback):
+                return fallback
+        except Exception:
+            pass
+        return float(default)
+
+    numeric_values = _coerce_finite_floats(list(values))
+    if numeric_values:
+        return float(max(numeric_values))
+    return float(default)
+
+
 _ALLOWED_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "safe_div": _safe_div,
     "at": _safe_at,
@@ -340,8 +428,8 @@ _ALLOWED_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "clamp": _safe_clamp,
     "median": _safe_median,
     "abs": abs,
-    "min": min,
-    "max": max,
+    "min": _safe_min,
+    "max": _safe_max,
     "round": round,
     "sqrt": math.sqrt,
     "log": math.log,
