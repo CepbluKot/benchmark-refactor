@@ -131,6 +131,13 @@ class ClickHouseCeleryScoringExpressionTests(unittest.TestCase):
         )
         self.assertEqual(issues, [])
 
+    def test_static_validation_accepts_expression_with_declared_variables(self) -> None:
+        issues = validate_score_expression(
+            "weighted_ratio * 2",
+            extra_allowed_names=["weighted_ratio"],
+        )
+        self.assertEqual(issues, [])
+
     def test_static_validation_reports_unknown_root_name(self) -> None:
         issues = validate_score_expression("foo.select.time_ms_percentiles[0]")
         self.assertTrue(issues)

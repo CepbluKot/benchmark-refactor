@@ -270,6 +270,49 @@ class _CustomScoreRecalcStore(_CapturingStore):
         return super()._execute(query, params)
 
 
+class _CloneDedupStore(_CapturingStore):
+    def __init__(self) -> None:
+        self.candidate_query_params: Optional[Dict[str, Any]] = None
+        self.insert_select_params: Optional[Dict[str, Any]] = None
+        super().__init__()
+
+    def _execute(self, query: str, params: Optional[Any] = None):
+        normalized = " ".join(query.split()).lower()
+        if normalized.startswith("select 1 from"):
+            return []
+        if (
+            "select id, benchmark_run_id, variant_table, tested_table_ddl, score, measurement_quality_flag, variant_params"
+            in normalized
+            and "where benchmark_id = %(benchmark_id)s" in normalized
+            and "variant_mode = %(variant_mode)s" in normalized
+            and "limit 5000" in normalized
+        ):
+            self.candidate_query_params = dict(params or {})
+            runtime_params = {
+                "__runtime_query_signature": "sig_q",
+                "__runtime_insert_rows_limit": 100000,
+                "__runtime_insert_operations_count": 10,
+                "__runtime_measured_percentiles_signature": "[1,50,95,99,100]",
+            }
+            return [
+                [
+                    "prev_result_id_1",
+                    77,  # previous run_id
+                    "old_variant_table",
+                    "CREATE TABLE bench.results (`x` UInt32) ENGINE = MergeTree ORDER BY x",
+                    1.111,
+                    "stable",
+                    json.dumps(runtime_params, ensure_ascii=False),
+                ]
+            ]
+        if normalized.startswith("select id from"):
+            return []
+        if normalized.startswith("insert into"):
+            self.insert_select_params = dict(params or {})
+            return []
+        return super()._execute(query, params)
+
+
 class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
     def test_store_uses_localhost_redis_fallback_when_urls_not_set(self) -> None:
         with patch.dict(
@@ -327,9 +370,17 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             ),
             tested_table_consumed_compressed_size_bytes_with_indexes=1234.0,
             tested_table_consumed_compressed_size_bytes_with_indexes_readable="1.21 KiB",
+            tested_table_consumed_compressed_size_bytes_with_indexes_json=(
+                '{"size_bytes":1234.0,"size_bytes_readable":"1.21 KiB",'
+                '"bytes_on_disk_sum":1500.0,"bytes_on_disk_sum_readable":"1.46 KiB"}'
+            ),
             tested_table_primary_index_size_json=(
                 '{"size_bytes":321.0,"size_bytes_readable":"321 B",'
                 '"size_percent_from_total_size":26.0129}'
+            ),
+            measurement_quality_flag="stable",
+            measurement_quality_details_json=(
+                '{"quality_flag":"stable","total_queries":1,"noisy_queries":0}'
             ),
             score_calculation_json='{"mode":"expression","final_score":1.0}',
             score=1.0,
@@ -367,6 +418,10 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
             columns,
         )
+        self.assertIn(
+            "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json",
+            columns,
+        )
         self.assertIn("tested_table_consumed_compressed_size_bytes_with_indexes_json", columns)
         self.assertIn("tested_table_primary_index_size_json", columns)
         self.assertIn("variant_mode_id", columns)
@@ -380,6 +435,12 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             row_by_column["tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json"]
             or "{}"
         )
+        speedup_vs_source_per_query_json = json.loads(
+            row_by_column[
+                "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json"
+            ]
+            or "{}"
+        )
         tested_insert_metrics_json = json.loads(
             row_by_column["tested_table_insert_metrics_json"] or "{}"
         )
@@ -389,6 +450,7 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
         self.assertIn("query_0", tested_per_query_json)
         self.assertIn("query_0", source_per_query_json)
         self.assertIn("query_0", speedup_per_query_json)
+        self.assertEqual(speedup_vs_source_per_query_json, speedup_per_query_json)
         self.assertIn("insert_main", tested_insert_metrics_json)
         self.assertIn("insert_main", source_insert_metrics_json)
         self.assertEqual(
@@ -412,10 +474,17 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
         )
         self.assertEqual(tested_size_json.get("size_bytes"), 1234.0)
         self.assertEqual(tested_size_json.get("size_bytes_readable"), "1.21 KiB")
+        self.assertEqual(tested_size_json.get("bytes_on_disk_sum"), 1500.0)
+        self.assertEqual(tested_size_json.get("bytes_on_disk_sum_readable"), "1.46 KiB")
         primary_index_json = json.loads(row_by_column["tested_table_primary_index_size_json"] or "{}")
         self.assertEqual(primary_index_json.get("size_bytes"), 321.0)
         self.assertEqual(primary_index_json.get("size_bytes_readable"), "321 B")
         self.assertEqual(primary_index_json.get("size_percent_from_total_size"), 26.0129)
+        self.assertEqual(row_by_column.get("measurement_quality_flag"), "stable")
+        self.assertEqual(
+            json.loads(row_by_column.get("measurement_quality_details_json") or "{}"),
+            {"quality_flag": "stable", "total_queries": 1, "noisy_queries": 0},
+        )
         self.assertEqual(int(row_by_column["variant_mode_id"]), 1)
 
     def test_store_formats_sql_ddl_and_queries_before_insert(self) -> None:
@@ -527,11 +596,78 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             row_by_column["tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json"]
             or "{}"
         )
+        speedup_vs_source_per_query_json = json.loads(
+            row_by_column[
+                "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json"
+            ]
+            or "{}"
+        )
         self.assertIn("q_agg_user", tested_per_query_json)
         self.assertIn("q_agg_user", source_per_query_json)
         self.assertIn("q_agg_user", speedup_per_query_json)
+        self.assertEqual(speedup_vs_source_per_query_json, speedup_per_query_json)
         self.assertTrue(tested_per_query_json["q_agg_user"]["query"].startswith("SELECT"))
         self.assertTrue(source_per_query_json["q_agg_user"]["query"].startswith("SELECT"))
+
+    def test_store_phased_duplicates_select_speedup_json_to_vs_source_column(self) -> None:
+        store = _CapturingStore()
+
+        result = BenchmarkVariantResult(
+            benchmark_run_id=15,
+            benchmark_started_at=datetime(2026, 2, 24, 18, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_phased_speedup_dup",
+            source_database="analytics",
+            source_table="events",
+            variant_table="events__bench__bench_phased_speedup_dup__0001",
+            variant_mode="types_validation",
+            tested_table_ddl=(
+                "CREATE TABLE benchmark_tmp.events__bench__bench_phased_speedup_dup__0001 "
+                "(`user_id` Int32) ENGINE = MergeTree ORDER BY user_id"
+            ),
+            tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json=json.dumps(
+                [
+                    {
+                        "query_index": 0,
+                        "query_id": "q_main",
+                        "elapsed_ms_percentiles_speed_up_coefs": [1.2, 1.3],
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            score=1.0,
+        )
+
+        store.store_worker_result(
+            benchmark_run_id=15,
+            benchmark_started_at=datetime(2026, 2, 24, 18, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_phased_speedup_dup",
+            benchmark_strategy="sequential_phased_topn_strategy",
+            source_database="analytics",
+            source_table="events",
+            variant_table="events__bench__bench_phased_speedup_dup__0001",
+            variant_mode="types_validation",
+            variant_params={"mode": "types_validation"},
+            tested_table_ddl_fallback=result.tested_table_ddl or "",
+            source_table_ddl_fallback=None,
+            result=result,
+        )
+
+        self.assertEqual(len(store.capturing_client.insert_calls), 1)
+        phased_insert_call = store.capturing_client.insert_calls[0]
+        columns = list(phased_insert_call["column_names"])
+        row = list(phased_insert_call["data"][0])
+        row_by_column = dict(zip(columns, row))
+
+        self.assertIn(
+            "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json",
+            columns,
+        )
+        self.assertEqual(
+            row_by_column[
+                "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json"
+            ],
+            row_by_column["tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json"],
+        )
 
     def test_store_worker_result_uses_fallback_when_tested_ddl_table_mismatch(self) -> None:
         store = _CapturingStore()
@@ -1104,6 +1240,39 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
                 benchmark_id="bench_custom_score",
                 expression="unknown_name + 1",
             )
+
+    def test_clone_result_for_equivalent_ddl_reuses_metrics_from_previous_run(self) -> None:
+        store = _CloneDedupStore()
+
+        result = store.clone_result_for_equivalent_ddl(
+            benchmark_strategy="sequential_phased_topn_strategy",
+            benchmark_run_id=100,
+            benchmark_started_at=datetime(2026, 3, 3, 10, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_a",
+            source_database="analytics",
+            source_table="events",
+            variant_table="events__bench__bench_var__0002",
+            variant_mode="types",
+            variant_params={
+                "execution_uuid": "exec-2",
+                "__runtime_query_signature": "sig_q",
+                "__runtime_insert_rows_limit": 100000,
+                "__runtime_insert_operations_count": 10,
+                "__runtime_measured_percentiles_signature": "[1,50,95,99,100]",
+            },
+            tested_table_ddl="CREATE TABLE bench.results (`x` UInt32) ENGINE = MergeTree ORDER BY x",
+            source_table_ddl="CREATE TABLE analytics.events (`x` UInt32) ENGINE = MergeTree ORDER BY x",
+            celery_task_id="task-1",
+            celery_worker_hostname="worker-a",
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["status"], "cloned")
+        self.assertEqual(result["source_result_id"], "prev_result_id_1")
+        self.assertIsNotNone(store.candidate_query_params)
+        # Дедуп ищется по истории запусков, а не только в текущем run.
+        self.assertNotIn("benchmark_run_id", store.candidate_query_params or {})
+        self.assertIsNotNone(store.insert_select_params)
 
 
 if __name__ == "__main__":

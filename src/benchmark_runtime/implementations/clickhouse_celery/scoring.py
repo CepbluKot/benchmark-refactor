@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import math
 import operator
-from typing import Any, Callable, Dict, Mapping, Sequence
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from simpleeval import InvalidExpression, SimpleEval
 
@@ -148,7 +148,11 @@ class _ExpressionAstValidator(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def validate_score_expression(expression: str) -> list[str]:
+def validate_score_expression(
+    expression: str,
+    *,
+    extra_allowed_names: Optional[Sequence[str]] = None,
+) -> list[str]:
     """
     Выполняет статическую валидацию scoring expression.
 
@@ -173,11 +177,18 @@ def validate_score_expression(expression: str) -> list[str]:
     validator = _ExpressionAstValidator()
     validator.visit(expression_node)
 
+    extra_names = {
+        str(name).strip()
+        for name in (extra_allowed_names or [])
+        if str(name).strip()
+    }
+
     unknown_names = sorted(
         name
         for name in validator.used_names
         if name not in _ALLOWED_FUNCTIONS
         and name not in _ALLOWED_SCORE_EXPRESSION_ROOT_NAMES
+        and name not in extra_names
         and name not in _ALLOWED_LITERAL_NAMES
     )
     for name in unknown_names:

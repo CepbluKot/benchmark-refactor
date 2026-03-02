@@ -284,6 +284,8 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
                 variant_table=job.variant_table,
                 variant_mode=variant_mode,
                 variant_params=variant_params,
+                measurement_quality_flag=result.measurement_quality_flag,
+                measurement_quality_details_json=result.measurement_quality_details_json,
                 score_calculation_json=result.score_calculation_json,
                 score=result.score,
             )

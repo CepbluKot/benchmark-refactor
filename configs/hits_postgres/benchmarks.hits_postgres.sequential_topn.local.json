@@ -34,13 +34,13 @@
       },
       "scoring": {
         "mode": "expression",
-        "expression": "pow(safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0), 0.9) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.1)",
+        "expression": "pow(median(at(at(tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json, 'select_country_cold', {}), 'elapsed_ms_percentiles_speed_up_coefs', []), 1.0), 0.8) * pow(median(at(at(tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json, 'select_country_cold', {}), 'read_bytes_percentiles_speed_up_coefs', []), 1.0), 0.2)",
         "on_error_score": -1.0
       },
       "max_benchmarks_limits": {
         "order_by": 10,
-        "types": 10,
-        "codecs": 10,
+        "types": 2,
+        "codecs": 5,
         "index_granularity": 10,
         "indexes": 10,
         "indexes_validation": 10,
@@ -52,12 +52,12 @@
         16384
       ],
       "source_insert_rows_per_operation_limits": {
-        "sequential": 100000
+        "sequential": 10000000
       },
       "insert_rows_per_operation_limits": {
-        "types": 100000,
-        "indexes": 100000,
-        "sequential": 100000
+        "types": 10000000,
+        "indexes": 10000000,
+        "sequential": 10000000
       },
       "global_rules": {
         "order_by_rules": {
@@ -68,15 +68,7 @@
           "auto_generate_candidates": false
         },
         "column_rules": [
-            {
-            "by_type": "String",
-            "auto_generate_alternatives": true,
-            "auto_compressions_datatype": "String",
-            "types": [
-              "String",
-              "LowCardinality(String)"
-            ]
-          }
+            
         ],
         "index_rules": [
 
@@ -86,22 +78,8 @@
             "auto_generate_indexes": false,
             "indexes": [
               {
-                "type": "tokenbf_v1(32768, 3, 0)",
-                "granularity": [2, 4],
-                "index_granularity_values": [
-                  8192, 16384
-                ]
-              }
-            ]
-          },
-          {
-            "by_name": "page_url",
-            "by_type": "LowCardinality(String)",
-            "auto_generate_indexes": false,
-            "indexes": [
-              {
-                "type": "tokenbf_v1(32768, 3, 0)",
-                "granularity": [2, 4],
+                "type": "ngrambf_v1(3, 32768, 3, 0)",
+                "granularity": [1, 2],
                 "index_granularity_values": [
                   8192, 16384
                 ]
@@ -115,8 +93,8 @@
             "auto_generate_indexes": false,
             "indexes": [
               {
-                "type": "tokenbf_v1(32768, 3, 0)",
-                "granularity": [1, 8],
+                "type": "ngrambf_v1(3, 32768, 3, 0)",
+                "granularity": [1, 2],
                 "index_granularity_values": [
                   8192, 16384
                 ]
@@ -132,174 +110,27 @@
         "mode": "manual",
         "test_queries": [
           {
-            "query_id": "select_everything_cold",
-            "query": "select * from `default`.hits_postgres hp  where page_url != ''",
+            "query_id": "select_page_url_cold",
+            "query": "select * from {table} where page_url != '' and page_url LIKE '%/catalog/%'",
             "cache_mode": "cold",
             "select_operations_count": 10
           },
           {
             "query_id": "select_country_cold",
-            "query": "select count() from `default`.hits_postgres hp where country = 'RU'",
+            "query": "select * from {table} where country != '' and country LIKE '%RU%'",
             "cache_mode": "cold",
             "select_operations_count": 10
           },
           {
-            "query_id": "select_everything_warm",
-            "query": "select * from `default`.hits_postgres hp  where page_url != ''",
+            "query_id": "select_page_url_warm",
+            "query": "select * from {table} where page_url != '' and page_url LIKE '%/catalog/%'",
             "cache_mode": "warm",
             "select_operations_count": 10
-          }
-        ]
-      }
-    },
-    {
-      "id": "bench_messages_sequential_topn",
-      "connection_id": "local_ch_hits",
-      "strategy": "sequential_phased_topn_strategy",
-      "column_rules_mode": "inline_only",
-      "index_rules_mode": "inline_only",
-      "column_order_mode": "compressed_size_desc",
-      "order_by_first": "msg",
-      "order_by_candidates": [
-        "msg"
-      ],
-      "tables": {
-        "default": [
-          "messages"
-        ]
-      },
-      "test_database": "benchmark_tmp",
-      "insert_operations_count": 10,
-      "sequential_top_n_limits": {
-        "order_by": 3,
-        "types": 3,
-        "codecs": 3,
-        "indexes": 3,
-        "final_validation": 3
-      },
-      "final_validation_input_top_n": 3,
-      "max_winners_per_parent_limits": {
-        "types": 3,
-        "codecs": 3,
-        "indexes": 3
-      },
-      "scoring": {
-        "mode": "expression",
-        "expression": "pow(safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0), 0.9) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.1)",
-        "on_error_score": -1.0
-      },
-      "max_benchmarks_limits": {
-        "order_by": 10,
-        "types": 10,
-        "codecs": 10,
-        "indexes": 120,
-        "indexes_validation": 120,
-        "final_validation": 10,
-        "sequential": 20
-      },
-      "source_insert_rows_per_operation_limits": {
-        "sequential": 100000
-      },
-      "insert_rows_per_operation_limits": {
-        "types": 100000,
-        "indexes": 100000,
-        "sequential": 100000
-      },
-      "global_rules": {
-        "order_by_rules": {
-          "first_column": "msg",
-          "candidates": [
-            "msg"
-          ],
-          "auto_generate_candidates": false
-        },
-        "column_rules": [
-          {
-            "by_name": "msg",
-            "by_type": "String",
-            "auto_generate_alternatives": true,
-            "auto_compressions_datatype": "String",
-            "types": [
-              "String",
-              "LowCardinality(String)"
-            ]
           },
           {
-            "by_name": "msg",
-            "by_type": "LowCardinality(String)",
-            "auto_generate_alternatives": true,
-            "auto_compressions_datatype": "String",
-            "types": [
-              "String",
-              "LowCardinality(String)"
-            ]
-          }
-        ],
-        "index_rules": [
-          {
-            "by_name": "msg",
-            "by_type": "String",
-            "auto_generate_indexes": false,
-            "indexes": [
-              {
-                "type": "tokenbf_v1(32768, 3, 0)",
-                "granularity": [
-                  2,
-                  4
-                ],
-                "index_granularity_values": [
-                  8192,
-                  16384
-                ]
-              }
-            ]
-          },
-          {
-            "by_name": "msg",
-            "by_type": "LowCardinality(String)",
-            "auto_generate_indexes": false,
-            "indexes": [
-              {
-                "type": "tokenbf_v1(32768, 3, 0)",
-                "granularity": [
-                  2,
-                  4
-                ],
-                "index_granularity_values": [
-                  8192,
-                  16384
-                ]
-              }
-            ]
-          }
-        ]
-      },
-      "table_rules": [],
-      "queries": {
-        "mode": "manual",
-        "test_queries": [
-          {
-            "query_id": "q_msg_like_packet_responder",
-            "query": "SELECT count() FROM {table} WHERE msg LIKE '%PacketResponder%'",
-            "cache_mode": "cold",
-            "select_operations_count": 10
-          },
-          {
-            "query_id": "q_msg_like_datanode",
-            "query": "SELECT count() FROM {table} WHERE msg LIKE '%dfs.DataNode%'",
-            "cache_mode": "cold",
-            "select_operations_count": 10
-          },
-          {
-            "query_id": "q_msg_like_block",
-            "query": "SELECT count() FROM {table} WHERE msg LIKE '%blk_%'",
-            "cache_mode": "cold",
-            "select_operations_count": 10
-          },
-          {
-            "query_id": "q_msg_like_info",
-            "query": "SELECT count() FROM {table} WHERE msg LIKE '%INFO%'",
-            "cache_mode": "cold",
+            "query_id": "select_country_warm",
+            "query": "select * from {table} where country != '' and country LIKE '%RU%'",
+            "cache_mode": "warm",
             "select_operations_count": 10
           }
         ]

@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Any, Dict, List, Literal, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -56,6 +57,19 @@ _COLD_SELECT_SETTINGS_ASSIGNMENTS = (
     "use_uncompressed_cache = 0",
 )
 _PHASED_STRATEGIES = ("sequential_phased_topn_strategy",)
+_SELECT_NOISE_GATE_MEDIAN_MS = float(
+    os.getenv("BENCH_SELECT_NOISE_GATE_MEDIAN_MS", "20.0")
+)
+_SELECT_NOISE_GATE_NMAD = float(os.getenv("BENCH_SELECT_NOISE_GATE_NMAD", "0.2"))
+_SELECT_NOISE_MIN_MEASUREMENTS_FOR_NMAD = int(
+    os.getenv("BENCH_SELECT_NOISE_MIN_MEASUREMENTS_FOR_NMAD", "10")
+)
+_OPTIMIZE_FINAL_WAIT_TIMEOUT_SEC = float(
+    os.getenv("BENCH_OPTIMIZE_FINAL_WAIT_TIMEOUT_SEC", "600.0")
+)
+_OPTIMIZE_FINAL_WAIT_POLL_SEC = float(
+    os.getenv("BENCH_OPTIMIZE_FINAL_WAIT_POLL_SEC", "1.0")
+)
 
 
 def _is_phased_strategy(strategy: str) -> bool:
@@ -691,6 +705,36 @@ def _filter_positive_finite_measurements(
     return cleaned
 
 
+def _filter_non_negative_finite_measurements(
+    values: Sequence[float],
+    *,
+    metric_name: str,
+    context: str,
+) -> List[float]:
+    """Оставляет только валидные замеры (>= 0 и конечные)."""
+    cleaned: list[float] = []
+    dropped = 0
+    for value in values:
+        try:
+            numeric = float(value)
+        except Exception:
+            dropped += 1
+            continue
+        if math.isfinite(numeric) and numeric >= 0:
+            cleaned.append(numeric)
+        else:
+            dropped += 1
+
+    if dropped > 0:
+        logger.warning(
+            "%s: отброшено %d невалидных замеров `%s` (< 0/NaN/Inf)",
+            context,
+            dropped,
+            metric_name,
+        )
+    return cleaned
+
+
 def _to_pretty_score_calculation_json(value: Dict[str, Any]) -> str:
     """Сериализует детали расчёта score в человекочитаемый JSON."""
     def _normalize_jsonable(payload: Any) -> Any:
@@ -758,6 +802,51 @@ def _median_positive_finite(values: Sequence[Any]) -> Optional[float]:
     if len(valid) % 2 == 1:
         return float(valid[mid])
     return float((valid[mid - 1] + valid[mid]) / 2.0)
+
+
+def _median_any_finite(values: Sequence[Any]) -> Optional[float]:
+    """Считает медиану по любым finite значениям (включая 0)."""
+    valid: list[float] = []
+    for value in values:
+        try:
+            numeric = float(value)
+        except Exception:
+            continue
+        if math.isfinite(numeric):
+            valid.append(numeric)
+    if not valid:
+        return None
+    valid.sort()
+    mid = len(valid) // 2
+    if len(valid) % 2 == 1:
+        return float(valid[mid])
+    return float((valid[mid - 1] + valid[mid]) / 2.0)
+
+
+def _mad_and_nmad(values: Sequence[Any]) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Возвращает (median, mad, nmad), где:
+      - mad = median(|x - median|)
+      - nmad = mad / median
+    """
+    median_value = _median_positive_finite(values)
+    if median_value is None:
+        return None, None, None
+    deviations = []
+    for value in values:
+        try:
+            numeric = float(value)
+        except Exception:
+            continue
+        if not math.isfinite(numeric) or numeric <= 0:
+            continue
+        deviations.append(abs(numeric - median_value))
+    mad_value = _median_any_finite(deviations)
+    if mad_value is None:
+        return median_value, None, None
+    if median_value <= 0:
+        return median_value, mad_value, None
+    return median_value, mad_value, float(mad_value / median_value)
 
 
 def _median_from_measurements_or_percentiles(
@@ -861,6 +950,14 @@ def _build_score_context_medians(
             tested_entry.get("bytes_per_second_measurements", []) or [],
             tested_entry.get("bytes_per_second_percentiles", []) or [],
         )
+        source_read_bytes = _median_from_measurements_or_percentiles(
+            source_entry.get("read_bytes_measurements", []) or [],
+            source_entry.get("read_bytes_percentiles", []) or [],
+        )
+        tested_read_bytes = _median_from_measurements_or_percentiles(
+            tested_entry.get("read_bytes_measurements", []) or [],
+            tested_entry.get("read_bytes_percentiles", []) or [],
+        )
 
         per_query_medians[query_id] = {
             "source_elapsed_ms": source_elapsed_ms,
@@ -878,6 +975,18 @@ def _build_score_context_medians(
             "tested_bytes_per_second_readable": (
                 make_readable_bytes(tested_bytes_per_second)
                 if tested_bytes_per_second is not None
+                else None
+            ),
+            "source_read_bytes": source_read_bytes,
+            "source_read_bytes_readable": (
+                make_readable_bytes(source_read_bytes)
+                if source_read_bytes is not None
+                else None
+            ),
+            "tested_read_bytes": tested_read_bytes,
+            "tested_read_bytes_readable": (
+                make_readable_bytes(tested_read_bytes)
+                if tested_read_bytes is not None
                 else None
             ),
         }
@@ -1068,20 +1177,94 @@ def _resolve_score(
         if stage_override is not None
         else scoring.on_error_score
     )
+    effective_top_selection = (
+        stage_override.top_selection
+        if stage_override is not None
+        else scoring.top_selection
+    )
+    effective_variables = (
+        stage_override.variables
+        if stage_override is not None and stage_override.variables is not None
+        else scoring.variables
+    )
+
+    resolved_variables: Dict[str, float] = {}
+    resolved_variables_details: Dict[str, Dict[str, Any]] = {}
+    for variable_name, variable_expression in (effective_variables or {}).items():
+        variable_context: Dict[str, Any] = {
+            **expression_context,
+            **resolved_variables,
+        }
+        try:
+            variable_value = evaluate_score_expression(
+                variable_expression,
+                variable_context,
+            )
+        except ScoreEvaluationError as exc:
+            logger.warning(
+                "%s: ошибка вычисления scoring.variables.%s: %s",
+                context_label,
+                variable_name,
+                exc,
+            )
+            base_details_with_variables: Dict[str, Any] = {
+                "mode": "expression",
+                "expression": effective_expression,
+                "on_error_score": effective_on_error_score,
+                "stage_name": stage_name,
+                "stage_override_used": stage_override is not None,
+                "variables": effective_variables or {},
+                "resolved_variables": resolved_variables_details,
+                "context": expression_context,
+            }
+            if effective_on_error_score is not None:
+                fallback_score = float(effective_on_error_score)
+                return fallback_score, _to_pretty_score_calculation_json(
+                    {
+                        **base_details_with_variables,
+                        "status": "fallback_on_variable_error",
+                        "error": str(exc),
+                        "error_variable": variable_name,
+                        "final_score": fallback_score,
+                    }
+                )
+            return None, _to_pretty_score_calculation_json(
+                {
+                    **base_details_with_variables,
+                    "status": "variable_error",
+                    "error": str(exc),
+                    "error_variable": variable_name,
+                    "final_score": None,
+                }
+            )
+        resolved_variable_value = float(variable_value)
+        resolved_variables[variable_name] = resolved_variable_value
+        resolved_variables_details[variable_name] = {
+            "expression": variable_expression,
+            "value": resolved_variable_value,
+        }
+
+    final_expression_context: Dict[str, Any] = {
+        **expression_context,
+        **resolved_variables,
+    }
 
     base_details: Dict[str, Any] = {
         "mode": "expression",
         "expression": effective_expression,
+        "top_selection": effective_top_selection,
         "on_error_score": effective_on_error_score,
         "stage_name": stage_name,
         "stage_override_used": stage_override is not None,
+        "variables": effective_variables or {},
+        "resolved_variables": resolved_variables_details,
         "context": expression_context,
     }
 
     try:
         score = evaluate_score_expression(
             effective_expression or "",
-            expression_context,
+            final_expression_context,
         )
     except ScoreEvaluationError as exc:
         logger.warning(
@@ -1469,6 +1652,50 @@ class _ClickHouseRuntimeClient:
         if not rows:
             return 0
         return int(rows[0][0] or 0)
+
+    def optimize_table_final(self, database: str, table: str) -> None:
+        """Принудительно схлопывает парты перед SELECT-замерами."""
+        self.execute(f"OPTIMIZE TABLE `{database}`.`{table}` FINAL")
+
+    def wait_for_no_active_merges(
+        self,
+        database: str,
+        table: str,
+        *,
+        timeout_sec: float = _OPTIMIZE_FINAL_WAIT_TIMEOUT_SEC,
+        poll_sec: float = _OPTIMIZE_FINAL_WAIT_POLL_SEC,
+    ) -> bool:
+        """
+        Ждёт завершения merge-процессов по таблице.
+
+        Возвращает:
+          - True: merges завершились;
+          - False: timeout.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        sleep_sec = max(0.0, float(poll_sec))
+        while True:
+            rows = self.execute(
+                """
+                SELECT count()
+                FROM system.merges
+                WHERE database = %(database)s
+                  AND table = %(table)s
+                """,
+                {"database": database, "table": table},
+            )
+            active_merges = 0
+            if rows:
+                try:
+                    active_merges = int(rows[0][0] or 0)
+                except Exception:
+                    active_merges = 0
+            if active_merges <= 0:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            if sleep_sec > 0:
+                time.sleep(sleep_sec)
 
     def get_total_compressed_size_bytes(self, database: str, table: str) -> float:
         """
@@ -2133,6 +2360,7 @@ class _ClickHouseRuntimeClient:
         strictly_adhere_n_rows: bool,
         total_rows_in_source_table: Optional[int],
         tested_cols: Optional[Sequence[str]] = None,
+        deterministic_order_by: Optional[str] = None,
     ) -> str:
         """Строит SELECT-часть для insert benchmark (обычный режим или strict-fill)."""
         source_ref = f"`{source_database}`.`{source_table}`"
@@ -2144,9 +2372,12 @@ class _ClickHouseRuntimeClient:
                 escaped_name = column_name.replace("`", "``")
                 conditions.append(f"toString(`{escaped_name}`) != ''")
             where_clause = f" WHERE {' AND '.join(conditions)}"
+        order_by_clause = ""
+        if deterministic_order_by:
+            order_by_clause = f" ORDER BY {deterministic_order_by}"
 
         if n_rows is None:
-            return f"SELECT * FROM {source_ref}{where_clause}"
+            return f"SELECT * FROM {source_ref}{where_clause}{order_by_clause}"
 
         if (
             strictly_adhere_n_rows
@@ -2164,11 +2395,15 @@ class _ClickHouseRuntimeClient:
                 "FROM (\n"
                 f"    SELECT * FROM {source_ref}, numbers(repeats_not_equal_zero) AS n\n"
                 f"{where_clause}\n"
+                f"{order_by_clause}\n"
                 f"    LIMIT {n_rows} OFFSET {offset}\n"
                 ")"
             )
 
-        return f"SELECT * FROM {source_ref}{where_clause} LIMIT {n_rows} OFFSET {offset}"
+        return (
+            f"SELECT * FROM {source_ref}{where_clause}{order_by_clause} "
+            f"LIMIT {n_rows} OFFSET {offset}"
+        )
 
     @staticmethod
     def _extract_stream_query_summary(query_summary: Any) -> Optional[Dict[str, float]]:
@@ -2228,6 +2463,7 @@ class _ClickHouseRuntimeClient:
         strictly_adhere_n_rows: bool,
         query_tag: str,
         tested_cols: Optional[Sequence[str]] = None,
+        deterministic_order_by: Optional[str] = None,
     ) -> Dict[str, float]:
         """
         Копирует данные из source в target и возвращает метрики.
@@ -2251,6 +2487,7 @@ class _ClickHouseRuntimeClient:
             strictly_adhere_n_rows=strictly_adhere_n_rows,
             total_rows_in_source_table=total_rows_in_source_table,
             tested_cols=tested_cols,
+            deterministic_order_by=deterministic_order_by,
         )
         stream_client = self._get_stream_client()
         if stream_client is not None:
@@ -2338,6 +2575,7 @@ def _measure_insert(
     n_rows: Optional[int],
     n_measurements: int,
     tested_cols: Optional[Sequence[str]] = None,
+    deterministic_order_by: Optional[str] = None,
 ) -> Dict[str, List[float]]:
     """Собирает замеры INSERT со streaming-fast path и strict-fill режимом."""
     elapsed_ns_entries: list[float] = []
@@ -2362,6 +2600,7 @@ def _measure_insert(
                 strictly_adhere_n_rows=True,
                 query_tag=f"insert-{uuid.uuid4().hex}",
                 tested_cols=tested_cols,
+                deterministic_order_by=deterministic_order_by,
             )
             if not _is_error_query_metrics(query_metrics):
                 break
@@ -2455,6 +2694,7 @@ def _measure_select_queries(
     elapsed_ns_entries: list[float] = []
     read_rows_per_second_entries: list[float] = []
     read_bytes_per_second_entries: list[float] = []
+    read_bytes_entries: list[float] = []
     per_query_entries: list[dict[str, Any]] = []
     max_retries, initial_sleep_sec, retry_sleep_increment = client.get_retry_policy()
 
@@ -2463,6 +2703,7 @@ def _measure_select_queries(
             "elapsed_ns": elapsed_ns_entries,
             "rows_per_second": read_rows_per_second_entries,
             "bytes_per_second": read_bytes_per_second_entries,
+            "read_bytes": read_bytes_entries,
             "per_query": per_query_entries,
         }
 
@@ -2480,16 +2721,22 @@ def _measure_select_queries(
         query_elapsed_ns_entries: list[float] = []
         query_rows_per_second_entries: list[float] = []
         query_bytes_per_second_entries: list[float] = []
+        query_read_bytes_entries: list[float] = []
         cold_settings_assignments: Optional[List[str]] = None
 
         if query_cache_mode == "cold":
             cold_settings_assignments = list(_COLD_SELECT_SETTINGS_ASSIGNMENTS)
 
-        if query_cache_mode == "warm":
-            for warmup_query in query_warmup_queries:
-                client.execute_user_read_only_query(warmup_query)
-
         for measurement_id in range(max(1, query_measurements_count)):
+            if query_cache_mode == "warm":
+                effective_warmups = (
+                    list(query_warmup_queries)
+                    if query_warmup_queries
+                    else [query]
+                )
+                for warmup_query in effective_warmups:
+                    client.execute_user_read_only_query(warmup_query)
+
             effective_query = query
             if query_cache_mode == "cold":
                 effective_query = _with_cold_select_settings(
@@ -2539,6 +2786,7 @@ def _measure_select_queries(
             query_elapsed_ns_entries.append(elapsed_ns)
             query_rows_per_second_entries.append(query_rows_per_second)
             query_bytes_per_second_entries.append(query_bytes_per_second)
+            query_read_bytes_entries.append(read_bytes)
 
         query_context = f"select metrics query[{query_index}]"
         query_elapsed_ns_entries = _filter_positive_finite_measurements(
@@ -2556,9 +2804,15 @@ def _measure_select_queries(
             metric_name="bytes_per_second",
             context=query_context,
         )
+        query_read_bytes_entries = _filter_non_negative_finite_measurements(
+            query_read_bytes_entries,
+            metric_name="read_bytes",
+            context=query_context,
+        )
         elapsed_ns_entries.extend(query_elapsed_ns_entries)
         read_rows_per_second_entries.extend(query_rows_per_second_entries)
         read_bytes_per_second_entries.extend(query_bytes_per_second_entries)
+        read_bytes_entries.extend(query_read_bytes_entries)
 
         per_query_entries.append(
             {
@@ -2571,6 +2825,7 @@ def _measure_select_queries(
                 "elapsed_ns_measurements": query_elapsed_ns_entries,
                 "rows_per_second_measurements": query_rows_per_second_entries,
                 "bytes_per_second_measurements": query_bytes_per_second_entries,
+                "read_bytes_measurements": query_read_bytes_entries,
             }
         )
 
@@ -2578,6 +2833,7 @@ def _measure_select_queries(
         "elapsed_ns": elapsed_ns_entries,
         "rows_per_second": read_rows_per_second_entries,
         "bytes_per_second": read_bytes_per_second_entries,
+        "read_bytes": read_bytes_entries,
         "per_query": per_query_entries,
     }
 
@@ -2616,6 +2872,11 @@ def _build_select_per_query_metrics(
             metric_name="bytes_per_second",
             context=entry_context,
         )
+        read_bytes_measurements = _filter_non_negative_finite_measurements(
+            list(float(value) for value in (raw_entry.get("read_bytes_measurements", []) or [])),
+            metric_name="read_bytes",
+            context=entry_context,
+        )
 
         elapsed_ms_measurements = [
             value / 1_000_000.0 for value in elapsed_ns_measurements
@@ -2633,12 +2894,34 @@ def _build_select_per_query_metrics(
             bytes_per_second_measurements,
             measured_percentiles,
         )
+        read_bytes_percentiles = compute_percentiles(
+            read_bytes_measurements,
+            measured_percentiles,
+        )
         bytes_per_second_measurements_readable = [
             make_readable_bytes(value) for value in bytes_per_second_measurements
         ]
         bytes_per_second_percentiles_readable = [
             make_readable_bytes(value) for value in bytes_per_second_percentiles
         ]
+        read_bytes_measurements_readable = [
+            make_readable_bytes(value) for value in read_bytes_measurements
+        ]
+        read_bytes_percentiles_readable = [
+            make_readable_bytes(value) for value in read_bytes_percentiles
+        ]
+        elapsed_ms_median, elapsed_ms_mad, elapsed_ms_nmad = _mad_and_nmad(
+            elapsed_ms_measurements
+        )
+        is_noisy_too_fast = (
+            elapsed_ms_median is not None and elapsed_ms_median < _SELECT_NOISE_GATE_MEDIAN_MS
+        )
+        is_noisy_high_nmad = (
+            len(elapsed_ms_measurements) >= _SELECT_NOISE_MIN_MEASUREMENTS_FOR_NMAD
+            and elapsed_ms_nmad is not None
+            and elapsed_ms_nmad > _SELECT_NOISE_GATE_NMAD
+        )
+        is_noisy = bool(is_noisy_too_fast or is_noisy_high_nmad)
 
         result.append(
             {
@@ -2661,6 +2944,16 @@ def _build_select_per_query_metrics(
                 "bytes_per_second_measurements_readable": bytes_per_second_measurements_readable,
                 "bytes_per_second_percentiles": bytes_per_second_percentiles,
                 "bytes_per_second_percentiles_readable": bytes_per_second_percentiles_readable,
+                "read_bytes_measurements": read_bytes_measurements,
+                "read_bytes_measurements_readable": read_bytes_measurements_readable,
+                "read_bytes_percentiles": read_bytes_percentiles,
+                "read_bytes_percentiles_readable": read_bytes_percentiles_readable,
+                "elapsed_ms_median": elapsed_ms_median,
+                "elapsed_ms_mad": elapsed_ms_mad,
+                "elapsed_ms_nmad": elapsed_ms_nmad,
+                "is_noisy_too_fast": is_noisy_too_fast,
+                "is_noisy_high_nmad": is_noisy_high_nmad,
+                "is_noisy": is_noisy,
             }
         )
     return result
@@ -2761,6 +3054,18 @@ def _extract_source_select_per_query_metrics(
             "bytes_per_second_percentiles_readable": [
                 str(v) for v in legacy_bytes_per_second_percentiles_readable
             ],
+            "read_bytes_measurements": [],
+            "read_bytes_measurements_readable": [],
+            "read_bytes_percentiles": [],
+            "read_bytes_percentiles_readable": [],
+            "elapsed_ms_median": _median_positive_finite(
+                [float(v) for v in legacy_elapsed_ms_measurements]
+            ),
+            "elapsed_ms_mad": None,
+            "elapsed_ms_nmad": None,
+            "is_noisy_too_fast": False,
+            "is_noisy_high_nmad": False,
+            "is_noisy": False,
         }
     ]
 
@@ -2801,6 +3106,18 @@ def _compute_select_time_speedup_by_query(
         )
         tested_percentiles = _coerce_float_list(tested_entry.get("elapsed_ms_percentiles", []))
         speed_up_coefs = compute_speedup_coefficients(source_percentiles, tested_percentiles)
+        source_read_bytes_percentiles = (
+            _coerce_float_list(source_entry.get("read_bytes_percentiles", []))
+            if source_entry is not None
+            else []
+        )
+        tested_read_bytes_percentiles = _coerce_float_list(
+            tested_entry.get("read_bytes_percentiles", [])
+        )
+        read_bytes_speed_up_coefs = compute_speedup_coefficients(
+            source_read_bytes_percentiles,
+            tested_read_bytes_percentiles,
+        )
         result.append(
             {
                 "query_index": query_index,
@@ -2808,6 +3125,7 @@ def _compute_select_time_speedup_by_query(
                 "query": tested_entry.get("query"),
                 "source_query": source_entry.get("query") if source_entry is not None else None,
                 "elapsed_ms_percentiles_speed_up_coefs": speed_up_coefs,
+                "read_bytes_percentiles_speed_up_coefs": read_bytes_speed_up_coefs,
             }
         )
     return result
@@ -2853,6 +3171,94 @@ def _build_per_query_expression_context(
     }
 
 
+def _resolve_measurement_quality_flag(
+    per_query_metrics: Sequence[Dict[str, Any]],
+) -> str:
+    """
+    Классифицирует качество замеров:
+      - stable: шумных запросов нет;
+      - partially_noisy: часть запросов шумные;
+      - noisy: все запросы шумные.
+    """
+    if not per_query_metrics:
+        return "stable"
+    total = 0
+    noisy = 0
+    for entry in per_query_metrics:
+        if not isinstance(entry, dict):
+            continue
+        total += 1
+        if bool(entry.get("is_noisy")):
+            noisy += 1
+    if total <= 0:
+        return "stable"
+    if noisy <= 0:
+        return "stable"
+    if noisy >= total:
+        return "noisy"
+    return "partially_noisy"
+
+
+def _build_measurement_quality_details(
+    per_query_metrics: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Строит агрегированные детали качества замеров для storage/debug."""
+    total_queries = 0
+    noisy_queries = 0
+    noisy_high_nmad_queries = 0
+    noisy_too_fast_queries = 0
+    max_elapsed_ms_nmad: Optional[float] = None
+    min_elapsed_ms_median: Optional[float] = None
+
+    for entry in per_query_metrics:
+        if not isinstance(entry, dict):
+            continue
+        total_queries += 1
+        if bool(entry.get("is_noisy")):
+            noisy_queries += 1
+        if bool(entry.get("is_noisy_high_nmad")):
+            noisy_high_nmad_queries += 1
+        if bool(entry.get("is_noisy_too_fast")):
+            noisy_too_fast_queries += 1
+
+        try:
+            nmad = float(entry.get("elapsed_ms_nmad"))
+        except Exception:
+            nmad = float("nan")
+        if math.isfinite(nmad) and nmad >= 0:
+            if max_elapsed_ms_nmad is None or nmad > max_elapsed_ms_nmad:
+                max_elapsed_ms_nmad = nmad
+
+        try:
+            median_ms = float(entry.get("elapsed_ms_median"))
+        except Exception:
+            median_ms = float("nan")
+        if math.isfinite(median_ms) and median_ms >= 0:
+            if min_elapsed_ms_median is None or median_ms < min_elapsed_ms_median:
+                min_elapsed_ms_median = median_ms
+
+    noisy_share: float = 0.0
+    if total_queries > 0:
+        noisy_share = noisy_queries / float(total_queries)
+
+    return {
+        "quality_flag": _resolve_measurement_quality_flag(per_query_metrics),
+        "total_queries": total_queries,
+        "noisy_queries": noisy_queries,
+        "noisy_share": round(noisy_share, 6),
+        "noisy_high_nmad_queries": noisy_high_nmad_queries,
+        "noisy_too_fast_queries": noisy_too_fast_queries,
+        "max_elapsed_ms_nmad": (
+            round(max_elapsed_ms_nmad, 6) if max_elapsed_ms_nmad is not None else None
+        ),
+        "min_elapsed_ms_median": (
+            round(min_elapsed_ms_median, 6) if min_elapsed_ms_median is not None else None
+        ),
+        "nmad_gate_gt": _SELECT_NOISE_GATE_NMAD,
+        "median_ms_gate_lt": _SELECT_NOISE_GATE_MEDIAN_MS,
+    }
+
+
 def _extract_source_metrics(source_benchmark_payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Безопасно достаёт baseline metrics из payload source benchmark."""
     if not source_benchmark_payload:
@@ -2861,6 +3267,56 @@ def _extract_source_metrics(source_benchmark_payload: Optional[Dict[str, Any]]) 
     if isinstance(metrics, dict):
         return metrics
     return {}
+
+
+def _build_query_plan_signature(test_queries: Sequence[QueryPayload]) -> str:
+    """Строит стабильную сигнатуру query-плана для дедупликации результатов."""
+    signature_payload: list[dict[str, Any]] = []
+    for query in test_queries:
+        signature_payload.append(
+            {
+                "query_id": str(query.query_id or "").strip(),
+                "query": str(query.query or "").strip(),
+                "cache_mode": str(query.cache_mode or "").strip(),
+                "select_operations_count": (
+                    int(query.select_operations_count)
+                    if query.select_operations_count is not None
+                    else None
+                ),
+                "warmup_queries": [str(value) for value in list(query.warmup_queries)],
+            }
+        )
+    serialized = json.dumps(
+        signature_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _augment_variant_params_with_runtime_context(
+    payload: VariantBenchmarkTaskPayload,
+) -> Dict[str, Any]:
+    """
+    Дополняет variant_params runtime-сигнатурами для безопасного DDL-дедупа.
+
+    Эти поля нужны, чтобы не переиспользовать метрики между задачами с разными
+    query-планами/лимитами измерений.
+    """
+    params = dict(payload.variant_params or {})
+    params["__runtime_query_signature"] = _build_query_plan_signature(
+        payload.query_plan.test_queries
+    )
+    params["__runtime_insert_rows_limit"] = payload.insert_rows_limit
+    params["__runtime_insert_operations_count"] = payload.insert_operations_count
+    params["__runtime_measured_percentiles_signature"] = json.dumps(
+        [int(value) for value in list(payload.measured_percentiles)],
+        ensure_ascii=False,
+        sort_keys=False,
+        default=str,
+    )
+    return params
 
 
 def _build_baseline_copy_ddl(
@@ -2949,6 +3405,29 @@ def _rewrite_query_payloads_to_baseline_copy(
     return rewritten_payloads
 
 
+def _resolve_deterministic_insert_order_by_expression(
+    source_table_ddl: Optional[str],
+) -> Optional[str]:
+    """
+    Возвращает ORDER BY выражение исходной таблицы для детерминированного INSERT ... SELECT.
+
+    Если парсинг DDL не удался, возвращает `None` (fallback к прежнему поведению).
+    """
+    ddl_text = str(source_table_ddl or "").strip()
+    if not ddl_text:
+        return None
+    try:
+        parsed = TableDDL.from_ddl(ddl_text)
+    except Exception:
+        return None
+    order_by_expr = str(parsed.order_by or "").strip()
+    if not order_by_expr:
+        return None
+    if order_by_expr.lower() == "tuple()":
+        return None
+    return order_by_expr
+
+
 def _to_json_or_none(value: Any) -> Optional[str]:
     """Сериализует структуру в JSON-строку или возвращает None."""
     if value is None:
@@ -2992,6 +3471,32 @@ def _build_primary_index_size_json(
             "size_percent_from_total_size": percent_from_total_size,
         }
     )
+
+
+def _build_table_size_value_json(
+    *,
+    size_bytes: Optional[float],
+    size_bytes_readable: Optional[str],
+    bytes_on_disk_sum: Optional[float],
+) -> Optional[str]:
+    """Строит JSON значения размера с дополнительным полем `sum(bytes_on_disk)`."""
+    payload: Dict[str, Any] = {}
+
+    if size_bytes is not None:
+        numeric_size = float(size_bytes)
+        payload["size_bytes"] = numeric_size
+        payload["size_bytes_readable"] = (
+            str(size_bytes_readable or "").strip() or make_readable_bytes(numeric_size)
+        )
+
+    normalized_bytes_on_disk = _to_positive_finite_float(bytes_on_disk_sum)
+    if normalized_bytes_on_disk > 0:
+        payload["bytes_on_disk_sum"] = normalized_bytes_on_disk
+        payload["bytes_on_disk_sum_readable"] = make_readable_bytes(normalized_bytes_on_disk)
+
+    if not payload:
+        return None
+    return _to_json_or_none(payload)
 
 
 def _build_baseline_variant_result(
@@ -3072,6 +3577,33 @@ def _build_baseline_variant_result(
         )
         or tested_total_size_bytes
     )
+    source_bytes_on_disk_sum = float(
+        metrics.get(
+            "source_table_bytes_on_disk_sum",
+            metrics.get("source_table_total_size_bytes_with_indexes", 0.0),
+        )
+        or 0.0
+    )
+    tested_bytes_on_disk_sum = float(
+        metrics.get(
+            "tested_table_bytes_on_disk_sum",
+            metrics.get(
+                "tested_table_total_size_bytes_with_indexes",
+                tested_total_size_bytes_with_indexes,
+            ),
+        )
+        or tested_total_size_bytes_with_indexes
+    )
+    tested_size_with_indexes_json = _build_table_size_value_json(
+        size_bytes=tested_total_size_bytes_with_indexes,
+        size_bytes_readable=make_readable_bytes(tested_total_size_bytes_with_indexes),
+        bytes_on_disk_sum=tested_bytes_on_disk_sum,
+    )
+    source_size_overall_json = _build_table_size_value_json(
+        size_bytes=source_total_size_bytes,
+        size_bytes_readable=make_readable_bytes(source_total_size_bytes),
+        bytes_on_disk_sum=source_bytes_on_disk_sum,
+    )
     tested_table_primary_index_size_json = metrics.get("tested_table_primary_index_size_json")
     if tested_table_primary_index_size_json is None:
         tested_table_primary_index_size_json = _build_primary_index_size_json(
@@ -3088,6 +3620,13 @@ def _build_baseline_variant_result(
         metrics.get("tested_table_consumed_compressed_size_bytes_by_each_column")
         or metrics.get("source_table_consumed_compressed_size_bytes_by_each_column")
     )
+    measurement_quality_details_payload = metrics.get("measurement_quality_details_json")
+    if isinstance(measurement_quality_details_payload, str):
+        measurement_quality_details_json_value = measurement_quality_details_payload
+    else:
+        measurement_quality_details_json_value = _to_json_or_none(
+            measurement_quality_details_payload
+        )
     baseline_row_score_calculation_json = _to_pretty_score_calculation_json(
         {
             "mode": "source_baseline",
@@ -3207,11 +3746,13 @@ def _build_baseline_variant_result(
         tested_table_consumed_compressed_size_bytes_with_indexes_readable=make_readable_bytes(
             tested_total_size_bytes_with_indexes
         ),
+        tested_table_consumed_compressed_size_bytes_with_indexes_json=tested_size_with_indexes_json,
         tested_table_primary_index_size_json=tested_table_primary_index_size_json,
         source_table_consumed_compressed_size_bytes_overall=source_total_size_bytes,
         source_table_consumed_compressed_size_bytes_overall_readable=make_readable_bytes(
             source_total_size_bytes
         ),
+        source_table_consumed_compressed_size_bytes_overall_json=source_size_overall_json,
         # baseline не сравнивается сам с собой: коэффициенты сравнения пустые.
         tested_table_compression_overall_coef=None,
         tested_table_compression_by_each_column_coef=None,
@@ -3219,6 +3760,8 @@ def _build_baseline_variant_result(
         tested_table_n_rows_in_size_test=int(
             metrics.get("tested_table_n_rows_in_size_test", tested_rows) or tested_rows
         ),
+        measurement_quality_flag=str(metrics.get("measurement_quality_flag") or "stable"),
+        measurement_quality_details_json=measurement_quality_details_json_value,
         score_calculation_json=baseline_row_score_calculation_json,
         score=baseline_score,
         extra_json=_to_json_or_none(
@@ -3347,6 +3890,9 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             baseline_database=baseline_database,
             baseline_table=baseline_table,
         )
+        deterministic_insert_order_by = _resolve_deterministic_insert_order_by_expression(
+            payload.source_table_ddl
+        )
 
         insert_stats = _measure_insert(
             client,
@@ -3356,6 +3902,7 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             target_table=baseline_table,
             n_rows=payload.insert_rows_limit,
             n_measurements=payload.insert_operations_count,
+            deterministic_order_by=deterministic_insert_order_by,
         )
         insert_time_ms_measurements = [
             value / 1_000_000.0 for value in insert_stats["elapsed_ns"]
@@ -3373,6 +3920,23 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             payload.measured_percentiles,
         )
 
+        try:
+            client.optimize_table_final(baseline_database, baseline_table)
+            if not client.wait_for_no_active_merges(baseline_database, baseline_table):
+                logger.warning(
+                    "run_source_benchmark: timeout ожидания merges=0 после OPTIMIZE FINAL "
+                    "для %s.%s",
+                    baseline_database,
+                    baseline_table,
+                )
+        except Exception:
+            logger.exception(
+                "run_source_benchmark: не удалось стабилизировать таблицу после INSERT "
+                "(%s.%s)",
+                baseline_database,
+                baseline_table,
+            )
+
         select_stats = _measure_select_queries(
             client,
             test_queries=baseline_test_queries,
@@ -3381,6 +3945,12 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
         source_select_per_query_metrics = _build_select_per_query_metrics(
             select_stats.get("per_query", []),
             payload.measured_percentiles,
+        )
+        measurement_quality_flag = _resolve_measurement_quality_flag(
+            source_select_per_query_metrics
+        )
+        measurement_quality_details = _build_measurement_quality_details(
+            source_select_per_query_metrics
         )
 
         select_time_ms_measurements = [
@@ -3446,12 +4016,27 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             parts_metrics=baseline_parts_metrics,
             normalized_data_size_bytes=baseline_total_size_bytes,
         )
+        baseline_bytes_on_disk_sum = _to_positive_finite_float(
+            baseline_parts_metrics.get("bytes_on_disk")
+        )
+        if baseline_bytes_on_disk_sum <= 0 and baseline_total_size_bytes_with_indexes > 0:
+            baseline_bytes_on_disk_sum = baseline_total_size_bytes_with_indexes
         baseline_primary_index_size_bytes = _to_positive_finite_float(
             baseline_parts_metrics.get("primary_key_bytes_in_memory")
         )
         baseline_primary_index_size_json = _build_primary_index_size_json(
             size_bytes=baseline_primary_index_size_bytes,
             total_size_bytes_with_indexes=baseline_total_size_bytes_with_indexes,
+        )
+        baseline_tested_size_with_indexes_json = _build_table_size_value_json(
+            size_bytes=baseline_total_size_bytes_with_indexes,
+            size_bytes_readable=make_readable_bytes(baseline_total_size_bytes_with_indexes),
+            bytes_on_disk_sum=baseline_bytes_on_disk_sum,
+        )
+        baseline_source_size_overall_json = _build_table_size_value_json(
+            size_bytes=baseline_total_size_bytes,
+            size_bytes_readable=make_readable_bytes(baseline_total_size_bytes),
+            bytes_on_disk_sum=baseline_bytes_on_disk_sum,
         )
 
         source_total_rows = baseline_total_rows
@@ -3504,6 +4089,12 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
                 make_readable_bytes(value) for value in select_bytes_per_second_percentiles
             ],
             "source_table_select_metrics_by_query": source_select_per_query_metrics,
+            "measurement_quality_flag": measurement_quality_flag,
+            "measurement_quality_details_json": measurement_quality_details,
+            "select_noise_gate": {
+                "median_ms_lt": _SELECT_NOISE_GATE_MEDIAN_MS,
+                "nmad_gt": _SELECT_NOISE_GATE_NMAD,
+            },
             "tested_table_consumed_compressed_size_bytes_by_each_column": tested_columns_sizes,
             "source_table_consumed_compressed_size_bytes_by_each_column": source_columns_sizes,
             "tested_table_consumed_compressed_size_bytes_overall": tested_total_size_bytes,
@@ -3513,6 +4104,9 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             "tested_table_consumed_compressed_size_bytes_with_indexes": tested_total_size_bytes_with_indexes,
             "tested_table_consumed_compressed_size_bytes_with_indexes_readable": make_readable_bytes(
                 tested_total_size_bytes_with_indexes
+            ),
+            "tested_table_consumed_compressed_size_bytes_with_indexes_json": (
+                baseline_tested_size_with_indexes_json
             ),
             "tested_table_primary_index_size_json": baseline_primary_index_size_json,
             # Backward-compatible internal aliases for older runs/tests.
@@ -3524,9 +4118,20 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             "source_table_consumed_compressed_size_bytes_overall_readable": make_readable_bytes(
                 source_total_size_bytes
             ),
+            "source_table_consumed_compressed_size_bytes_overall_json": (
+                baseline_source_size_overall_json
+            ),
             "source_table_total_size_bytes_with_indexes": source_total_size_bytes_with_indexes,
             "source_table_total_size_bytes_with_indexes_readable": make_readable_bytes(
                 source_total_size_bytes_with_indexes
+            ),
+            "source_table_bytes_on_disk_sum": baseline_bytes_on_disk_sum,
+            "source_table_bytes_on_disk_sum_readable": make_readable_bytes(
+                baseline_bytes_on_disk_sum
+            ),
+            "tested_table_bytes_on_disk_sum": baseline_bytes_on_disk_sum,
+            "tested_table_bytes_on_disk_sum_readable": make_readable_bytes(
+                baseline_bytes_on_disk_sum
             ),
             "tested_table_n_rows_in_size_test": tested_total_rows,
             "source_table_n_rows_in_size_test": source_total_rows,
@@ -3682,8 +4287,8 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             source_table_ddl=payload.source_table_ddl,
             score_calculation_json=baseline_score_calculation_json,
             score=baseline_score,
-            metrics=metrics,
-        )
+                metrics=metrics,
+            )
         _store_source_benchmark_result_if_configured(
             payload=payload,
             baseline_database=baseline_database,
@@ -3731,8 +4336,9 @@ def run_variant_benchmark(
     measured_percentiles = list(payload.measured_percentiles)
     if not measured_percentiles:
         measured_percentiles = list(DEFAULT_MEASURED_PERCENTILES)
+    runtime_variant_params = _augment_variant_params_with_runtime_context(payload)
     insert_tested_cols: list[str] = []
-    raw_index_choices = payload.variant_params.get("index_choices")
+    raw_index_choices = runtime_variant_params.get("index_choices")
     if isinstance(raw_index_choices, dict):
         for column_name, index_payload in raw_index_choices.items():
             if index_payload:
@@ -3740,6 +4346,82 @@ def run_variant_benchmark(
 
     worker_started_at = datetime.now(timezone.utc)
     try:
+        cloned_result_meta = result_store.clone_result_for_equivalent_ddl(
+            benchmark_strategy=payload.benchmark_strategy,
+            benchmark_run_id=payload.benchmark_run_id,
+            benchmark_started_at=payload.benchmark_started_at,
+            benchmark_id=payload.benchmark_id,
+            source_database=payload.source_database,
+            source_table=payload.source_table,
+            variant_table=payload.variant_table,
+            variant_mode=payload.variant_mode,
+            variant_params=runtime_variant_params,
+            tested_table_ddl=payload.variant_ddl,
+            source_table_ddl=(
+                payload.source_benchmark.get("source_table_ddl")
+                if payload.source_benchmark
+                else None
+            ),
+            celery_task_id=celery_task_id,
+            celery_worker_hostname=celery_worker_hostname,
+            worker_started_at=worker_started_at,
+            worker_finished_at=datetime.now(timezone.utc),
+        )
+        if cloned_result_meta is not None:
+            execution_uuid = str(runtime_variant_params.get("execution_uuid") or "").strip()
+            worker_finished_at = datetime.now(timezone.utc)
+            logger.info(
+                "run_variant_benchmark: DDL duplicate reused without execution "
+                "(benchmark=%s, table=%s.%s, variant=%s, source_variant=%s)",
+                payload.benchmark_id,
+                payload.source_database,
+                payload.source_table,
+                payload.variant_table,
+                cloned_result_meta.get("source_variant_table"),
+            )
+            return BenchmarkVariantResult(
+                benchmark_run_id=payload.benchmark_run_id,
+                benchmark_started_at=payload.benchmark_started_at,
+                benchmark_id=payload.benchmark_id,
+                source_database=payload.source_database,
+                source_table=payload.source_table,
+                variant_table=payload.variant_table,
+                variant_mode=payload.variant_mode,
+                variant_params=runtime_variant_params,
+                id=execution_uuid or None,
+                celery_task_id=(str(celery_task_id).strip() if celery_task_id else None),
+                celery_worker_hostname=(
+                    str(celery_worker_hostname).strip()
+                    if celery_worker_hostname
+                    else None
+                ),
+                worker_started_at=worker_started_at,
+                worker_finished_at=worker_finished_at,
+                source_table_ddl=(
+                    payload.source_benchmark.get("source_table_ddl")
+                    if payload.source_benchmark
+                    else None
+                ),
+                tested_table_ddl=payload.variant_ddl,
+                measurement_quality_flag=(
+                    str(cloned_result_meta.get("measurement_quality_flag") or "").strip()
+                    or None
+                ),
+                score=(
+                    float(cloned_result_meta["score"])
+                    if cloned_result_meta.get("score") is not None
+                    else None
+                ),
+                extra_json=json_dumps(
+                    {
+                        "status": "reused_existing_ddl_metrics",
+                        "source_variant_table": cloned_result_meta.get("source_variant_table"),
+                        "source_result_id": cloned_result_meta.get("source_result_id"),
+                        "cloned_result_id": cloned_result_meta.get("cloned_result_id"),
+                    }
+                ),
+            )
+
         client.create_database_if_not_exists(payload.variant_database)
         client.drop_table_if_exists(
             payload.variant_database,
@@ -3747,6 +4429,12 @@ def run_variant_benchmark(
             allowed_database=payload.variant_database,
         )
         client.execute(payload.variant_ddl)
+        source_table_ddl_for_insert = None
+        if payload.source_benchmark and isinstance(payload.source_benchmark, dict):
+            source_table_ddl_for_insert = payload.source_benchmark.get("source_table_ddl")
+        deterministic_insert_order_by = _resolve_deterministic_insert_order_by_expression(
+            source_table_ddl_for_insert
+        )
 
         insert_stats = _measure_insert(
             client,
@@ -3757,6 +4445,7 @@ def run_variant_benchmark(
             n_rows=payload.insert_rows_limit,
             n_measurements=payload.insert_operations_count,
             tested_cols=insert_tested_cols,
+            deterministic_order_by=deterministic_insert_order_by,
         )
 
         tested_insert_time_ms = [
@@ -3777,6 +4466,23 @@ def run_variant_benchmark(
             measured_percentiles,
         )
 
+        try:
+            client.optimize_table_final(payload.variant_database, payload.variant_table)
+            if not client.wait_for_no_active_merges(payload.variant_database, payload.variant_table):
+                logger.warning(
+                    "run_variant_benchmark: timeout ожидания merges=0 после OPTIMIZE FINAL "
+                    "для %s.%s",
+                    payload.variant_database,
+                    payload.variant_table,
+                )
+        except Exception:
+            logger.exception(
+                "run_variant_benchmark: не удалось стабилизировать таблицу после INSERT "
+                "(%s.%s)",
+                payload.variant_database,
+                payload.variant_table,
+            )
+
         select_stats = _measure_select_queries(
             client,
             test_queries=payload.query_plan.test_queries,
@@ -3786,6 +4492,13 @@ def run_variant_benchmark(
             select_stats.get("per_query", []),
             measured_percentiles,
         )
+        measurement_quality_flag = _resolve_measurement_quality_flag(
+            tested_select_per_query_metrics
+        )
+        measurement_quality_details = _build_measurement_quality_details(
+            tested_select_per_query_metrics
+        )
+        measurement_quality_details_json = _to_json_or_none(measurement_quality_details)
         source_select_per_query_metrics = _extract_source_select_per_query_metrics(source_metrics)
         tested_select_time_ms = [
             value / 1_000_000.0 for value in select_stats["elapsed_ns"]
@@ -3849,6 +4562,11 @@ def run_variant_benchmark(
             parts_metrics=tested_parts_metrics,
             normalized_data_size_bytes=tested_total_size_bytes,
         )
+        tested_bytes_on_disk_sum = _to_positive_finite_float(
+            tested_parts_metrics.get("bytes_on_disk")
+        )
+        if tested_bytes_on_disk_sum <= 0 and tested_total_size_bytes_with_indexes > 0:
+            tested_bytes_on_disk_sum = tested_total_size_bytes_with_indexes
         tested_primary_index_size_bytes = _to_positive_finite_float(
             tested_parts_metrics.get("primary_key_bytes_in_memory")
         )
@@ -3872,6 +4590,11 @@ def run_variant_benchmark(
         )
         if source_total_size_bytes_with_indexes <= 0 and source_total_size_bytes > 0:
             source_total_size_bytes_with_indexes = source_total_size_bytes
+        source_bytes_on_disk_sum = float(
+            source_metrics.get("source_table_bytes_on_disk_sum", 0.0) or 0.0
+        )
+        if source_bytes_on_disk_sum <= 0 and source_total_size_bytes_with_indexes > 0:
+            source_bytes_on_disk_sum = source_total_size_bytes_with_indexes
 
         if source_total_size_bytes <= 0 or source_total_size_bytes_with_indexes <= 0:
             # Защита от редких baseline-анomalies: читаем live size source-таблицы.
@@ -3931,8 +4654,25 @@ def run_variant_benchmark(
                 source_total_size_bytes = live_source_total_size_bytes
             if live_source_total_size_bytes_with_indexes > 0:
                 source_total_size_bytes_with_indexes = live_source_total_size_bytes_with_indexes
+            live_source_bytes_on_disk_sum = _to_positive_finite_float(
+                live_source_parts_metrics.get("bytes_on_disk")
+            )
+            if live_source_bytes_on_disk_sum > 0:
+                source_bytes_on_disk_sum = live_source_bytes_on_disk_sum
         if source_total_size_bytes_with_indexes <= 0 and source_total_size_bytes > 0:
             source_total_size_bytes_with_indexes = source_total_size_bytes
+        if source_bytes_on_disk_sum <= 0 and source_total_size_bytes_with_indexes > 0:
+            source_bytes_on_disk_sum = source_total_size_bytes_with_indexes
+        tested_size_with_indexes_json = _build_table_size_value_json(
+            size_bytes=tested_total_size_bytes_with_indexes,
+            size_bytes_readable=make_readable_bytes(tested_total_size_bytes_with_indexes),
+            bytes_on_disk_sum=tested_bytes_on_disk_sum,
+        )
+        source_size_overall_json = _build_table_size_value_json(
+            size_bytes=source_total_size_bytes,
+            size_bytes_readable=make_readable_bytes(source_total_size_bytes),
+            bytes_on_disk_sum=source_bytes_on_disk_sum,
+        )
 
         source_insert_time_ms_percentiles = list(
             source_metrics.get("source_table_insert_time_ms_measurements_percentiles", []) or []
@@ -4224,7 +4964,7 @@ def run_variant_benchmark(
                 force_score_to_minus_one_reason,
             )
 
-        execution_uuid = str(payload.variant_params.get("execution_uuid") or "").strip()
+        execution_uuid = str(runtime_variant_params.get("execution_uuid") or "").strip()
         worker_finished_at = datetime.now(timezone.utc)
         result = BenchmarkVariantResult(
             benchmark_run_id=payload.benchmark_run_id,
@@ -4234,7 +4974,7 @@ def run_variant_benchmark(
             source_table=payload.source_table,
             variant_table=payload.variant_table,
             variant_mode=payload.variant_mode,
-            variant_params=dict(payload.variant_params),
+            variant_params=runtime_variant_params,
             id=execution_uuid or None,
             celery_task_id=(str(celery_task_id).strip() if celery_task_id else None),
             celery_worker_hostname=(
@@ -4413,11 +5153,15 @@ def run_variant_benchmark(
             tested_table_consumed_compressed_size_bytes_with_indexes_readable=make_readable_bytes(
                 tested_total_size_bytes_with_indexes
             ),
+            tested_table_consumed_compressed_size_bytes_with_indexes_json=(
+                tested_size_with_indexes_json
+            ),
             tested_table_primary_index_size_json=tested_primary_index_size_json,
             source_table_consumed_compressed_size_bytes_overall=source_total_size_bytes,
             source_table_consumed_compressed_size_bytes_overall_readable=make_readable_bytes(
                 source_total_size_bytes
             ),
+            source_table_consumed_compressed_size_bytes_overall_json=source_size_overall_json,
             tested_table_compression_overall_coef=compression_overall_coef,
             # Legacy-совместимый формат хранения: человекочитаемый JSON с отступами.
             tested_table_compression_by_each_column_coef=json.dumps(
@@ -4444,6 +5188,8 @@ def run_variant_benchmark(
                 indent=2,
                 sort_keys=True,
             ),
+            measurement_quality_flag=measurement_quality_flag,
+            measurement_quality_details_json=measurement_quality_details_json,
             score_calculation_json=score_calculation_json,
             score=score,
         )
@@ -4457,7 +5203,7 @@ def run_variant_benchmark(
             source_table=payload.source_table,
             variant_table=payload.variant_table,
             variant_mode=payload.variant_mode,
-            variant_params=payload.variant_params,
+            variant_params=runtime_variant_params,
             tested_table_ddl_fallback=payload.variant_ddl,
             source_table_ddl_fallback=(
                 payload.source_benchmark.get("source_table_ddl")

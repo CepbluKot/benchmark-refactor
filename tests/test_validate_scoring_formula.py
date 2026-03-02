@@ -34,6 +34,12 @@ def _benchmarks_payload(expression: str) -> Dict:
     }
 
 
+def _benchmarks_payload_with_variables(*, expression: str, variables: Dict[str, str]) -> Dict:
+    payload = _benchmarks_payload(expression)
+    payload["benchmarks"][0]["scoring"]["variables"] = variables
+    return payload
+
+
 class ValidateScoringFormulaCliTests(unittest.TestCase):
     def test_returns_zero_for_valid_formula(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -106,6 +112,66 @@ class ValidateScoringFormulaCliTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("OK: scoring.expression валиден", out.getvalue())
             self.assertEqual(err.getvalue(), "")
+
+    def test_returns_zero_for_valid_formula_with_variables(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            benchmarks_path = Path(tmp) / "benchmarks.json"
+            _write_json(
+                benchmarks_path,
+                _benchmarks_payload_with_variables(
+                    expression="weighted",
+                    variables={
+                        "speedup": "safe_div(20, 10)",
+                        "weighted": "speedup * 1.5",
+                    },
+                ),
+            )
+
+            out = StringIO()
+            err = StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = main(
+                    [
+                        "--path",
+                        str(benchmarks_path),
+                        "--type",
+                        "benchmarks",
+                    ]
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertIn("OK: scoring.expression валиден", out.getvalue())
+            self.assertEqual(err.getvalue(), "")
+
+    def test_returns_non_zero_for_invalid_formula_with_unknown_variable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            benchmarks_path = Path(tmp) / "benchmarks.json"
+            _write_json(
+                benchmarks_path,
+                _benchmarks_payload_with_variables(
+                    expression="weighted",
+                    variables={
+                        "speedup": "safe_div(20, 10)",
+                    },
+                ),
+            )
+
+            out = StringIO()
+            err = StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = main(
+                    [
+                        "--path",
+                        str(benchmarks_path),
+                        "--type",
+                        "benchmarks",
+                    ]
+                )
+
+            self.assertEqual(rc, 1)
+            self.assertEqual(out.getvalue(), "")
+            self.assertIn("WARNING: найдены ошибки scoring.expression", err.getvalue())
+            self.assertIn("Неизвестное имя 'weighted'", err.getvalue())
 
     def test_returns_non_zero_for_invalid_formula(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

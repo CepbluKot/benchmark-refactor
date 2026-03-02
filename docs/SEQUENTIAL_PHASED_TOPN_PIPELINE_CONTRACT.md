@@ -83,6 +83,28 @@ For each `index_granularity` parent:
 
 Final winner is top by score in `final_validation`.
 
+## Measurement Stability Contract
+
+Worker-side select measurements use the same stabilization protocol for baseline and variants:
+
+- after INSERT stage: `OPTIMIZE TABLE ... FINAL`;
+- then wait until `system.merges` for the table becomes `0`;
+- in `warm` mode, warmup is executed before every measured query run.
+
+Per-query select metrics include:
+
+- `read_bytes_measurements` / `read_bytes_percentiles`;
+- `elapsed_ms_mad` / `elapsed_ms_nmad`;
+- `is_noisy_too_fast`, `is_noisy_high_nmad`, `is_noisy`.
+
+Variant quality is persisted in `measurement_quality_flag`:
+
+- `stable`
+- `partially_noisy`
+- `noisy`
+
+If all query measurements are noisy, `score` is stored as `NULL`.
+
 ## `variant_params` Fields (actual runtime)
 
 Current runtime writes these keys for phased rows:
@@ -143,3 +165,4 @@ Store computes and updates:
 - one-column ranking: `rank_in_stage_column`, `is_top_n_in_stage_column`.
 
 The strategy also explicitly marks winners with `is_top_n` after each stage.
+Noisy candidates (`score=NULL`) are not selected as stage winners if at least one scored candidate exists in the same stage scope.

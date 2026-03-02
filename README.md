@@ -270,6 +270,8 @@ SQL-строки (`*_ddl`, `*_query`, SQL внутри JSON) перед запи
 `score_calculation_json` сохраняется рядом со `score`.
 Для phased-ранжирования `is_top_n` выставляется по winners фазы; если фактически помечено меньше
 ожидаемого top-N, store автоматически делает fallback-перерасчёт `rank_in_phase`/`is_top_n` по `score`.
+В `sequential_phased_topn_strategy` noisy-варианты (`score=NULL`) не проходят в stage winners,
+если в стадии есть хотя бы один scored-кандидат.
 Идемпотентность записи варианта обеспечивается по `id`:
 вокруг `check -> insert` используется Redis lock в result-store.
 Lock настраивается через `BENCH_RESULT_STORE_REDIS_URL`
@@ -964,8 +966,26 @@ print(run_id)
   в итоговом variant-DDL ключ остаётся один (без конфликтующих дублей).
 - `queries.test_queries[].cache_mode = cold`: перед каждым замером запрос
   автоматически дополняется `SETTINGS use_uncompressed_cache = 0`.
-- `queries.test_queries[].cache_mode = warm`: перед серией замеров запроса выполняются
-  query-level `warmup_queries`, затем делаются `select_operations_count` замеров.
+- `queries.test_queries[].cache_mode = warm`: перед **каждым** замером выполняются
+  query-level `warmup_queries` (если не заданы — прогревом считается сам query),
+  затем выполняется измеряемый запрос.
+- Перед select-замерами worker стабилизирует таблицу:
+  `OPTIMIZE TABLE ... FINAL` + ожидание `system.merges=0`.
+  Таймаут/интервал ожидания настраиваются:
+  `BENCH_OPTIMIZE_FINAL_WAIT_TIMEOUT_SEC`, `BENCH_OPTIMIZE_FINAL_WAIT_POLL_SEC`.
+- Для INSERT benchmark используется детерминированный порядок чтения source-данных:
+  `INSERT ... SELECT ... ORDER BY <source_ddl.order_by>` (если в исходном DDL есть ORDER BY).
+- Per-query select метрики теперь включают:
+  - `read_bytes_measurements` / `read_bytes_percentiles`;
+  - `elapsed_ms_mad` / `elapsed_ms_nmad`;
+  - флаги шума `is_noisy_too_fast`, `is_noisy_high_nmad`, `is_noisy`.
+- Noise-gate:
+  - `median(elapsed_ms) < BENCH_SELECT_NOISE_GATE_MEDIAN_MS` (default `20ms`) => noisy;
+  - при `N >= BENCH_SELECT_NOISE_MIN_MEASUREMENTS_FOR_NMAD` (default `10`):
+    `nMAD > BENCH_SELECT_NOISE_GATE_NMAD` (default `0.2`) => noisy.
+- Качество варианта сохраняется в `measurement_quality_flag`:
+  `stable | partially_noisy | noisy`.
+  Если флаг `noisy`, `score` принудительно сохраняется как `NULL`.
 
 ### `scoring`: как настроить формулу score
 
@@ -977,6 +997,13 @@ print(run_id)
 
 `scoring` поля:
 - `mode`
+- `top_selection` (опционально, default=`max`): как выбирать top-варианты по `score`
+  на этой стадии:
+  - `max` — в top попадают варианты с **наибольшим** `score`;
+  - `min` — в top попадают варианты с **наименьшим** `score`.
+- `variables` (опционально): map промежуточных переменных `name -> expression`.
+  Переменные считаются последовательно в порядке объявления и доступны
+  в итоговом `expression`.
 - `expression` (обязательно при `mode=expression`; по умолчанию используется ratio-геометрическое среднее)
 - `on_error_score` (опционально: если expression упало, будет это значение; иначе `score=None`)
 - `by_stage` (опционально): stage-specific override формулы.
@@ -984,6 +1011,9 @@ print(run_id)
   - для source baseline: `source_baseline`;
   - для variant задач: `types`, `indexes`, `combined`, `order_by`, `codecs`, `final_validation`.
   Если стадия не описана в `by_stage`, используется верхнеуровневый `scoring`.
+  Внутри `by_stage.<stage>` можно также задать:
+  - свой `variables`;
+  - свой `top_selection` (`max`/`min`) для ранжирования и top-N именно этой стадии.
 
 Примеры:
 
@@ -991,6 +1021,23 @@ print(run_id)
 {
   "scoring": {
     "mode": "expression",
+    "top_selection": "max",
+    "variables": {
+      "insert_ratio": "safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0)",
+      "select_ratio": "safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0)",
+      "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+    },
+    "expression": "pow(insert_ratio * select_ratio * compression_ratio, 1 / 3)",
+    "on_error_score": -1
+  }
+}
+```
+
+```json
+{
+  "scoring": {
+    "mode": "expression",
+    "top_selection": "max",
     "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)",
     "on_error_score": -1
   }
@@ -1001,14 +1048,46 @@ print(run_id)
 {
   "scoring": {
     "mode": "expression",
+    "top_selection": "max",
     "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)",
     "by_stage": {
       "types": {
         "mode": "expression",
+        "top_selection": "max",
+        "variables": {
+          "select_ratio": "safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0)"
+        },
+        "expression": "select_ratio"
+      },
+      "indexes": {
+        "mode": "expression",
+        "top_selection": "max",
+        "variables": {
+          "size_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)",
+          "select_ratio": "safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0)"
+        },
+        "expression": "pow(size_ratio, 0.2) * pow(select_ratio, 0.8)"
+      }
+    }
+  }
+}
+```
+
+```json
+{
+  "scoring": {
+    "mode": "expression",
+    "top_selection": "max",
+    "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)",
+    "by_stage": {
+      "types": {
+        "mode": "expression",
+        "top_selection": "max",
         "expression": "safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0)"
       },
       "indexes": {
         "mode": "expression",
+        "top_selection": "max",
         "expression": "pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.2) * pow(safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0), 0.8)"
       }
     }

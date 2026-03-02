@@ -16,9 +16,27 @@ def _issues_for_scoring(
     scope: str,
 ) -> List[str]:
     """Возвращает список проблем для одного scoring-блока."""
+    issues: list[str] = []
+    declared_variables = scoring.variables or {}
+    declared_names_in_order: list[str] = []
+
+    for variable_name, variable_expression in declared_variables.items():
+        raw_issues = validate_score_expression(
+            variable_expression,
+            extra_allowed_names=declared_names_in_order,
+        )
+        issues.extend(
+            f"{scope}, variable={variable_name}: {issue}" for issue in raw_issues
+        )
+        declared_names_in_order.append(variable_name)
+
     expression = scoring.expression or ""
-    raw_issues = validate_score_expression(expression)
-    return [f"{scope}: {issue}" for issue in raw_issues]
+    raw_issues = validate_score_expression(
+        expression,
+        extra_allowed_names=declared_names_in_order,
+    )
+    issues.extend(f"{scope}: {issue}" for issue in raw_issues)
+    return issues
 
 
 def _scope_for_table_rule(benchmark: BenchmarkConfig, table_rule: TableRuleConfig) -> str:

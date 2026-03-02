@@ -387,17 +387,32 @@ def _query_filters_column(sql: str, column_name: str) -> bool:
     return re.search(token_pattern, where_body) is not None
 
 
+def _query_references_column(sql: str, column_name: str) -> bool:
+    """Проверяет, что SQL содержит ссылку на колонку (в любой части запроса)."""
+    cleaned_sql = re.sub(r"'(?:''|[^'])*'", " ", sql)
+    cleaned_sql = re.sub(r'"(?:\\"|[^"])*"', " ", cleaned_sql)
+    token_pattern = rf"(?<![\w`])`?{re.escape(column_name)}`?(?![\w`])"
+    return re.search(token_pattern, cleaned_sql) is not None
+
+
 def _filter_query_plan_by_column(
     query_plan: QueryPlan,
     column_name: str,
+    *,
+    where_only: bool = True,
 ) -> Optional[QueryPlan]:
     """
-    Возвращает подмножество test_queries, где колонка реально участвует в WHERE.
+    Возвращает подмножество test_queries по колонке.
+
+    - `where_only=True`: колонка должна участвовать в WHERE (актуально для skip-index).
+    - `where_only=False`: колонка может встречаться в любой части SELECT-запроса
+      (актуально для type/codec one-column фаз).
 
     Если подходящих запросов нет, возвращает `None`.
     """
+    predicate = _query_filters_column if where_only else _query_references_column
     filtered_queries = [
-        query for query in query_plan.test_queries if _query_filters_column(query.query, column_name)
+        query for query in query_plan.test_queries if predicate(query.query, column_name)
     ]
     if not filtered_queries:
         return None
@@ -730,22 +745,54 @@ def _wait_for_stage_summaries(
         sleep(_STAGE_WAIT_POLL_INTERVAL_SEC)
 
 
-def _sorted_candidates(candidates: Sequence[_PhaseCandidate]) -> List[_PhaseCandidate]:
-    """Сортирует кандидаты по score (DESC), None-score в конец."""
+def _sorted_candidates(
+    candidates: Sequence[_PhaseCandidate],
+    *,
+    prefer_higher_score: bool,
+) -> List[_PhaseCandidate]:
+    """Сортирует кандидаты по score (DESC/ASC), None-score всегда в конец."""
+    if prefer_higher_score:
+        return sorted(
+            candidates,
+            key=lambda item: (
+                item.score is None,
+                -(item.score if item.score is not None else 0.0),
+                item.variant_table,
+            ),
+        )
     return sorted(
         candidates,
         key=lambda item: (
             item.score is None,
-            -(item.score if item.score is not None else 0.0),
+            (item.score if item.score is not None else 0.0),
             item.variant_table,
         ),
     )
+
+
+def _take_top_scored_or_fallback(
+    candidates: Sequence[_PhaseCandidate],
+    *,
+    limit: int,
+) -> List[_PhaseCandidate]:
+    """
+    Возвращает top-N, исключая `score=None`, если есть scored-кандидаты.
+
+    Это не даёт noisy-вариантам (`score=None`) попадать в winners, пока есть
+    хотя бы один стабильный вариант в текущем stage.
+    """
+    safe_limit = max(1, int(limit))
+    scored = [candidate for candidate in candidates if candidate.score is not None]
+    if scored:
+        return scored[:safe_limit]
+    return list(candidates[:safe_limit])
 
 
 def _build_top_choice_maps(
     options_by_column: Dict[str, List[Tuple[float, Any]]],
     *,
     limit: int,
+    prefer_higher_score: bool,
 ) -> List[Tuple[float, Dict[str, Any]]]:
     """
     Собирает top-N merged-комбинаций по колонкам на основе score-суммы.
@@ -773,7 +820,7 @@ def _build_top_choice_maps(
         for score_value, choice_map in sorted(
             expanded,
             key=lambda item: item[0],
-            reverse=True,
+            reverse=prefer_higher_score,
         ):
             map_key = repr(sorted(choice_map.items()))
             if map_key in seen_keys:
@@ -792,9 +839,10 @@ def _dedupe_stage_options(
     options: Sequence[Tuple[float, Any]],
     *,
     limit: int,
+    prefer_higher_score: bool,
 ) -> List[Tuple[float, Any]]:
     """Дедуплицирует stage-options, оставляя max-score вариант для каждого payload."""
-    ranked = sorted(options, key=lambda item: item[0], reverse=True)
+    ranked = sorted(options, key=lambda item: item[0], reverse=prefer_higher_score)
     deduped: List[Tuple[float, Any]] = []
     seen_payloads: set[str] = set()
     for score_value, payload in ranked:
@@ -1219,10 +1267,29 @@ def _select_top_stage_options(
     options: Sequence[Tuple[float, Any]],
     *,
     limit: int,
+    prefer_higher_score: bool,
 ) -> List[Any]:
     """Возвращает top-N payload options с дедупликацией по payload."""
-    ranked_payloads = _dedupe_stage_options(options, limit=max(1, int(limit)))
+    ranked_payloads = _dedupe_stage_options(
+        options,
+        limit=max(1, int(limit)),
+        prefer_higher_score=prefer_higher_score,
+    )
     return [payload for _, payload in ranked_payloads]
+
+
+def _prefer_higher_score_for_stage(
+    table_plan: TableBenchmarkPlan,
+    stage_name: str,
+) -> bool:
+    """Возвращает направление ранжирования score для стадии."""
+    stage_override = table_plan.scoring.stage_override(stage_name)
+    top_selection = (
+        stage_override.top_selection
+        if stage_override is not None
+        else table_plan.scoring.top_selection
+    )
+    return str(top_selection).strip().lower() != "min"
 
 
 def _remove_indexes_for_column(ddl: TableDDL, column_name: str) -> None:
@@ -1263,6 +1330,18 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
         top_n_column_types = _resolve_stage_column_top_n(table_plan, "types")
         top_n_column_codecs = _resolve_stage_column_top_n(table_plan, "codecs")
         top_n_column_indexes = _resolve_stage_column_top_n(table_plan, "indexes")
+        prefer_higher_order_by = _prefer_higher_score_for_stage(table_plan, "order_by")
+        prefer_higher_types = _prefer_higher_score_for_stage(table_plan, "types")
+        prefer_higher_codecs = _prefer_higher_score_for_stage(table_plan, "codecs")
+        prefer_higher_index_granularity = _prefer_higher_score_for_stage(
+            table_plan,
+            "index_granularity",
+        )
+        prefer_higher_indexes = _prefer_higher_score_for_stage(table_plan, "indexes")
+        prefer_higher_final_validation = _prefer_higher_score_for_stage(
+            table_plan,
+            "final_validation",
+        )
         stage_generation_limit_types = _resolve_stage_generation_limit(table_plan, "types")
         stage_generation_limit_codecs = _resolve_stage_generation_limit(table_plan, "codecs")
         stage_generation_limit_index_granularity = _resolve_stage_generation_limit(
@@ -1397,7 +1476,13 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             )
             if candidate is not None:
                 order_candidates.append(candidate)
-        order_winners = _sorted_candidates(order_candidates)[:top_n_order_by]
+        order_winners = _take_top_scored_or_fallback(
+            _sorted_candidates(
+                order_candidates,
+                prefer_higher_score=prefer_higher_order_by,
+            ),
+            limit=top_n_order_by,
+        )
         if not order_winners:
             logger.warning(
                 "SequentialPhasedTopN: фаза ORDER BY не вернула победителей "
@@ -1446,6 +1531,13 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             context_by_variant_table: dict[str, _TypeJobContext] = {}
 
             for column in base_ddl.columns:
+                column_query_plan = _filter_query_plan_by_column(
+                    raw_query_plan,
+                    column.name,
+                    where_only=False,
+                )
+                if column_query_plan is None:
+                    continue
                 type_candidates = _resolve_type_candidates_for_column(
                     table_plan=table_plan,
                     column_name=column.name,
@@ -1480,7 +1572,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                     job = _build_job(
                         runner=runner,
                         table_plan=table_plan,
-                        raw_query_plan=raw_query_plan,
+                        raw_query_plan=column_query_plan,
                         variant_ddl=variant_ddl,
                         variant_mode="types",
                         phase_name="types",
@@ -1540,7 +1632,11 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                         )
                     )
                 for column_name, options in options_by_column.items():
-                    selected = _select_top_stage_options(options, limit=top_n_column_types)
+                    selected = _select_top_stage_options(
+                        options,
+                        limit=top_n_column_types,
+                        prefer_higher_score=prefer_higher_types,
+                    )
                     if not selected:
                         continue
                     branch.type_options_by_column[column_name] = selected
@@ -1602,6 +1698,13 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             type_by_variant_table: dict[str, str] = {}
 
             for column in base_ddl.columns:
+                column_query_plan = _filter_query_plan_by_column(
+                    raw_query_plan,
+                    column.name,
+                    where_only=False,
+                )
+                if column_query_plan is None:
+                    continue
                 column_type_options = branch.type_options_by_column.get(column.name, [])
                 if not column_type_options:
                     column_type_options = [
@@ -1640,7 +1743,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                         job = _build_job(
                             runner=runner,
                             table_plan=table_plan,
-                            raw_query_plan=raw_query_plan,
+                            raw_query_plan=column_query_plan,
                             variant_ddl=variant_ddl,
                             variant_mode="codecs",
                             phase_name="codecs",
@@ -1714,7 +1817,11 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                         )
                     )
                 for column_name, options in options_by_column.items():
-                    selected = _select_top_stage_options(options, limit=top_n_column_codecs)
+                    selected = _select_top_stage_options(
+                        options,
+                        limit=top_n_column_codecs,
+                        prefer_higher_score=prefer_higher_codecs,
+                    )
                     if not selected:
                         continue
                     branch.codec_options_by_column[column_name] = selected
@@ -1801,6 +1908,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             merged_choice_candidates = _build_top_choice_maps(
                 options_for_merge,
                 limit=max(1, top_n_index_granularity),
+                prefer_higher_score=prefer_higher_index_granularity,
             )
             if not merged_choice_candidates:
                 branch.granularity_candidates = [parent]
@@ -1899,7 +2007,10 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                     break
 
             if not jobs:
-                branch.granularity_candidates = merged_candidates[:max(1, top_n_index_granularity)]
+                branch.granularity_candidates = _take_top_scored_or_fallback(
+                    merged_candidates,
+                    limit=max(1, top_n_index_granularity),
+                )
                 continue
 
             stage35_has_jobs = True
@@ -1944,9 +2055,13 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                         index_choices={},
                     )
                 )
-            branch.granularity_candidates = _sorted_candidates(branch_candidates)[
-                :max(1, top_n_index_granularity)
-            ]
+            branch.granularity_candidates = _take_top_scored_or_fallback(
+                _sorted_candidates(
+                    branch_candidates,
+                    prefer_higher_score=prefer_higher_index_granularity,
+                ),
+                limit=max(1, top_n_index_granularity),
+            )
             stage35_winners.extend(
                 candidate.variant_table for candidate in branch.granularity_candidates
             )
@@ -2143,6 +2258,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                     selected = _select_top_stage_options(
                         options_by_column.get(column_name, []),
                         limit=top_n_column_indexes,
+                        prefer_higher_score=prefer_higher_indexes,
                     )
                     if not selected:
                         fallback_choice = _IndexColumnChoice.from_context(
@@ -2358,7 +2474,13 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             )
             if candidate is not None:
                 final_candidates.append(candidate)
-        final_ranked = _sorted_candidates(final_candidates)
+        final_ranked = _take_top_scored_or_fallback(
+            _sorted_candidates(
+                final_candidates,
+                prefer_higher_score=prefer_higher_final_validation,
+            ),
+            limit=max(1, len(final_candidates)),
+        )
         if not final_ranked:
             logger.warning(
                 "SequentialPhasedTopN: финальная валидация не вернула результатов "

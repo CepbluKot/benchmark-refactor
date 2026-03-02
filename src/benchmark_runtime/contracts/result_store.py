@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from ..types import (
     BenchmarkVariantResult,
@@ -174,3 +174,47 @@ class BenchmarkResultStore(ABC):
             target_tables,
         )
         return {}
+
+    def clone_result_for_equivalent_ddl(
+        self,
+        *,
+        benchmark_strategy: str,
+        benchmark_run_id: int,
+        benchmark_started_at: datetime,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        variant_table: str,
+        variant_mode: str,
+        variant_params: Dict[str, Any],
+        tested_table_ddl: str,
+        source_table_ddl: Optional[str],
+        celery_task_id: Optional[str],
+        celery_worker_hostname: Optional[str],
+        worker_started_at: Optional[datetime] = None,
+        worker_finished_at: Optional[datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Пытается переиспользовать уже сохранённый результат для эквивалентного DDL.
+
+        Возвращает metadata клонирования (`source_variant_table`, `source_result_id`, `score`)
+        либо `None`, если эквивалентный результат не найден или клонирование не поддерживается.
+        """
+        del (
+            benchmark_strategy,
+            benchmark_run_id,
+            benchmark_started_at,
+            benchmark_id,
+            source_database,
+            source_table,
+            variant_table,
+            variant_mode,
+            variant_params,
+            tested_table_ddl,
+            source_table_ddl,
+            celery_task_id,
+            celery_worker_hostname,
+            worker_started_at,
+            worker_finished_at,
+        )
+        return None

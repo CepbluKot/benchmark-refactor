@@ -2675,6 +2675,79 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(indexes_jobs, [])
         self.assertGreaterEqual(len(final_jobs), 1)
 
+    def test_sequential_phased_topn_types_and_codecs_use_only_queries_with_stage_column(self) -> None:
+        """Проверяет, что one-column фазы types/codecs используют только релевантные запросы."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_phased_topn_column_query_scope",
+            connection_id="prod_ch",
+            strategy="sequential_phased_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            insert_operations_count=10,
+            sequential_types_top_n_for_indexes=1,
+            index_granularity_values=[8192],
+            order_by_first="event_time",
+            order_by_candidates=["user_id"],
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                        codecs=["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+                    ),
+                    ColumnRuleConfig(
+                        by_type="Nullable(Decimal(18,4))",
+                        by_name="revenue",
+                        types=["Nullable(Decimal(18,4))", "Nullable(Float64)"],
+                        codecs=["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+                    ),
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[
+                    QueryConfigItem(
+                        query="SELECT count() FROM {table} WHERE user_id > 0"
+                    ),
+                ],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = SequentialPhasedScoringAdapter()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=InMemoryBenchmarkResultStore(),
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+
+        type_jobs = [job for job in adapter.executed_jobs if job.variant_meta.mode == "types"]
+        codec_jobs = [job for job in adapter.executed_jobs if job.variant_meta.mode == "codecs"]
+
+        self.assertGreaterEqual(len(type_jobs), 1)
+        self.assertGreaterEqual(len(codec_jobs), 1)
+        self.assertEqual(
+            {str(job.variant_meta.stage_column_name or "") for job in type_jobs},
+            {"user_id"},
+        )
+        self.assertEqual(
+            {str(job.variant_meta.stage_column_name or "") for job in codec_jobs},
+            {"user_id"},
+        )
+        # И в query_plan этих job не должно быть запросов, не содержащих stage-колонку.
+        for job in [*type_jobs, *codec_jobs]:
+            self.assertTrue(job.query_plan.test_queries)
+            stage_column = str(job.variant_meta.stage_column_name or "")
+            for query in job.query_plan.test_queries:
+                self.assertIn(stage_column, query.query)
+
     def test_runner_estimates_global_progress_for_phased_strategy_by_real_candidates(self) -> None:
         """Проверяет fixed global target для phased-стратегии по реальным candidate-правилам."""
         benchmark = BenchmarkConfig(

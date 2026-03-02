@@ -209,6 +209,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_select_metrics_by_query_json",
         "source_table_select_metrics_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
+        "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json",
         "tested_table_consumed_compressed_size_bytes_by_each_column",
         "source_table_consumed_compressed_size_bytes_by_each_column",
         "tested_table_consumed_compressed_size_bytes_overall",
@@ -233,6 +234,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "variant_params",
         "rank_in_phase",
         "is_top_n",
+        "measurement_quality_flag",
+        "measurement_quality_details_json",
         "score_calculation_json",
         "score",
     ]
@@ -263,11 +266,14 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "source_table_consumed_compressed_size_bytes_overall_json",
         "tested_table_compression_overall_coef",
         "select_metrics_json",
+        "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json",
         "insert_metrics_json",
         "score_calculation_json",
         "score",
         "rank_in_phase",
         "is_top_n",
+        "measurement_quality_flag",
+        "measurement_quality_details_json",
     ]
     _PRETTY_JSON_STRING_COLUMNS: tuple[str, ...] = (
         "index_params",
@@ -275,6 +281,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_select_metrics_by_query_json",
         "source_table_select_metrics_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
+        "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json",
         "select_metrics_json",
         "tested_table_insert_metrics_json",
         "source_table_insert_metrics_json",
@@ -288,6 +295,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_primary_index_size_json",
         "tested_table_consumed_compressed_size_bytes_with_indexes_json",
         "source_table_consumed_compressed_size_bytes_overall_json",
+        "measurement_quality_details_json",
         "score_calculation_json",
     )
     _SQL_TEXT_COLUMNS: tuple[str, ...] = (
@@ -301,6 +309,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_select_metrics_by_query_json",
         "source_table_select_metrics_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
+        "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json",
     )
     _CUSTOM_SCORE_CONTEXT_FALLBACK_KEYS: frozenset[str] = frozenset(
         {
@@ -320,6 +329,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             "tested_table_select_metrics_by_query_json",
             "source_table_select_metrics_by_query_json",
             "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
+            "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json",
         }
     )
 
@@ -491,12 +501,15 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `source_table_consumed_compressed_size_bytes_overall_json` Nullable(String),
                 `tested_table_compression_overall_coef` Nullable(Float64),
                 `select_metrics_json` Nullable(String),
+                `tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json` Nullable(String),
                 `insert_metrics_json` Nullable(String),
                 `score_calculation_json` Nullable(String),
                 `score` Nullable(Float64),
                 `score_custom` Nullable(Float64),
                 `rank_in_phase` Nullable(Int32),
                 `is_top_n` Bool DEFAULT 0,
+                `measurement_quality_flag` Nullable(String),
+                `measurement_quality_details_json` Nullable(String),
                 `rank_in_stage_column` Nullable(Int32),
                 `is_top_n_in_stage_column` Bool DEFAULT 0
             )
@@ -523,11 +536,14 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `source_table_consumed_compressed_size_bytes_overall_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_compression_overall_coef` Nullable(Float64),
                 ADD COLUMN IF NOT EXISTS `select_metrics_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `insert_metrics_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `score_calculation_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `score_custom` Nullable(Float64),
                 ADD COLUMN IF NOT EXISTS `rank_in_phase` Nullable(Int32),
                 ADD COLUMN IF NOT EXISTS `is_top_n` Bool DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS `measurement_quality_flag` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `measurement_quality_details_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `rank_in_stage_column` Nullable(Int32),
                 ADD COLUMN IF NOT EXISTS `is_top_n_in_stage_column` Bool DEFAULT 0
             """
@@ -620,6 +636,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `tested_table_select_metrics_by_query_json` Nullable(String),
                 `source_table_select_metrics_by_query_json` Nullable(String),
                 `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json` Nullable(String),
+                `tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json` Nullable(String),
                 `tested_table_consumed_compressed_size_bytes_by_each_column` Nullable(String),
                 `source_table_consumed_compressed_size_bytes_by_each_column` Nullable(String),
                 `tested_table_consumed_compressed_size_bytes_overall` Nullable(Float64),
@@ -643,6 +660,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `variant_params` String,
                 `rank_in_phase` Nullable(Int32),
                 `is_top_n` Bool DEFAULT 0,
+                `measurement_quality_flag` Nullable(String),
+                `measurement_quality_details_json` Nullable(String),
                 `rank_in_stage_column` Nullable(Int32),
                 `is_top_n_in_stage_column` Bool DEFAULT 0,
                 `score_calculation_json` Nullable(String),
@@ -661,6 +680,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `tested_table_select_metrics_by_query_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `source_table_select_metrics_by_query_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_insert_metrics_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `source_table_insert_metrics_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `insert_metrics_json` Nullable(String),
@@ -682,6 +702,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `size_bytes_indexes_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `rank_in_phase` Nullable(Int32),
                 ADD COLUMN IF NOT EXISTS `is_top_n` Bool DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS `measurement_quality_flag` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `measurement_quality_details_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `rank_in_stage_column` Nullable(Int32),
                 ADD COLUMN IF NOT EXISTS `is_top_n_in_stage_column` Bool DEFAULT 0
             """
@@ -792,11 +814,29 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             source_database=table_plan.database,
             source_table=table_plan.table,
         )
-        del source_table_ddl, benchmark_queries, total_rows, scoring
+        del source_table_ddl, benchmark_queries, total_rows
         top_n_limits_json: Optional[str] = None
+        run_settings_payload: Dict[str, Any] = {}
         if table_plan.sequential_top_n_limits is not None:
+            run_settings_payload["sequential_top_n_limits"] = (
+                table_plan.sequential_top_n_limits.model_dump(mode="json")
+            )
+        run_settings_payload["score_top_selection"] = str(
+            getattr(scoring, "top_selection", "max") or "max"
+        ).strip().lower()
+        stage_selection_map: Dict[str, str] = {}
+        for stage_name, stage_scoring in (scoring.by_stage or {}).items():
+            normalized_stage_name = str(stage_name or "").strip().lower()
+            if not normalized_stage_name:
+                continue
+            stage_selection_map[normalized_stage_name] = str(
+                getattr(stage_scoring, "top_selection", "max") or "max"
+            ).strip().lower()
+        if stage_selection_map:
+            run_settings_payload["score_top_selection_by_stage"] = stage_selection_map
+        if run_settings_payload:
             top_n_limits_json = json.dumps(
-                table_plan.sequential_top_n_limits.model_dump(mode="json"),
+                run_settings_payload,
                 ensure_ascii=False,
                 indent=2,
                 sort_keys=True,
@@ -992,6 +1032,269 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             benchmark_strategy=benchmark_strategy,
         )
 
+    def clone_result_for_equivalent_ddl(
+        self,
+        *,
+        benchmark_strategy: str,
+        benchmark_run_id: int,
+        benchmark_started_at: datetime,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        variant_table: str,
+        variant_mode: str,
+        variant_params: Dict[str, Any],
+        tested_table_ddl: str,
+        source_table_ddl: Optional[str],
+        celery_task_id: Optional[str],
+        celery_worker_hostname: Optional[str],
+        worker_started_at: Optional[datetime] = None,
+        worker_finished_at: Optional[datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Клонирует существующий результат для эквивалентного DDL без повторного прогона.
+
+        Поиск выполняется по истории запусков (не только внутри текущего run_id):
+          - benchmark_id / source_db_name / source_table_name / variant_mode;
+          - сигнатура DDL;
+          - runtime-сигнатуры query-plan/insert-limit/insert-ops/percentiles.
+        """
+        table_name = (
+            self._phased_table
+            if self._is_phased_strategy(benchmark_strategy)
+            else self._legacy_table
+        )
+        normalized_variant_table = str(variant_table or "").strip()
+        if not normalized_variant_table:
+            return None
+        normalized_variant_mode = str(variant_mode or "").strip()
+        if not normalized_variant_mode:
+            return None
+
+        normalized_params = dict(variant_params or {})
+        runtime_query_signature = str(
+            normalized_params.get("__runtime_query_signature") or ""
+        ).strip()
+        runtime_insert_rows_limit = normalized_params.get("__runtime_insert_rows_limit")
+        runtime_insert_operations_count = normalized_params.get(
+            "__runtime_insert_operations_count"
+        )
+        runtime_percentiles_signature = str(
+            normalized_params.get("__runtime_measured_percentiles_signature") or ""
+        ).strip()
+
+        target_ddl_formatted = self._format_ddl_or_as_is(str(tested_table_ddl or "").strip())
+        target_ddl_signature = self._ddl_signature(target_ddl_formatted)
+        if not target_ddl_signature:
+            return None
+
+        candidate_rows = self._execute(
+            f"""
+            SELECT
+                id,
+                benchmark_run_id,
+                variant_table,
+                tested_table_ddl,
+                score,
+                measurement_quality_flag,
+                variant_params
+            FROM `{self._database}`.`{table_name}`
+            WHERE benchmark_id = %(benchmark_id)s
+              AND source_db_name = %(source_database)s
+              AND source_table_name = %(source_table)s
+              AND variant_mode = %(variant_mode)s
+            ORDER BY benchmark_run_id DESC, finished_at DESC, benchmark_started_at DESC, id DESC
+            LIMIT 5000
+            """,
+            {
+                "benchmark_id": str(benchmark_id),
+                "source_database": str(source_database),
+                "source_table": str(source_table),
+                "variant_mode": normalized_variant_mode,
+            },
+        )
+        matched_source_row: Optional[tuple[Any, Any, Any, Any, Any]] = None
+        for row in candidate_rows:
+            if len(row) < 7:
+                continue
+            (
+                source_id,
+                _source_run_id,
+                source_variant_table,
+                source_ddl,
+                source_score,
+                source_quality_flag,
+                source_variant_params_raw,
+            ) = row
+            if str(source_variant_table or "").strip() == normalized_variant_table:
+                continue
+            if self._ddl_signature(str(source_ddl or "")) != target_ddl_signature:
+                continue
+            source_variant_params = self._parse_json_dict_or_empty(source_variant_params_raw)
+            if runtime_query_signature:
+                if str(source_variant_params.get("__runtime_query_signature") or "").strip() != runtime_query_signature:
+                    continue
+            if runtime_insert_rows_limit is not None:
+                if source_variant_params.get("__runtime_insert_rows_limit") != runtime_insert_rows_limit:
+                    continue
+            if runtime_insert_operations_count is not None:
+                if source_variant_params.get("__runtime_insert_operations_count") != runtime_insert_operations_count:
+                    continue
+            if runtime_percentiles_signature:
+                if str(source_variant_params.get("__runtime_measured_percentiles_signature") or "").strip() != runtime_percentiles_signature:
+                    continue
+            matched_source_row = (
+                source_id,
+                source_variant_table,
+                source_score,
+                source_quality_flag,
+                source_variant_params_raw,
+            )
+            break
+
+        if matched_source_row is None:
+            return None
+
+        source_result_id, source_variant_table, source_score, source_quality_flag, _ = matched_source_row
+        if source_result_id is None:
+            return None
+
+        parent_variant_table = self._extract_parent_variant_table(normalized_params)
+        parent_id: Optional[str] = None
+        if parent_variant_table:
+            parent_id = self._resolve_parent_result_id(
+                benchmark_run_id=benchmark_run_id,
+                benchmark_id=benchmark_id,
+                source_database=source_database,
+                source_table=source_table,
+                parent_variant_table=parent_variant_table,
+            )
+        variant_mode_id = self._resolve_variant_mode_id(
+            variant_table=normalized_variant_table,
+            variant_params=normalized_params,
+        )
+        execution_uuid = str(normalized_params.get("execution_uuid") or "").strip()
+        result_token = execution_uuid or normalized_variant_table or str(uuid4())
+        cloned_result_id = self._build_scoped_result_id(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+            variant_table=normalized_variant_table,
+            raw_result_token=result_token,
+        )
+        target_variant_params_json = json.dumps(
+            normalized_params,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+        target_variant_params_raw = json.dumps(
+            normalized_params,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+        worker_started_at_value = self._to_naive_storage_datetime(
+            worker_started_at or datetime.now(_RESULTS_TZ)
+        )
+        worker_finished_at_value = self._to_naive_storage_datetime(
+            worker_finished_at or datetime.now(_RESULTS_TZ)
+        )
+        benchmark_started_at_value = self._to_naive_storage_datetime(benchmark_started_at)
+        source_table_ddl_formatted: Optional[str] = None
+        if source_table_ddl:
+            source_table_ddl_formatted = self._format_ddl_or_as_is(source_table_ddl)
+
+        column_names = (
+            list(self._PHASED_INSERT_COLUMNS)
+            if table_name == self._phased_table
+            else list(self._INSERT_COLUMNS)
+        )
+        override_values: Dict[str, Any] = {
+            "benchmark_started_at": benchmark_started_at_value,
+            "id": cloned_result_id,
+            "parent_id": parent_id,
+            "celery_task_id": str(celery_task_id).strip() if celery_task_id else None,
+            "celery_worker_hostname": (
+                str(celery_worker_hostname).strip() if celery_worker_hostname else None
+            ),
+            "started_at": worker_started_at_value,
+            "finished_at": worker_finished_at_value,
+            "tested_table_ddl": target_ddl_formatted,
+            "variant_params_json": target_variant_params_json,
+            "variant_table": normalized_variant_table,
+            "variant_mode": normalized_variant_mode,
+            "variant_mode_id": variant_mode_id,
+            "variant_params": target_variant_params_raw,
+            "rank_in_phase": None,
+            "is_top_n": False,
+        }
+        if "source_table_ddl" in column_names and source_table_ddl_formatted is not None:
+            override_values["source_table_ddl"] = source_table_ddl_formatted
+
+        with self._record_insert_lock, self._acquire_cross_process_record_lock(
+            table_name=table_name,
+            record_id=cloned_result_id,
+        ):
+            if self._record_id_exists(table_name=table_name, record_id=cloned_result_id):
+                return {
+                    "source_result_id": str(source_result_id),
+                    "source_variant_table": str(source_variant_table),
+                    "score": (
+                        float(source_score)
+                        if source_score is not None
+                        else None
+                    ),
+                    "measurement_quality_flag": (
+                        str(source_quality_flag).strip()
+                        if source_quality_flag is not None
+                        else None
+                    ),
+                    "cloned_result_id": cloned_result_id,
+                    "status": "already_cloned",
+                }
+
+            select_expressions: list[str] = []
+            query_params: Dict[str, Any] = {
+                "source_result_id": str(source_result_id),
+            }
+            for column_index, column_name in enumerate(column_names):
+                if column_name in override_values:
+                    param_name = f"ov_{column_index}"
+                    query_params[param_name] = override_values[column_name]
+                    select_expressions.append(f"%({param_name})s")
+                else:
+                    select_expressions.append(f"src.`{column_name}`")
+
+            self._execute(
+                f"""
+                INSERT INTO `{self._database}`.`{table_name}` ({", ".join(f"`{column}`" for column in column_names)})
+                SELECT
+                    {", ".join(select_expressions)}
+                FROM `{self._database}`.`{table_name}` AS src
+                WHERE src.id = %(source_result_id)s
+                ORDER BY src.finished_at DESC, src.benchmark_started_at DESC, src.id DESC
+                LIMIT 1
+                """,
+                query_params,
+            )
+
+        return {
+            "source_result_id": str(source_result_id),
+            "source_variant_table": str(source_variant_table),
+            "score": float(source_score) if source_score is not None else None,
+            "measurement_quality_flag": (
+                str(source_quality_flag).strip()
+                if source_quality_flag is not None
+                else None
+            ),
+            "cloned_result_id": cloned_result_id,
+            "status": "cloned",
+        }
+
     def get_top_type_variants(
         self,
         benchmark_run_id: int,
@@ -1179,11 +1482,31 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             variant_modes=variant_modes,
             table_name=table_name,
         )
+        variant_mode_hint: Optional[str] = None
+        for mode in variant_modes:
+            normalized_mode = str(mode or "").strip()
+            if normalized_mode:
+                variant_mode_hint = normalized_mode
+                break
+        score_top_selection = self._resolve_score_top_selection(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+            phase=None,
+            variant_mode=variant_mode_hint,
+            phase_name=variant_mode_hint,
+        )
+        prefer_higher_score = score_top_selection != "min"
         ranked = sorted(
             summaries,
             key=lambda summary: (
                 summary.score is None,
-                -(summary.score if summary.score is not None else 0.0),
+                (
+                    -(summary.score if summary.score is not None else 0.0)
+                    if prefer_higher_score
+                    else (summary.score if summary.score is not None else 0.0)
+                ),
                 summary.variant_table,
             ),
         )
@@ -1547,6 +1870,9 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json=(
                 tested_select_speedup_by_query_json
             ),
+            tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json=(
+                tested_select_speedup_by_query_json
+            ),
             tested_table_consumed_compressed_size_bytes_by_each_column=(
                 result.tested_table_consumed_compressed_size_bytes_by_each_column
             ),
@@ -1598,6 +1924,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             variant_params=variant_params,
             rank_in_phase=None,
             is_top_n=False,
+            measurement_quality_flag=result.measurement_quality_flag,
+            measurement_quality_details_json=result.measurement_quality_details_json,
             score_calculation_json=result.score_calculation_json,
             score=result.score,
         )
@@ -1796,6 +2124,15 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         Строит JSON размера в формате:
         `{\"size_bytes\": <float>, \"size_bytes_readable\": <str>}`.
         """
+        fallback_payload: Optional[Dict[str, Any]] = None
+        if isinstance(fallback_json, str) and fallback_json.strip():
+            try:
+                parsed_fallback = json.loads(fallback_json)
+            except Exception:
+                parsed_fallback = None
+            if isinstance(parsed_fallback, dict):
+                fallback_payload = dict(parsed_fallback)
+
         try:
             numeric_size = float(size_bytes) if size_bytes is not None else None
         except Exception:
@@ -1807,11 +2144,19 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             return None
 
         readable_value = str(size_bytes_readable or "").strip() or make_readable_bytes(numeric_size)
+        payload: Dict[str, Any] = {
+            "size_bytes": numeric_size,
+            "size_bytes_readable": readable_value,
+        }
+        if fallback_payload:
+            # Сохраняем дополнительные поля из fallback JSON
+            # (например, bytes_on_disk_sum), но не перезаписываем base-ключи.
+            for key, value in fallback_payload.items():
+                if key in {"size_bytes", "size_bytes_readable"}:
+                    continue
+                payload[key] = value
         return json.dumps(
-            {
-                "size_bytes": numeric_size,
-                "size_bytes_readable": readable_value,
-            },
+            payload,
             ensure_ascii=False,
             sort_keys=True,
             default=str,
@@ -1866,6 +2211,23 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             return int(default)
 
     @staticmethod
+    def _parse_json_dict_or_empty(raw_value: Any) -> Dict[str, Any]:
+        """Парсит JSON-словарь из строки/объекта, иначе возвращает пустой dict."""
+        if isinstance(raw_value, dict):
+            return dict(raw_value)
+        if not isinstance(raw_value, str):
+            return {}
+        if not raw_value.strip():
+            return {}
+        try:
+            parsed = json.loads(raw_value)
+        except Exception:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+        return {}
+
+    @staticmethod
     def _safe_str(value: Any, *, default: str) -> str:
         """Безопасно приводит значение к непустой строке с fallback."""
         if value is None:
@@ -1874,6 +2236,27 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         if not normalized:
             return default
         return normalized
+
+    @classmethod
+    def _ddl_signature(cls, ddl_text: str) -> str:
+        """
+        Строит стабильную сигнатуру DDL без учёта имени таблицы.
+
+        Нужна для дедупликации вариантов, у которых структура совпадает, но
+        `CREATE TABLE` содержит разное временное имя (`variant_table`).
+        """
+        cleaned = str(ddl_text or "").strip()
+        if not cleaned:
+            return ""
+        normalized = cleaned
+        try:
+            parsed = TableDDL.from_ddl(cleaned)
+            parsed.name = "__dedupe__.__signature__"
+            normalized = parsed.to_ddl()
+        except Exception:
+            # Fallback: если парсер DDL не справился, сравниваем по whitespace-normalized SQL.
+            normalized = re.sub(r"\s+", " ", cleaned).strip()
+        return sha256(normalized.encode("utf-8")).hexdigest()
 
     @classmethod
     def _resolve_phase_metadata(cls, variant_mode: str) -> tuple[Optional[int], Optional[str]]:
@@ -2018,25 +2401,59 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         if not isinstance(raw_limits, dict):
             return default_top_n
 
-        def _normalize_limit_key(value: Optional[str]) -> Optional[str]:
-            if value is None:
-                return None
-            normalized = str(value).strip().lower()
-            if not normalized:
-                return None
-            normalized = re.sub(r"\s+", "_", normalized)
-            normalized = normalized.replace("-", "_")
-            if normalized == "order by":
-                return "order_by"
-            return normalized
+        resolved_keys = self._resolve_stage_keys_for_scope(
+            phase=phase,
+            variant_mode=variant_mode,
+            phase_name=phase_name,
+        )
 
+        for key in resolved_keys:
+            value = raw_limits.get(key)
+            if value is None:
+                continue
+            try:
+                return max(1, int(value))
+            except Exception:
+                continue
+
+        sequential_value = raw_limits.get("sequential")
+        if sequential_value is not None:
+            try:
+                return max(1, int(sequential_value))
+            except Exception:
+                pass
+        return default_top_n
+
+    @staticmethod
+    def _normalize_stage_key(value: Optional[str]) -> Optional[str]:
+        """Нормализует ключ стадии для map-lookup."""
+        if value is None:
+            return None
+        normalized = str(value).strip().lower()
+        if not normalized:
+            return None
+        normalized = re.sub(r"\s+", "_", normalized)
+        normalized = normalized.replace("-", "_")
+        if normalized == "order by":
+            return "order_by"
+        return normalized
+
+    @classmethod
+    def _resolve_stage_keys_for_scope(
+        cls,
+        *,
+        phase: Optional[int],
+        variant_mode: Optional[str],
+        phase_name: Optional[str],
+    ) -> list[str]:
+        """Возвращает список ключей стадии для scope в порядке приоритета."""
         stage_keys: list[str] = []
-        mode_key = _normalize_limit_key(variant_mode)
+        mode_key = cls._normalize_stage_key(variant_mode)
         if mode_key is not None:
             stage_keys.append(mode_key)
             if mode_key.endswith("_validation"):
                 stage_keys.append(mode_key[: -len("_validation")])
-        phase_name_key = _normalize_limit_key(phase_name)
+        phase_name_key = cls._normalize_stage_key(phase_name)
         if phase_name_key is not None:
             stage_keys.append(phase_name_key)
             if phase_name_key.endswith("_validation"):
@@ -2061,23 +2478,67 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 continue
             seen_keys.add(key)
             resolved_keys.append(key)
+        return resolved_keys
 
-        for key in resolved_keys:
-            value = raw_limits.get(key)
-            if value is None:
-                continue
-            try:
-                return max(1, int(value))
-            except Exception:
-                continue
+    def _resolve_score_top_selection(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        phase: Optional[int] = None,
+        variant_mode: Optional[str] = None,
+        phase_name: Optional[str] = None,
+    ) -> str:
+        """Возвращает направление top-selection: `max` или `min` (fallback=`max`)."""
+        rows = self._execute(
+            f"""
+            SELECT sequential_top_n_limits_json
+            FROM `{self._database}`.`{self._phased_runs_table}`
+            WHERE benchmark_run_id = %(benchmark_run_id)s
+              AND benchmark_id = %(benchmark_id)s
+              AND source_db_name = %(source_database)s
+              AND source_table_name = %(source_table)s
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            {
+                "benchmark_run_id": benchmark_run_id,
+                "benchmark_id": benchmark_id,
+                "source_database": source_database,
+                "source_table": source_table,
+            },
+        )
+        if not rows:
+            return "max"
+        limits_json_raw = rows[0][0] if rows[0] else None
+        if not isinstance(limits_json_raw, str) or not limits_json_raw.strip():
+            return "max"
+        try:
+            parsed_limits = json.loads(limits_json_raw)
+        except Exception:
+            return "max"
+        if not isinstance(parsed_limits, dict):
+            return "max"
 
-        sequential_value = raw_limits.get("sequential")
-        if sequential_value is not None:
-            try:
-                return max(1, int(sequential_value))
-            except Exception:
-                pass
-        return default_top_n
+        selection_by_stage = parsed_limits.get("score_top_selection_by_stage")
+        if isinstance(selection_by_stage, dict):
+            for stage_key in self._resolve_stage_keys_for_scope(
+                phase=phase,
+                variant_mode=variant_mode,
+                phase_name=phase_name,
+            ):
+                raw = selection_by_stage.get(stage_key)
+                normalized = str(raw or "").strip().lower()
+                if normalized in {"max", "min"}:
+                    return normalized
+
+        raw_global_selection = parsed_limits.get("score_top_selection")
+        normalized_global_selection = str(raw_global_selection or "").strip().lower()
+        if normalized_global_selection in {"max", "min"}:
+            return normalized_global_selection
+        return "max"
 
     def _recalculate_phase_ranking(
         self,
@@ -2123,11 +2584,25 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             variant_mode=variant_mode,
             phase_name=phase_name,
         )
+        score_top_selection = self._resolve_score_top_selection(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+            phase=phase,
+            variant_mode=variant_mode,
+            phase_name=phase_name,
+        )
+        prefer_higher_score = score_top_selection != "min"
         ranked_rows = sorted(
             rows,
             key=lambda row: (
                 row[1] is None,
-                -(float(row[1]) if row[1] is not None else 0.0),
+                (
+                    -(float(row[1]) if row[1] is not None else 0.0)
+                    if prefer_higher_score
+                    else (float(row[1]) if row[1] is not None else 0.0)
+                ),
                 str(row[0]),
             ),
         )
@@ -2233,12 +2708,26 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         )
 
         stage_top_n = max(1, int(top_n_winners))
+        score_top_selection = self._resolve_score_top_selection(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+            phase=phase,
+            variant_mode=variant_mode,
+            phase_name=phase_name,
+        )
+        prefer_higher_score = score_top_selection != "min"
         for ranked_rows in rows_by_stage_column.values():
             ranked_rows_sorted = sorted(
                 ranked_rows,
                 key=lambda item: (
                     item[1] is None,
-                    -(float(item[1]) if item[1] is not None else 0.0),
+                    (
+                        -(float(item[1]) if item[1] is not None else 0.0)
+                        if prefer_higher_score
+                        else (float(item[1]) if item[1] is not None else 0.0)
+                    ),
                     item[0],
                 ),
             )
@@ -3159,6 +3648,20 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         select_metrics_json = self._pretty_json_string_or_as_is(
             self._format_sql_json_string_or_as_is(record.select_metrics_json)
         )
+        tested_select_speedup_by_query_json = self._pretty_json_string_or_as_is(
+            self._format_sql_json_string_or_as_is(
+                record.tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json
+            )
+        )
+        tested_select_speedup_vs_source_by_query_json = self._pretty_json_string_or_as_is(
+            self._format_sql_json_string_or_as_is(
+                record.tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json
+            )
+        )
+        if tested_select_speedup_vs_source_by_query_json is None:
+            tested_select_speedup_vs_source_by_query_json = (
+                tested_select_speedup_by_query_json
+            )
         insert_metrics_json = self._pretty_json_string_or_as_is(
             self._format_sql_json_string_or_as_is(record.insert_metrics_json)
         )
@@ -3251,11 +3754,18 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             "source_table_consumed_compressed_size_bytes_overall_json": source_size_overall_json,
             "tested_table_compression_overall_coef": compression_coef,
             "select_metrics_json": select_metrics_json,
+            "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json": (
+                tested_select_speedup_vs_source_by_query_json
+            ),
             "insert_metrics_json": insert_metrics_json,
             "score_calculation_json": score_calculation_json,
             "score": record.score,
             "rank_in_phase": record.rank_in_phase,
             "is_top_n": bool(record.is_top_n),
+            "measurement_quality_flag": record.measurement_quality_flag,
+            "measurement_quality_details_json": self._pretty_json_string_or_as_is(
+                record.measurement_quality_details_json
+            ),
         }
 
     @classmethod

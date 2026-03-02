@@ -273,6 +273,9 @@ class BenchmarkVariantResult(_FrozenModel):
     tested_table_select_metrics_by_query_json: Optional[str] = None
     source_table_select_metrics_by_query_json: Optional[str] = None
     tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json: Optional[str] = None
+    tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json: Optional[str] = (
+        None
+    )
     tested_table_consumed_compressed_size_bytes_by_each_column: Optional[str] = None
     source_table_consumed_compressed_size_bytes_by_each_column: Optional[str] = None
     tested_table_consumed_compressed_size_bytes_overall: Optional[float] = None
@@ -305,6 +308,8 @@ class BenchmarkVariantResult(_FrozenModel):
     tested_table_cols_sizes: Optional[str] = None
     tested_table_indexes_sizes: Optional[str] = None
     extra_json: Optional[str] = None
+    measurement_quality_flag: Optional[str] = None
+    measurement_quality_details_json: Optional[str] = None
     score_calculation_json: Optional[str] = None
     score: Optional[float] = None
 
@@ -447,6 +452,9 @@ class StoredBenchmarkResult(_FrozenModel):
     tested_table_select_metrics_by_query_json: Optional[str] = None
     source_table_select_metrics_by_query_json: Optional[str] = None
     tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json: Optional[str] = None
+    tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json: Optional[str] = (
+        None
+    )
 
     # ---------------------------  Compression results  ----------------------------
     tested_table_consumed_compressed_size_bytes_by_each_column: Optional[str] = None
@@ -498,6 +506,8 @@ class StoredBenchmarkResult(_FrozenModel):
     variant_params: Dict[str, Any] = Field(default_factory=dict)
     rank_in_phase: Optional[int] = None
     is_top_n: bool = False
+    measurement_quality_flag: Optional[str] = None
+    measurement_quality_details_json: Optional[str] = None
     score_calculation_json: Optional[str] = None
     score: Optional[float] = None
 

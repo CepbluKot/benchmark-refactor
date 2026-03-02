@@ -10,6 +10,7 @@ Pydantic-модели JSON-конфига бенчмарка.
 
 from __future__ import annotations
 
+import keyword
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
@@ -25,6 +26,7 @@ BenchmarkStrategy = Literal[
 ]
 SelectQueryCacheMode = Literal["warm", "cold"]
 ScoringMode = Literal["expression"]
+ScoreTopSelectionMode = Literal["max", "min"]
 ColumnOrderMode = Literal["compressed_size_desc"]
 RuleSourceMode = Literal[
     "global_bank_only",
@@ -532,6 +534,56 @@ def _validate_scoring_mode_and_expression(
         raise ValueError(f"{field_path}.mode=expression требует непустой {field_path}.expression")
 
 
+def _normalize_scoring_variable_name(
+    value: str,
+    *,
+    field_path: str,
+) -> str:
+    """Нормализует и валидирует имя переменной scoring."""
+    cleaned = str(value).strip()
+    if not cleaned:
+        raise ValueError(f"{field_path} содержит пустое имя переменной")
+    if not cleaned.isidentifier() or keyword.iskeyword(cleaned):
+        raise ValueError(
+            f"{field_path} содержит недопустимое имя переменной {cleaned!r}: "
+            "используй валидный Python-идентификатор"
+        )
+    if cleaned.startswith("_"):
+        raise ValueError(
+            f"{field_path} содержит недопустимое имя переменной {cleaned!r}: "
+            "имя не должно начинаться с '_'"
+        )
+    return cleaned
+
+
+def _normalize_scoring_variables(
+    value: Optional[Dict[str, str]],
+    *,
+    field_path: str,
+) -> Optional[Dict[str, str]]:
+    """Нормализует map переменных scoring: имя -> expression."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_path} должен быть объектом")
+    normalized: dict[str, str] = {}
+    for raw_name, raw_expression in value.items():
+        variable_name = _normalize_scoring_variable_name(
+            raw_name,
+            field_path=field_path,
+        )
+        variable_expression = _normalize_scoring_expression(
+            raw_expression,
+            field_path=f"{field_path}.{variable_name}",
+        )
+        if variable_expression is None:
+            raise ValueError(f"{field_path}.{variable_name} не должен быть пустым")
+        normalized[variable_name] = variable_expression
+    if not normalized:
+        raise ValueError(f"{field_path} не должен быть пустым")
+    return normalized
+
+
 class ScoringConfig(_Base):
     """
     Конфигурация вычисления итогового `score`.
@@ -541,12 +593,22 @@ class ScoringConfig(_Base):
     """
 
     mode: ScoringMode = "expression"
+    top_selection: ScoreTopSelectionMode = Field(
+        default="max",
+        validation_alias=AliasChoices("top_selection"),
+        serialization_alias="top_selection",
+    )
     expression: Optional[str] = Field(
         default=DEFAULT_SCORE_EXPRESSION,
         validation_alias=AliasChoices("expression"),
         serialization_alias="expression",
     )
     on_error_score: Optional[float] = None
+    variables: Optional[Dict[str, str]] = Field(
+        default=None,
+        validation_alias=AliasChoices("variables"),
+        serialization_alias="variables",
+    )
     by_stage: Optional[Dict[str, "StageScoringConfig"]] = Field(
         default=None,
         validation_alias=AliasChoices("by_stage"),
@@ -558,6 +620,15 @@ class ScoringConfig(_Base):
     def normalize_expression(cls, value: Optional[str]) -> Optional[str]:
         """Нормализует и валидирует строку expression."""
         return _normalize_scoring_expression(value, field_path="scoring.expression")
+
+    @field_validator("variables")
+    @classmethod
+    def normalize_variables(
+        cls,
+        value: Optional[Dict[str, str]],
+    ) -> Optional[Dict[str, str]]:
+        """Нормализует map переменных scoring."""
+        return _normalize_scoring_variables(value, field_path="scoring.variables")
 
     @field_validator("by_stage")
     @classmethod
@@ -602,12 +673,22 @@ class StageScoringConfig(_Base):
     """Stage-specific override формулы score."""
 
     mode: ScoringMode = "expression"
+    top_selection: ScoreTopSelectionMode = Field(
+        default="max",
+        validation_alias=AliasChoices("top_selection"),
+        serialization_alias="top_selection",
+    )
     expression: Optional[str] = Field(
         default=DEFAULT_SCORE_EXPRESSION,
         validation_alias=AliasChoices("expression"),
         serialization_alias="expression",
     )
     on_error_score: Optional[float] = None
+    variables: Optional[Dict[str, str]] = Field(
+        default=None,
+        validation_alias=AliasChoices("variables"),
+        serialization_alias="variables",
+    )
 
     @field_validator("expression")
     @classmethod
@@ -616,6 +697,18 @@ class StageScoringConfig(_Base):
         return _normalize_scoring_expression(
             value,
             field_path="scoring.by_stage.*.expression",
+        )
+
+    @field_validator("variables")
+    @classmethod
+    def normalize_variables(
+        cls,
+        value: Optional[Dict[str, str]],
+    ) -> Optional[Dict[str, str]]:
+        """Нормализует map stage-переменных scoring."""
+        return _normalize_scoring_variables(
+            value,
+            field_path="scoring.by_stage.*.variables",
         )
 
     @model_validator(mode="after")

@@ -250,6 +250,44 @@ class ModelsValidationTests(unittest.TestCase):
         self.assertIn("types", scoring.by_stage or {})
         self.assertEqual(scoring.stage_override("types").expression, "2 + 2")
 
+    def test_scoring_accepts_variables_and_stage_override_variables(self) -> None:
+        """Проверяет поддержку scoring.variables и stage-scoped variables."""
+        scoring = ScoringConfig.model_validate(
+            {
+                "mode": "expression",
+                "variables": {
+                    "base": "safe_div(10, 2)",
+                },
+                "expression": "base * 2",
+                "by_stage": {
+                    "types": {
+                        "mode": "expression",
+                        "variables": {
+                            "base": "safe_div(12, 3)",
+                        },
+                        "expression": "base * 3",
+                    }
+                },
+            }
+        )
+        self.assertEqual((scoring.variables or {}).get("base"), "safe_div(10, 2)")
+        stage_override = scoring.stage_override("types")
+        self.assertIsNotNone(stage_override)
+        self.assertEqual((stage_override.variables or {}).get("base"), "safe_div(12, 3)")
+
+    def test_scoring_rejects_invalid_variable_name(self) -> None:
+        """Проверяет, что имя переменной scoring.variables валидируется."""
+        with self.assertRaises(ValidationError):
+            ScoringConfig.model_validate(
+                {
+                    "mode": "expression",
+                    "variables": {
+                        "1bad": "1 + 1",
+                    },
+                    "expression": "1",
+                }
+            )
+
     def test_scoring_by_stage_normalizes_stage_name(self) -> None:
         """Проверяет нормализацию ключей scoring.by_stage."""
         scoring = ScoringConfig.model_validate(
