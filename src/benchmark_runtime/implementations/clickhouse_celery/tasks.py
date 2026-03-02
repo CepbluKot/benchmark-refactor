@@ -942,34 +942,7 @@ def _build_score_context_medians(
     }
 
 
-def _compute_builtin_source_score(
-    *,
-    select_time_ms_percentiles: Sequence[float],
-) -> tuple[Optional[float], Dict[str, Any]]:
-    """Встроенный baseline score: `1 / p_last(select_latency_ms)`."""
-    selected_latency_ms: Optional[float] = None
-    score: Optional[float] = None
-    if select_time_ms_percentiles and select_time_ms_percentiles[-1] > 0:
-        selected_latency_ms = float(select_time_ms_percentiles[-1])
-        score = 1.0 / selected_latency_ms
-
-    details: Dict[str, Any] = {
-        "formula": "1 / tested_select_time_ms_percentiles[-1]",
-        "inputs": {
-            "tested_select_time_ms_percentiles": list(select_time_ms_percentiles),
-            "selected_latency_ms": selected_latency_ms,
-        },
-        "result": score,
-        "note": (
-            None
-            if score is not None
-            else "Не удалось вычислить score: отсутствует/некорректен последний select percentile"
-        ),
-    }
-    return score, details
-
-
-def _compute_builtin_variant_score(
+def _compute_variant_ratio_details(
     *,
     source_insert_time_ms_measurements: Sequence[float],
     tested_insert_time_ms_measurements: Sequence[float],
@@ -979,7 +952,7 @@ def _compute_builtin_variant_score(
     tested_total_size_bytes: Optional[float],
 ) -> tuple[Optional[float], Dict[str, Any]]:
     """
-    Встроенная формула score (геометрическое среднее трех ratio по медианам).
+    Вычисляет ratio-детали и геометрическое среднее для контекста формулы score.
 
     Шаги:
       1) median(source_insert_ms) / median(tested_insert_ms)
@@ -1066,7 +1039,7 @@ def _compute_builtin_variant_score(
             None
             if score is not None
             else (
-                "Не удалось вычислить score: для builtin нужны валидные медианы "
+                "Не удалось вычислить ratio-детали: нужны валидные медианы "
                 "insert/select и валидные размеры source/tested"
             )
         ),
@@ -1078,19 +1051,15 @@ def _resolve_score(
     *,
     scoring: ScoringConfig,
     stage_name: Optional[str],
-    builtin_score: Optional[float],
-    builtin_score_details: Optional[Dict[str, Any]],
     expression_context: Dict[str, Any],
     context_label: str,
 ) -> tuple[Optional[float], str]:
     """
     Вычисляет итоговый score по конфигу scoring.
 
-    - `builtin` -> возвращает `builtin_score`;
-    - `expression` -> вычисляет безопасное expression.
+    Всегда вычисляет безопасное expression (expression-only режим).
     """
     stage_override = scoring.stage_override(stage_name)
-    effective_mode = stage_override.mode if stage_override is not None else scoring.mode
     effective_expression = (
         stage_override.expression if stage_override is not None else scoring.expression
     )
@@ -1099,17 +1068,6 @@ def _resolve_score(
         if stage_override is not None
         else scoring.on_error_score
     )
-    if effective_mode == "builtin":
-        details: Dict[str, Any] = {
-            "mode": "builtin",
-            "status": "ok" if builtin_score is not None else "empty",
-            "final_score": builtin_score,
-            "on_error_score": effective_on_error_score,
-            "stage_name": stage_name,
-            "stage_override_used": stage_override is not None,
-            "details": builtin_score_details or {},
-        }
-        return builtin_score, _to_pretty_score_calculation_json(details)
 
     base_details: Dict[str, Any] = {
         "mode": "expression",
@@ -1117,7 +1075,6 @@ def _resolve_score(
         "on_error_score": effective_on_error_score,
         "stage_name": stage_name,
         "stage_override_used": stage_override is not None,
-        "builtin_score_fallback": builtin_score,
         "context": expression_context,
     }
 
@@ -3577,10 +3534,7 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             "total_n_rows_in_source_table": source_total_rows,
         }
 
-        builtin_baseline_score, builtin_baseline_score_details = _compute_builtin_source_score(
-            select_time_ms_percentiles=select_time_ms_percentiles,
-        )
-        _, baseline_geomean_details = _compute_builtin_variant_score(
+        _, baseline_geomean_details = _compute_variant_ratio_details(
             source_insert_time_ms_measurements=insert_time_ms_measurements,
             tested_insert_time_ms_measurements=insert_time_ms_measurements,
             source_select_time_ms_measurements=select_time_ms_measurements,
@@ -3640,8 +3594,6 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
         baseline_score, baseline_score_calculation_json = _resolve_score(
             scoring=payload.scoring,
             stage_name="source_baseline",
-            builtin_score=builtin_baseline_score,
-            builtin_score_details=builtin_baseline_score_details,
             expression_context={
                 "measured_percentiles": list(payload.measured_percentiles),
                 "source": {
@@ -4110,7 +4062,7 @@ def run_variant_benchmark(
             source_select_bytes_per_second_for_score = list(
                 source_select_bucket.get("bytes_per_second_percentiles", []) or []
             )
-        builtin_score, builtin_score_details = _compute_builtin_variant_score(
+        _, geomean_ratio_details = _compute_variant_ratio_details(
             source_insert_time_ms_measurements=source_insert_ms_for_score,
             tested_insert_time_ms_measurements=tested_insert_time_ms,
             source_select_time_ms_measurements=source_select_ms_for_score,
@@ -4145,8 +4097,6 @@ def run_variant_benchmark(
         score, score_calculation_json = _resolve_score(
             scoring=payload.scoring,
             stage_name=(payload.variant_mode or "").strip().lower() or None,
-            builtin_score=builtin_score,
-            builtin_score_details=builtin_score_details,
             expression_context={
                 "measured_percentiles": list(measured_percentiles),
                 "source": {
@@ -4167,9 +4117,9 @@ def run_variant_benchmark(
                     "overall_coef": compression_overall_coef,
                 },
                 "ratios": {
-                    "insert": builtin_score_details.get("inputs", {}).get("insert_ratio"),
-                    "select": builtin_score_details.get("inputs", {}).get("select_ratio"),
-                    "compression": builtin_score_details.get("inputs", {}).get(
+                    "insert": geomean_ratio_details.get("inputs", {}).get("insert_ratio"),
+                    "select": geomean_ratio_details.get("inputs", {}).get("select_ratio"),
+                    "compression": geomean_ratio_details.get("inputs", {}).get(
                         "compression_ratio"
                     ),
                 },

@@ -319,11 +319,11 @@ class ClickHouseCeleryRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(
             fake_app.calls[0]["kwargs"]["payload"]["scoring"]["mode"],
-            "builtin",
+            "expression",
         )
         self.assertEqual(
             fake_app.calls[1]["kwargs"]["payload"]["scoring"]["mode"],
-            "builtin",
+            "expression",
         )
 
     def test_variant_task_is_configured_to_ignore_backend_results(self) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from ..types import (
     BenchmarkVariantResult,
@@ -149,3 +149,28 @@ class BenchmarkResultStore(ABC):
         фактическим списком вариантов, прошедших в следующую стадию.
         """
         return None
+
+    def recalculate_custom_score_for_benchmark(
+        self,
+        *,
+        benchmark_id: str,
+        expression: str,
+        benchmark_run_id: Optional[int] = None,
+        source_database: Optional[str] = None,
+        source_table: Optional[str] = None,
+        target_tables: str = "phased",
+    ) -> Dict[str, Dict[str, int]]:
+        """
+        Опционально пересчитывает кастомный score в дополнительную колонку.
+
+        Базовая реализация — no-op, возвращает пустой результат.
+        """
+        del (
+            benchmark_id,
+            expression,
+            benchmark_run_id,
+            source_database,
+            source_table,
+            target_tables,
+        )
+        return {}

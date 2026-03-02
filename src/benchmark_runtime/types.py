@@ -70,6 +70,7 @@ class TableBenchmarkPlan(_FrozenModel):
     insert_operations_count: int
     sequential_top_n: int
     sequential_top_n_limits: Optional[InsertRowsLimitsConfig] = None
+    final_validation_input_top_n: Optional[int] = None
     max_winners_per_parent_limits: Optional[InsertRowsLimitsConfig] = None
     insert_rows_limit: Optional[int]
     source_insert_rows_limit: Optional[int] = None
@@ -292,9 +293,11 @@ class BenchmarkVariantResult(_FrozenModel):
         ),
         serialization_alias="tested_table_consumed_compressed_size_bytes_with_indexes_readable",
     )
+    tested_table_consumed_compressed_size_bytes_with_indexes_json: Optional[str] = None
     tested_table_primary_index_size_json: Optional[str] = None
     source_table_consumed_compressed_size_bytes_overall: Optional[float] = None
     source_table_consumed_compressed_size_bytes_overall_readable: Optional[str] = None
+    source_table_consumed_compressed_size_bytes_overall_json: Optional[str] = None
     tested_table_compression_overall_coef: Optional[float] = None
     tested_table_compression_by_each_column_coef: Optional[str] = None
     source_table_n_rows_in_size_test: Optional[int] = None
@@ -466,9 +469,11 @@ class StoredBenchmarkResult(_FrozenModel):
         ),
         serialization_alias="tested_table_consumed_compressed_size_bytes_with_indexes_readable",
     )
+    tested_table_consumed_compressed_size_bytes_with_indexes_json: Optional[str] = None
     tested_table_primary_index_size_json: Optional[str] = None
     source_table_consumed_compressed_size_bytes_overall: Optional[float] = None
     source_table_consumed_compressed_size_bytes_overall_readable: Optional[str] = None
+    source_table_consumed_compressed_size_bytes_overall_json: Optional[str] = None
     tested_table_compression_overall_coef: Optional[float] = None
     tested_table_compression_by_each_column_coef: Optional[str] = None
     source_table_n_rows_in_size_test: Optional[int] = None
@@ -489,6 +494,7 @@ class StoredBenchmarkResult(_FrozenModel):
     extra_json: Optional[str] = None
     variant_table: str
     variant_mode: str
+    variant_mode_id: Optional[int] = None
     variant_params: Dict[str, Any] = Field(default_factory=dict)
     rank_in_phase: Optional[int] = None
     is_top_n: bool = False

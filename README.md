@@ -51,7 +51,7 @@ Legacy select-агрегаты в таблице результатов удал
 3. Какие правила перебора применяем.
 4. Какой режим перебора (`types`, `indexes`, `combined`, `sequential`).
 5. Какие запросы запускать.
-6. Как считать `score` (`scoring.mode=builtin` или `scoring.mode=expression`).
+6. Как считать `score` (`scoring.mode=expression`).
 
 На выход:
 1. `benchmark_run_id` одного запуска.
@@ -220,19 +220,16 @@ JSON-секции или `benchmark.project.json`.
 (`VariantJob.source_benchmark`).
 Для `sequential_topn_strategy` runner делает 2 этапа: сначала `types`, потом `indexes` только для top-N.
 
-Для `sequential_phased_topn_strategy` runner делает 5 этапов:
-`order_by -> types -> codecs -> indexes -> final_validation`.
-Между этапами передаётся top-N победителей
-(`sequential_top_n_limits`/`sequential_types_top_n_for_indexes`).
-Фазы `types/codecs/indexes` работают в one-column режиме:
-- внутри одного parent строятся кандидаты по колонкам;
-- собираются top-N merged-кандидаты (ограничение `max_winners_per_parent_limits`);
-- в следующий этап проходит stage top-N.
-Итоговый merge выбранных типов/кодеков/индексов выполняется в `final_validation`.
-На index-этапе финальная валидация теперь миксует:
-- `granularity` конкретного skip-индекса (в т.ч. через массив `granularity`)
-- `SETTINGS index_granularity` (через benchmark/table `index_granularity_values`
-  и/или index-level `index_granularity_values`).
+Для `sequential_phased_topn_strategy` runner делает 6 этапов:
+`order_by -> types -> codecs -> index_granularity -> indexes -> final_validation`.
+
+Логика этапов:
+- `types/codecs/indexes` работают в one-column режиме (колонки тестируются независимо);
+- merge в full-table кандидаты делается на `index_granularity` и `final_validation`;
+- в `indexes` тестируются только колонки, которые реально встречаются в `WHERE`;
+- для конкретной колонки на `indexes` используются только запросы, где она есть в `WHERE`;
+- после merge в `final_validation` может запускаться post-merge local search
+  (замена одной колонки на top-2/top-3 и т.д.).
 `result_store` в `BenchmarkRunner` теперь опционален, но для top-N стратегий обязателен
 (`sequential_topn_strategy`, `sequential_phased_topn_strategy`).
 Runner не пишет результаты в store. Сохранение выполняет execution backend (обычно Celery-воркер).
@@ -276,11 +273,12 @@ SQL-строки (`*_ddl`, `*_query`, SQL внутри JSON) перед запи
 Идемпотентность записи варианта обеспечивается по `id`:
 вокруг `check -> insert` используется Redis lock в result-store.
 Lock настраивается через `BENCH_RESULT_STORE_REDIS_URL`
-(если не задан — используется `BENCH_CELERY_BACKEND_URL`, если это Redis),
+(если не задан — используется `BENCH_CELERY_BACKEND_URL`, если это Redis;
+если и он не Redis, берётся fallback `redis://localhost:6379/0`),
 `BENCH_RESULT_STORE_REDIS_LOCK_PREFIX`,
 `BENCH_RESULT_STORE_REDIS_LOCK_TTL_SEC`,
 `BENCH_RESULT_STORE_REDIS_LOCK_BLOCKING_TIMEOUT_SEC`.
-Если Redis не настроен/недоступен, runtime завершится с ошибкой при старте store
+Если Redis недоступен, runtime завершится с ошибкой при старте store
 (без fallback на process-local lock).
 Для multi-pod Kubernetes это корректный межпроцессный дедуп
 (в отличие от локального файлового lock).
@@ -563,7 +561,8 @@ BENCH_RESULT_STORE_REDIS_LOCK_BLOCKING_TIMEOUT_SEC=60
 Если `BENCH_RESULT_CONNECTION_ID` не задан, берётся первый connection из конфига.
 Если `BENCH_RESULT_STORE_REDIS_URL` не задан, result-store попробует взять
 `BENCH_CELERY_BACKEND_URL`, если это Redis URL.
-Если оба URL не Redis/пустые, запуск завершится ошибкой.
+Если оба URL не Redis/пустые, используется fallback `redis://localhost:6379/0`.
+Если по итоговому URL Redis недоступен, запуск завершится ошибкой.
 Пакет `redis` обязателен (входит в `requirements.txt`); без него store не стартует.
 
 3. Запусти:
@@ -627,6 +626,9 @@ config = load_config("configs/benchmark.project.local.json")
 8. Для корректного progress/ожидания batch Celery worker обязательно запускай с `-E` (`--events`).
 9. Insert-замеры собираются в единые массивы по всем `insert_operations_count` повторов,
    и перцентили считаются по этим единым массивам.
+10. Для расчёта размера skip-индексов worker сначала использует запросы с `active=1`;
+    для старых/нестандартных схем `system.data_skipping_indices` есть fallback-запросы.
+    Если `active` технически недоступен, worker логирует warning и берёт размеры без `active`.
 
 #### 1) Запусти RabbitMQ
 
@@ -810,6 +812,25 @@ print(run_id)
 - `0` — формулы валидны.
 - `1` — есть ошибки формул или невалидный JSON.
 
+### Пересчитать custom score для сохранённых результатов
+
+Утилита: `recalculate_custom_score.py`.
+
+Пересчёт пишет результат в отдельную колонку `score_custom` и не меняет основной `score`.
+
+```bash
+./venv/bin/python recalculate_custom_score.py \
+  --benchmark-id bench_hits_postgres_sequential_topn \
+  --expression "pow(safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0), 0.9) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.1)" \
+  --target-tables phased
+```
+
+Опционально можно ограничить scope:
+- `--benchmark-run-id 123`
+- `--source-database analytics`
+- `--source-table events`
+- `--target-tables phased|legacy|both`
+
 <a id="json-reference"></a>
 ## Мини-справочник по полям JSON
 
@@ -949,21 +970,14 @@ print(run_id)
 ### `scoring`: как настроить формулу score
 
 `scoring.mode`:
-- `builtin` — стандартная формула runtime.
 - `expression` — кастомное безопасное выражение на `simpleeval`.
-
-Формула `builtin`:
-- `insert_ratio = median(source_insert_ms) / median(tested_insert_ms)`
-- `select_ratio = median(source_select_ms) / median(tested_select_ms)`
-- `compression_ratio = source_size_bytes / tested_size_bytes`
-- `score = (insert_ratio * select_ratio * compression_ratio) ** (1/3)`
 
 Для `compression_ratio` используются полные размеры таблиц
 `данные + skip-индексы` (`*_consumed_compressed_size_bytes_with_indexes`).
 
 `scoring` поля:
 - `mode`
-- `expression` (обязательно при `mode=expression`)
+- `expression` (обязательно при `mode=expression`; по умолчанию используется ratio-геометрическое среднее)
 - `on_error_score` (опционально: если expression упало, будет это значение; иначе `score=None`)
 - `by_stage` (опционально): stage-specific override формулы.
   Поддерживаемые стадии:
@@ -972,14 +986,6 @@ print(run_id)
   Если стадия не описана в `by_stage`, используется верхнеуровневый `scoring`.
 
 Примеры:
-
-```json
-{
-  "scoring": {
-    "mode": "builtin"
-  }
-}
-```
 
 ```json
 {
@@ -994,7 +1000,8 @@ print(run_id)
 ```json
 {
   "scoring": {
-    "mode": "builtin",
+    "mode": "expression",
+    "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)",
     "by_stage": {
       "types": {
         "mode": "expression",
@@ -1079,8 +1086,8 @@ print(run_id)
 - запуск бенчмарка останавливается до dispatch jobs.
 
 Что пишется в колонку `score_calculation_json`:
-- `mode` (`builtin`/`expression`);
-- формула (`expression` или builtin-формула);
+- `mode` (`expression`);
+- формула (`expression`);
 - входные параметры (контекст значений, из которых считался score);
 - статус:
   `ok`, `empty`, `error`, `fallback_on_error`, `non_finite`, `fallback_non_finite`, `skipped`;
@@ -1110,11 +1117,16 @@ print(run_id)
   - `order_by_first` — фиксированная первая колонка ORDER BY в фазе 1.
   - `order_by_candidates` — колонки-кандидаты, которые добавляются после `order_by_first`.
   - `sequential_top_n_limits` — top-N победителей по фазам
-    (`order_by`, `types`, `codecs`, `indexes`, `final_validation`).
+    (`order_by`, `types`, `codecs`, `index_granularity`, `indexes`,
+    `final_validation`, `local_search`).
     Если для фазы лимит не задан, используется общий
     `sequential_types_top_n_for_indexes`.
-  - `max_winners_per_parent_limits` — лимиты числа merged-кандидатов на одного parent
-    по фазам (`types`, `codecs`, `indexes`).
+  - `final_validation_input_top_n` — отдельный лимит, сколько кандидатов
+    брать из фазы `index_granularity` в генерацию `final_validation`
+    (если не задан, используется `sequential_top_n_limits.final_validation`).
+  - `max_winners_per_parent_limits` — лимиты per-column top-N для one-column фаз
+    (`types`, `codecs`, `indexes`).
+    Если не задано, per-column top-N берётся из `sequential_top_n_limits` соответствующей фазы.
 - новый rules-блок (рекомендуется):
   - `global_rules.order_by_rules` / `table_rules[].rules.order_by_rules`
     с полями `first_column`, `candidates`, `auto_generate_candidates`.
@@ -1152,10 +1164,13 @@ print(run_id)
 4. JSON parse error (`Expecting value`, `Expecting property name`).
 Обычно это лишняя запятая или комментарий в JSON.
 
-5. В `sequential`/`sequential_phased_topn` нет этапа индексов.
-Проверь, что есть `index_rules`, лимиты top-N > 0
-(`sequential_types_top_n_for_indexes` и/или `sequential_top_n_limits.indexes`),
-и адаптер возвращает `score`.
+5. В `sequential_phased_topn_strategy` пропускается этап индексов.
+Проверь:
+- есть `index_rules` для колонок;
+- в `queries.test_queries` есть `WHERE`-фильтры по этим колонкам
+  (index-фаза тестирует только такие колонки/запросы);
+- лимиты > 0 (`sequential_top_n_limits.indexes` или fallback `sequential`);
+- адаптер возвращает `score` для index-вариантов.
 
 6. Включён `global_bank_only`, но нет доступного bank.
 Либо укажи `global_rules.rule_bank`, либо настрой `default_rule_banks` для своего DBMS.
@@ -1272,8 +1287,9 @@ print(run_id)
 17. `src/fetcher.py` — ClickHouse-fetcher.
 18. `validate_json_config.py` — CLI-валидатор JSON по пути.
 19. `validate_scoring_formula.py` — CLI-валидатор только scoring-формул.
-20. `configs/*.example.json` — примеры конфигов.
-21. `LLM_CONTEXT.md` — подробный технический контекст для LLM-агентов.
+20. `recalculate_custom_score.py` — CLI-пересчёт дополнительного `score_custom` по expression.
+21. `configs/*.example.json` — примеры конфигов.
+22. `LLM_CONTEXT.md` — подробный технический контекст для LLM-агентов.
 
 ### Что проверить после изменений
 

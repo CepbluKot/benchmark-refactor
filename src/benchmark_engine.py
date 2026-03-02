@@ -381,6 +381,11 @@ class BenchmarkPlanner:
                         table_rule.sequential_top_n_limits if table_rule else None
                     ),
                 )
+                final_validation_input_top_n = (
+                    table_rule.final_validation_input_top_n
+                    if table_rule and table_rule.final_validation_input_top_n is not None
+                    else benchmark.final_validation_input_top_n
+                )
                 max_winners_per_parent_limits = self._merge_insert_rows_limits(
                     benchmark_insert_rows_limits=benchmark.max_winners_per_parent_limits,
                     table_insert_rows_limits=(
@@ -473,6 +478,7 @@ class BenchmarkPlanner:
                     insert_operations_count=insert_operations_count,
                     sequential_top_n=sequential_top_n,
                     sequential_top_n_limits=sequential_top_n_limits,
+                    final_validation_input_top_n=final_validation_input_top_n,
                     max_winners_per_parent_limits=max_winners_per_parent_limits,
                     insert_rows_limit=insert_rows_limit,
                     source_insert_rows_limit=source_insert_rows_limit,
@@ -1555,6 +1561,10 @@ class BenchmarkRunner:
             table_plan=table_plan,
             stage_mode="final_validation",
         )
+        top_n_final_validation_input = self._resolve_sequential_final_validation_input_top_n(
+            table_plan=table_plan,
+            fallback_top_n=top_n_final_validation,
+        )
         max_winners_per_parent_types = self._resolve_sequential_stage_max_winners_per_parent(
             table_plan=table_plan,
             stage_mode="types",
@@ -1614,7 +1624,7 @@ class BenchmarkRunner:
         else:
             winners_indexes = winners_codecs
 
-        final_candidates = min(winners_indexes, top_n_final_validation)
+        final_candidates = min(winners_indexes, top_n_final_validation_input)
         global_table_granularity_variants = len(table_plan.index_granularity_values or [])
         final_variants_per_candidate = max(
             1,
@@ -1640,6 +1650,18 @@ class BenchmarkRunner:
             if sequential_limit is not None:
                 return max(1, int(sequential_limit))
         return max(1, int(table_plan.sequential_top_n))
+
+    @staticmethod
+    def _resolve_sequential_final_validation_input_top_n(
+        *,
+        table_plan: TableBenchmarkPlan,
+        fallback_top_n: int,
+    ) -> int:
+        """Возвращает число кандидатов, которые берём из предыдущей фазы в final_validation."""
+        explicit = table_plan.final_validation_input_top_n
+        if explicit is not None:
+            return max(1, int(explicit))
+        return max(1, int(fallback_top_n))
 
     @staticmethod
     def _resolve_sequential_stage_max_winners_per_parent(

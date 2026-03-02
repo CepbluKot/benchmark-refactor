@@ -24,7 +24,7 @@ BenchmarkStrategy = Literal[
     "sequential_phased_topn_strategy",
 ]
 SelectQueryCacheMode = Literal["warm", "cold"]
-ScoringMode = Literal["builtin", "expression"]
+ScoringMode = Literal["expression"]
 ColumnOrderMode = Literal["compressed_size_desc"]
 RuleSourceMode = Literal[
     "global_bank_only",
@@ -34,6 +34,14 @@ RuleSourceMode = Literal[
 DatabasesSelector = Union[Literal["*"], List[str]]
 TableListSelector = Union[Literal["*"], List[str]]
 TablesSelector = Union[Literal["*"], List[str], Dict[str, TableListSelector]]
+
+DEFAULT_SCORE_EXPRESSION = (
+    "pow("
+    "safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) "
+    "* safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) "
+    "* safe_div(source_size_bytes, tested_size_bytes, 1.0), "
+    "1 / 3)"
+)
 
 
 STRATEGY_TO_MODE: Dict[BenchmarkStrategy, BenchmarkMode] = {
@@ -518,24 +526,23 @@ def _validate_scoring_mode_and_expression(
     field_path: str,
 ) -> None:
     """Проверяет согласованность пары scoring.mode/scoring.expression."""
-    if mode == "expression" and expression is None:
+    if mode != "expression":
+        raise ValueError(f"{field_path}.mode поддерживает только значение expression")
+    if expression is None:
         raise ValueError(f"{field_path}.mode=expression требует непустой {field_path}.expression")
-    if mode == "builtin" and expression is not None:
-        raise ValueError(f"{field_path}.expression нельзя задавать при {field_path}.mode=builtin")
 
 
 class ScoringConfig(_Base):
     """
     Конфигурация вычисления итогового `score`.
 
-    Режимы:
-      - `builtin`: стандартная встроенная формула runtime;
+    Режим:
       - `expression`: кастомное безопасное выражение.
     """
 
-    mode: ScoringMode = "builtin"
+    mode: ScoringMode = "expression"
     expression: Optional[str] = Field(
-        default=None,
+        default=DEFAULT_SCORE_EXPRESSION,
         validation_alias=AliasChoices("expression"),
         serialization_alias="expression",
     )
@@ -594,9 +601,9 @@ class ScoringConfig(_Base):
 class StageScoringConfig(_Base):
     """Stage-specific override формулы score."""
 
-    mode: ScoringMode = "builtin"
+    mode: ScoringMode = "expression"
     expression: Optional[str] = Field(
-        default=None,
+        default=DEFAULT_SCORE_EXPRESSION,
         validation_alias=AliasChoices("expression"),
         serialization_alias="expression",
     )
@@ -702,6 +709,8 @@ class TableRuleConfig(_Base):
       - insert_operations_count;
       - sequential_types_top_n_for_indexes;
       - sequential_top_n_limits (top-N лимиты победителей по фазам).
+      - final_validation_input_top_n (сколько кандидатов брать из предыдущей
+        фазы в генерацию final_validation).
       - max_winners_per_parent_limits (лимиты числа победителей на одного parent
         по фазам для `sequential_phased_topn_strategy`).
       - insert_rows_per_operation_limit;
@@ -740,6 +749,12 @@ class TableRuleConfig(_Base):
         default=None,
         validation_alias=AliasChoices("sequential_top_n_limits"),
         serialization_alias="sequential_top_n_limits",
+    )
+    final_validation_input_top_n: Optional[int] = Field(
+        default=None,
+        gt=0,
+        validation_alias=AliasChoices("final_validation_input_top_n"),
+        serialization_alias="final_validation_input_top_n",
     )
     max_winners_per_parent_limits: Optional[InsertRowsLimitsConfig] = Field(
         default=None,
@@ -879,6 +894,8 @@ class BenchmarkConfig(_Base):
       - `sequential_types_top_n_for_indexes` для двухфазного режима sequential.
       - `sequential_top_n_limits` — top-N лимиты победителей по фазам
         (`order_by`, `types`, `codecs`, `indexes`, `final_validation`).
+      - `final_validation_input_top_n` — сколько кандидатов брать из
+        предыдущей фазы в генерацию final_validation.
       - `max_winners_per_parent_limits` — лимиты числа победителей на одного
         parent-варианта по фазам (`types`, `codecs`, `indexes`).
       - `insert_rows_per_operation_limit` — сколько строк
@@ -924,6 +941,12 @@ class BenchmarkConfig(_Base):
         default=None,
         validation_alias=AliasChoices("sequential_top_n_limits"),
         serialization_alias="sequential_top_n_limits",
+    )
+    final_validation_input_top_n: Optional[int] = Field(
+        default=None,
+        gt=0,
+        validation_alias=AliasChoices("final_validation_input_top_n"),
+        serialization_alias="final_validation_input_top_n",
     )
     max_winners_per_parent_limits: Optional[InsertRowsLimitsConfig] = Field(
         default=None,

@@ -22,9 +22,11 @@
         "order_by": 3,
         "types": 3,
         "codecs": 3,
+        "index_granularity": 3,
         "indexes": 3,
         "final_validation": 3
       },
+      "final_validation_input_top_n": 3,
       "max_winners_per_parent_limits": {
         "types": 3,
         "codecs": 3,
@@ -39,11 +41,16 @@
         "order_by": 10,
         "types": 10,
         "codecs": 10,
+        "index_granularity": 10,
         "indexes": 10,
         "indexes_validation": 10,
         "final_validation": 10,
         "sequential": 20
       },
+      "index_granularity_values": [
+        8192,
+        16384
+      ],
       "source_insert_rows_per_operation_limits": {
         "sequential": 100000
       },
@@ -131,6 +138,12 @@
             "select_operations_count": 10
           },
           {
+            "query_id": "select_country_cold",
+            "query": "select count() from `default`.hits_postgres hp where country = 'RU'",
+            "cache_mode": "cold",
+            "select_operations_count": 10
+          },
+          {
             "query_id": "select_everything_warm",
             "query": "select * from `default`.hits_postgres hp  where page_url != ''",
             "cache_mode": "warm",
@@ -164,6 +177,7 @@
         "indexes": 3,
         "final_validation": 3
       },
+      "final_validation_input_top_n": 3,
       "max_winners_per_parent_limits": {
         "types": 3,
         "codecs": 3,

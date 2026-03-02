@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import List, Optional, Sequence
 from uuid import uuid4
 
@@ -215,11 +216,50 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
                 tested_table_consumed_compressed_size_bytes_with_indexes_readable=(
                     result.tested_table_consumed_compressed_size_bytes_with_indexes_readable
                 ),
+                tested_table_consumed_compressed_size_bytes_with_indexes_json=(
+                    result.tested_table_consumed_compressed_size_bytes_with_indexes_json
+                    if result.tested_table_consumed_compressed_size_bytes_with_indexes_json
+                    else (
+                        json.dumps(
+                            {
+                                "size_bytes": result.tested_table_consumed_compressed_size_bytes_with_indexes,
+                                "size_bytes_readable": (
+                                    result.tested_table_consumed_compressed_size_bytes_with_indexes_readable
+                                ),
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            default=str,
+                        )
+                        if result.tested_table_consumed_compressed_size_bytes_with_indexes
+                        is not None
+                        else None
+                    )
+                ),
                 source_table_consumed_compressed_size_bytes_overall=(
                     result.source_table_consumed_compressed_size_bytes_overall
                 ),
                 source_table_consumed_compressed_size_bytes_overall_readable=(
                     result.source_table_consumed_compressed_size_bytes_overall_readable
+                ),
+                source_table_consumed_compressed_size_bytes_overall_json=(
+                    result.source_table_consumed_compressed_size_bytes_overall_json
+                    if result.source_table_consumed_compressed_size_bytes_overall_json
+                    else (
+                        json.dumps(
+                            {
+                                "size_bytes": result.source_table_consumed_compressed_size_bytes_overall,
+                                "size_bytes_readable": (
+                                    result.source_table_consumed_compressed_size_bytes_overall_readable
+                                ),
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            default=str,
+                        )
+                        if result.source_table_consumed_compressed_size_bytes_overall is not None
+                        else None
+                    )
                 ),
                 tested_table_compression_overall_coef=result.tested_table_compression_overall_coef,
                 tested_table_compression_by_each_column_coef=(

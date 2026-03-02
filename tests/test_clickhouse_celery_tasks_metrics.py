@@ -379,7 +379,7 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
         ):
             result = run_source_benchmark(payload)
 
-        self.assertAlmostEqual(result.score or 0.0, 1.0 / 200.0)
+        self.assertAlmostEqual(result.score or 0.0, 1.0)
         self.assertEqual(result.metrics["source_table_insert_time_ms_measurements"], [100.0, 200.0])
         self.assertEqual(
             result.metrics["source_table_insert_time_ms_measurements_percentiles"],
@@ -2189,7 +2189,8 @@ ORDER BY country
             variant_table="events__bench__bench_var__0001",
             variant_mode="types",
             scoring={
-                "mode": "builtin",
+                "mode": "expression",
+                "expression": "41",
                 "by_stage": {
                     "types": {
                         "mode": "expression",

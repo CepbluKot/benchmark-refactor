@@ -222,21 +222,22 @@ class ModelsValidationTests(unittest.TestCase):
                 }
             )
 
-    def test_scoring_expression_mode_requires_expression(self) -> None:
-        """Проверяет, что scoring.expression обязателен при mode=expression."""
+    def test_scoring_expression_mode_rejects_empty_expression(self) -> None:
+        """Проверяет, что scoring.expression не может быть пустым."""
         with self.assertRaises(ValidationError):
-            ScoringConfig(mode="expression")
+            ScoringConfig(mode="expression", expression="   ")
 
-    def test_scoring_builtin_rejects_expression(self) -> None:
-        """Проверяет, что scoring.expression запрещён при mode=builtin."""
+    def test_scoring_rejects_builtin_mode(self) -> None:
+        """Проверяет, что mode=builtin больше не поддерживается."""
         with self.assertRaises(ValidationError):
             ScoringConfig(mode="builtin", expression="1 + 1")
 
     def test_scoring_allows_stage_expression_overrides(self) -> None:
-        """Проверяет, что stage-specific expression работает при глобальном builtin."""
+        """Проверяет, что stage-specific expression работает при глобальном expression."""
         scoring = ScoringConfig.model_validate(
             {
-                "mode": "builtin",
+                "mode": "expression",
+                "expression": "1 + 1",
                 "by_stage": {
                     "types": {
                         "mode": "expression",
@@ -253,7 +254,8 @@ class ModelsValidationTests(unittest.TestCase):
         """Проверяет нормализацию ключей scoring.by_stage."""
         scoring = ScoringConfig.model_validate(
             {
-                "mode": "builtin",
+                "mode": "expression",
+                "expression": "1 + 1",
                 "by_stage": {
                     "  TyPeS  ": {
                         "mode": "expression",
@@ -271,7 +273,8 @@ class ModelsValidationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ScoringConfig.model_validate(
                 {
-                    "mode": "builtin",
+                    "mode": "expression",
+                    "expression": "1 + 1",
                     "by_stage": {
                         "   ": {
                             "mode": "expression",

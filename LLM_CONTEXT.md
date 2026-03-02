@@ -154,10 +154,10 @@
 `SourceBenchmarkJob` также содержит:
 1. `test_database` — БД для временной baseline-копии исходной таблицы
    (если не задана, baseline-копия создаётся в `${source_database}__benchmark_tmp`).
-2. `scoring` — стратегия вычисления baseline score (`builtin`/`expression`).
+2. `scoring` — стратегия вычисления baseline score (`expression`).
 
 `VariantJob` содержит:
-1. `scoring` — стратегия вычисления variant score (`builtin`/`expression`), уже с учётом table-level override.
+1. `scoring` — стратегия вычисления variant score (`expression`), уже с учётом table-level override.
 2. `benchmark_strategy` — strategy-key текущего плана; используется для роутинга записи в result-store.
 
 Хранение результатов в ClickHouse:
@@ -502,16 +502,15 @@ Baseline исходного DDL для них уже выполнен runner-о�
    `benchmarks|root|project`.
 2. При ошибках печатает `WARNING` и завершает работу с exit code `1`.
 
-### 7.5 Настройка scoring (builtin/expression)
+### 7.5 Настройка scoring (expression-only)
 
 `BenchmarkConfig.scoring` и `TableRuleConfig.scoring` поддерживают:
 
-1. `mode="builtin"` — стандартный runtime score.
-2. `mode="expression"` — безопасное выражение на `simpleeval`.
-3. `on_error_score` — fallback при ошибке expression (иначе `score=None`).
-4. Для совместимости `expression` можно передать alias-ключами `score_expression`/`sql_expression`.
+1. `mode="expression"` — безопасное выражение на `simpleeval`.
+2. `on_error_score` — fallback при ошибке expression (иначе `score=None`).
+3. Для совместимости `expression` можно передать alias-ключами `score_expression`/`sql_expression`.
 
-`builtin` считает:
+Базовая формула (дефолт `expression`) считает:
 1. `insert_ratio = median(source_insert_ms) / median(tested_insert_ms)`.
 2. `select_ratio = median(source_select_ms) / median(tested_select_ms)`.
 3. `compression_ratio = source_size_bytes / tested_size_bytes`
@@ -582,10 +581,9 @@ Baseline исходного DDL для них уже выполнен runner-о�
 Отдельно по трассировке расчёта:
 
 1. `_resolve_score(...)` всегда формирует `score_calculation_json`.
-2. Для `builtin` внутри хранятся формула и использованные компоненты.
-3. Для `expression` внутри хранятся исходная строка expression, контекст, статус, ошибка (если есть) и итог.
-4. Для baseline skip (`source_table_empty`) тоже формируется `score_calculation_json` со статусом `skipped`.
-5. Возможные статусы: `ok`, `empty`, `error`, `fallback_on_error`,
+2. Для `expression` внутри хранятся исходная строка expression, контекст, статус, ошибка (если есть) и итог.
+3. Для baseline skip (`source_table_empty`) тоже формируется `score_calculation_json` со статусом `skipped`.
+4. Возможные статусы: `ok`, `error`, `fallback_on_error`,
    `non_finite`, `fallback_non_finite`, `skipped`.
 
 ## 8) Правила и их резолв

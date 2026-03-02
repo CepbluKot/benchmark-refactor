@@ -32,7 +32,8 @@ from ...types import (
     VariantJob,
     build_variant_params,
 )
-from .common import json_dumps
+from .common import json_dumps, make_readable_bytes
+from .scoring import ScoreEvaluationError, evaluate_score_expression, validate_score_expression
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +82,10 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "types_validation": 2,
         "codecs": 3,
         "codecs_validation": 3,
-        "indexes": 4,
-        "indexes_validation": 4,
-        "final_validation": 5,
+        "index_granularity": 4,
+        "indexes": 5,
+        "indexes_validation": 5,
+        "final_validation": 6,
     }
     _PHASE_NAME_BY_VARIANT_MODE: dict[str, str] = {
         "source_baseline": "source_baseline",
@@ -92,6 +94,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "types_validation": "types_validation",
         "codecs": "codecs",
         "codecs_validation": "codecs_validation",
+        "index_granularity": "index_granularity",
         "indexes": "indexes",
         "indexes_validation": "indexes_validation",
         "final_validation": "final_validation",
@@ -105,6 +108,13 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_primary_index_size_bytes",
         "tested_table_primary_index_size_bytes_readable",
         "tested_table_primary_index_size_percent_from_total_size",
+    )
+    _LEGACY_DATA_SKIPPING_INDEX_PERCENT_COLUMNS: tuple[str, ...] = (
+        "tested_table_indexes_sizes_percent_from_col_size",
+    )
+    _LEGACY_DUPLICATE_STAGE_COLUMNS: tuple[str, ...] = (
+        "phase",
+        "phase_name",
     )
 
     _LEGACY_MEMORY_COLUMNS: tuple[str, ...] = (
@@ -159,8 +169,6 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "benchmark_id",
         "id",
         "parent_id",
-        "phase",
-        "phase_name",
         "celery_task_id",
         "celery_worker_hostname",
         "started_at",
@@ -205,11 +213,9 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "source_table_consumed_compressed_size_bytes_by_each_column",
         "tested_table_consumed_compressed_size_bytes_overall",
         "tested_table_consumed_compressed_size_bytes_overall_readable",
-        "tested_table_consumed_compressed_size_bytes_with_indexes",
-        "tested_table_consumed_compressed_size_bytes_with_indexes_readable",
+        "tested_table_consumed_compressed_size_bytes_with_indexes_json",
         "tested_table_primary_index_size_json",
-        "source_table_consumed_compressed_size_bytes_overall",
-        "source_table_consumed_compressed_size_bytes_overall_readable",
+        "source_table_consumed_compressed_size_bytes_overall_json",
         "tested_table_compression_overall_coef",
         "tested_table_compression_by_each_column_coef",
         "source_table_n_rows_in_size_test",
@@ -223,6 +229,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "extra_json",
         "variant_table",
         "variant_mode",
+        "variant_mode_id",
         "variant_params",
         "rank_in_phase",
         "is_top_n",
@@ -235,8 +242,6 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "benchmark_id",
         "id",
         "parent_id",
-        "phase",
-        "phase_name",
         "celery_task_id",
         "celery_worker_hostname",
         "started_at",
@@ -247,16 +252,15 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "variant_params_json",
         "variant_table",
         "variant_mode",
+        "variant_mode_id",
         "variant_params",
         "total_n_rows_in_tested_table",
         "size_bytes_total",
         "size_bytes_by_column_json",
         "size_bytes_indexes_json",
-        "tested_table_consumed_compressed_size_bytes_with_indexes",
-        "tested_table_consumed_compressed_size_bytes_with_indexes_readable",
+        "tested_table_consumed_compressed_size_bytes_with_indexes_json",
         "tested_table_primary_index_size_json",
-        "source_table_consumed_compressed_size_bytes_overall",
-        "source_table_consumed_compressed_size_bytes_overall_readable",
+        "source_table_consumed_compressed_size_bytes_overall_json",
         "tested_table_compression_overall_coef",
         "select_metrics_json",
         "insert_metrics_json",
@@ -282,6 +286,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_compression_by_each_column_coef",
         "tested_table_cols_sizes",
         "tested_table_primary_index_size_json",
+        "tested_table_consumed_compressed_size_bytes_with_indexes_json",
+        "source_table_consumed_compressed_size_bytes_overall_json",
         "score_calculation_json",
     )
     _SQL_TEXT_COLUMNS: tuple[str, ...] = (
@@ -295,6 +301,26 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_select_metrics_by_query_json",
         "source_table_select_metrics_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
+    )
+    _CUSTOM_SCORE_CONTEXT_FALLBACK_KEYS: frozenset[str] = frozenset(
+        {
+            "measured_percentiles",
+            "source",
+            "tested",
+            "speedup",
+            "compression",
+            "compression_overall_coef",
+            "ratios",
+            "medians",
+            "source_size_bytes",
+            "tested_size_bytes",
+            "per_query",
+            "tested_table_insert_metrics_json",
+            "source_table_insert_metrics_json",
+            "tested_table_select_metrics_by_query_json",
+            "source_table_select_metrics_by_query_json",
+            "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
+        }
     )
 
     def __init__(
@@ -444,8 +470,6 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `benchmark_id` String,
                 `id` String,
                 `parent_id` Nullable(String),
-                `phase` Nullable(Int32),
-                `phase_name` Nullable(String),
                 `celery_task_id` Nullable(String),
                 `celery_worker_hostname` Nullable(String),
                 `started_at` DateTime64(3, 'Europe/Moscow'),
@@ -456,23 +480,25 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `variant_params_json` Nullable(String),
                 `variant_table` String,
                 `variant_mode` String,
+                `variant_mode_id` Nullable(Int32),
                 `variant_params` String,
                 `total_n_rows_in_tested_table` Nullable(Int64),
                 `size_bytes_total` Nullable(Float64),
                 `size_bytes_by_column_json` Nullable(String),
                 `size_bytes_indexes_json` Nullable(String),
-                `tested_table_consumed_compressed_size_bytes_with_indexes` Nullable(Float64),
-                `tested_table_consumed_compressed_size_bytes_with_indexes_readable` Nullable(String),
+                `tested_table_consumed_compressed_size_bytes_with_indexes_json` Nullable(String),
                 `tested_table_primary_index_size_json` Nullable(String),
-                `source_table_consumed_compressed_size_bytes_overall` Nullable(Float64),
-                `source_table_consumed_compressed_size_bytes_overall_readable` Nullable(String),
+                `source_table_consumed_compressed_size_bytes_overall_json` Nullable(String),
                 `tested_table_compression_overall_coef` Nullable(Float64),
                 `select_metrics_json` Nullable(String),
                 `insert_metrics_json` Nullable(String),
                 `score_calculation_json` Nullable(String),
                 `score` Nullable(Float64),
+                `score_custom` Nullable(Float64),
                 `rank_in_phase` Nullable(Int32),
-                `is_top_n` Bool DEFAULT 0
+                `is_top_n` Bool DEFAULT 0,
+                `rank_in_stage_column` Nullable(Int32),
+                `is_top_n_in_stage_column` Bool DEFAULT 0
             )
             ENGINE = MergeTree
             ORDER BY (benchmark_id, benchmark_run_id, source_db_name, source_table_name, id)
@@ -482,28 +508,28 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             f"""
             ALTER TABLE `{self._database}`.`{table_name}`
                 ADD COLUMN IF NOT EXISTS `parent_id` Nullable(String),
-                ADD COLUMN IF NOT EXISTS `phase` Nullable(Int32),
-                ADD COLUMN IF NOT EXISTS `phase_name` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `celery_task_id` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `celery_worker_hostname` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `started_at` Nullable(DateTime64(3, 'Europe/Moscow')),
                 ADD COLUMN IF NOT EXISTS `finished_at` Nullable(DateTime64(3, 'Europe/Moscow')),
                 ADD COLUMN IF NOT EXISTS `variant_params_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `variant_mode_id` Nullable(Int32),
                 ADD COLUMN IF NOT EXISTS `total_n_rows_in_tested_table` Nullable(Int64),
                 ADD COLUMN IF NOT EXISTS `size_bytes_total` Nullable(Float64),
                 ADD COLUMN IF NOT EXISTS `size_bytes_by_column_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `size_bytes_indexes_json` Nullable(String),
-                ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes` Nullable(Float64),
-                ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes_readable` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_primary_index_size_json` Nullable(String),
-                ADD COLUMN IF NOT EXISTS `source_table_consumed_compressed_size_bytes_overall` Nullable(Float64),
-                ADD COLUMN IF NOT EXISTS `source_table_consumed_compressed_size_bytes_overall_readable` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `source_table_consumed_compressed_size_bytes_overall_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_compression_overall_coef` Nullable(Float64),
                 ADD COLUMN IF NOT EXISTS `select_metrics_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `insert_metrics_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `score_calculation_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `score_custom` Nullable(Float64),
                 ADD COLUMN IF NOT EXISTS `rank_in_phase` Nullable(Int32),
-                ADD COLUMN IF NOT EXISTS `is_top_n` Bool DEFAULT 0
+                ADD COLUMN IF NOT EXISTS `is_top_n` Bool DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS `rank_in_stage_column` Nullable(Int32),
+                ADD COLUMN IF NOT EXISTS `is_top_n_in_stage_column` Bool DEFAULT 0
             """
         )
         self._ensure_datetime_columns_timezone(
@@ -520,6 +546,27 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 DROP COLUMN IF EXISTS `stage_column_info_json`
             """
         )
+        for column_name in self._LEGACY_PRIMARY_INDEX_SPLIT_COLUMNS:
+            self._execute(
+                f"""
+                ALTER TABLE `{self._database}`.`{table_name}`
+                    DROP COLUMN IF EXISTS `{column_name}`
+                """
+            )
+        for column_name in self._LEGACY_DATA_SKIPPING_INDEX_PERCENT_COLUMNS:
+            self._execute(
+                f"""
+                ALTER TABLE `{self._database}`.`{table_name}`
+                    DROP COLUMN IF EXISTS `{column_name}`
+                """
+            )
+        for column_name in self._LEGACY_DUPLICATE_STAGE_COLUMNS:
+            self._execute(
+                f"""
+                ALTER TABLE `{self._database}`.`{table_name}`
+                    DROP COLUMN IF EXISTS `{column_name}`
+                """
+            )
 
     def _ensure_results_table_schema(self, table_name: str) -> None:
         """Создаёт/мигрирует целевую таблицу результатов."""
@@ -532,8 +579,6 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `benchmark_id` String,
                 `id` String,
                 `parent_id` Nullable(String),
-                `phase` Nullable(Int32),
-                `phase_name` Nullable(String),
                 `celery_task_id` Nullable(String),
                 `celery_worker_hostname` Nullable(String),
                 `started_at` DateTime64(3, 'Europe/Moscow'),
@@ -579,11 +624,9 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `source_table_consumed_compressed_size_bytes_by_each_column` Nullable(String),
                 `tested_table_consumed_compressed_size_bytes_overall` Nullable(Float64),
                 `tested_table_consumed_compressed_size_bytes_overall_readable` Nullable(String),
-                `tested_table_consumed_compressed_size_bytes_with_indexes` Nullable(Float64),
-                `tested_table_consumed_compressed_size_bytes_with_indexes_readable` Nullable(String),
+                `tested_table_consumed_compressed_size_bytes_with_indexes_json` Nullable(String),
                 `tested_table_primary_index_size_json` Nullable(String),
-                `source_table_consumed_compressed_size_bytes_overall` Nullable(Float64),
-                `source_table_consumed_compressed_size_bytes_overall_readable` Nullable(String),
+                `source_table_consumed_compressed_size_bytes_overall_json` Nullable(String),
                 `tested_table_compression_overall_coef` Nullable(Float64),
                 `tested_table_compression_by_each_column_coef` Nullable(String),
                 `source_table_n_rows_in_size_test` Nullable(Int64),
@@ -596,11 +639,15 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `extra_json` Nullable(String),
                 `variant_table` String,
                 `variant_mode` String,
+                `variant_mode_id` Nullable(Int32),
                 `variant_params` String,
                 `rank_in_phase` Nullable(Int32),
                 `is_top_n` Bool DEFAULT 0,
+                `rank_in_stage_column` Nullable(Int32),
+                `is_top_n_in_stage_column` Bool DEFAULT 0,
                 `score_calculation_json` Nullable(String),
-                `score` Nullable(Float64)
+                `score` Nullable(Float64),
+                `score_custom` Nullable(Float64)
             )
             ENGINE = MergeTree
             ORDER BY (benchmark_id, benchmark_run_id, source_db_name, source_table_name, id)
@@ -618,13 +665,13 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `source_table_insert_metrics_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `insert_metrics_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `select_metrics_json` Nullable(String),
-                ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes` Nullable(Float64),
-                ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes_readable` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_consumed_compressed_size_bytes_with_indexes_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `source_table_consumed_compressed_size_bytes_overall_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_primary_index_size_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `score_calculation_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `score_custom` Nullable(Float64),
+                ADD COLUMN IF NOT EXISTS `variant_mode_id` Nullable(Int32),
                 ADD COLUMN IF NOT EXISTS `parent_id` Nullable(String),
-                ADD COLUMN IF NOT EXISTS `phase` Nullable(Int32),
-                ADD COLUMN IF NOT EXISTS `phase_name` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `celery_task_id` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `celery_worker_hostname` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `started_at` Nullable(DateTime64(3, 'Europe/Moscow')),
@@ -634,7 +681,9 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `size_bytes_by_column_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `size_bytes_indexes_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `rank_in_phase` Nullable(Int32),
-                ADD COLUMN IF NOT EXISTS `is_top_n` Bool DEFAULT 0
+                ADD COLUMN IF NOT EXISTS `is_top_n` Bool DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS `rank_in_stage_column` Nullable(Int32),
+                ADD COLUMN IF NOT EXISTS `is_top_n_in_stage_column` Bool DEFAULT 0
             """
         )
         self._ensure_datetime_columns_timezone(
@@ -677,6 +726,20 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 """
             )
         for column_name in self._LEGACY_PRIMARY_INDEX_SPLIT_COLUMNS:
+            self._execute(
+                f"""
+                ALTER TABLE `{self._database}`.`{table_name}`
+                    DROP COLUMN IF EXISTS `{column_name}`
+                """
+            )
+        for column_name in self._LEGACY_DATA_SKIPPING_INDEX_PERCENT_COLUMNS:
+            self._execute(
+                f"""
+                ALTER TABLE `{self._database}`.`{table_name}`
+                    DROP COLUMN IF EXISTS `{column_name}`
+                """
+            )
+        for column_name in self._LEGACY_DUPLICATE_STAGE_COLUMNS:
             self._execute(
                 f"""
                 ALTER TABLE `{self._database}`.`{table_name}`
@@ -1338,11 +1401,24 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             result.tested_table_consumed_compressed_size_bytes_by_each_column
             or result.tested_table_cols_sizes
         )
+        source_size_bytes_overall = result.source_table_consumed_compressed_size_bytes_overall
+        if source_size_bytes_overall is None:
+            source_size_bytes_overall = self._extract_size_bytes_from_value_json(
+                result.source_table_consumed_compressed_size_bytes_overall_json
+            )
         size_bytes_indexes_json = self._build_size_bytes_indexes_json(
             tested_table_indexes_sizes=result.tested_table_indexes_sizes,
-            source_table_size_bytes_overall=(
-                result.source_table_consumed_compressed_size_bytes_overall
-            ),
+            source_table_size_bytes_overall=source_size_bytes_overall,
+        )
+        tested_table_size_with_indexes_json = self._build_size_bytes_value_json(
+            size_bytes=result.tested_table_consumed_compressed_size_bytes_with_indexes,
+            size_bytes_readable=result.tested_table_consumed_compressed_size_bytes_with_indexes_readable,
+            fallback_json=result.tested_table_consumed_compressed_size_bytes_with_indexes_json,
+        )
+        source_table_size_overall_json = self._build_size_bytes_value_json(
+            size_bytes=source_size_bytes_overall,
+            size_bytes_readable=result.source_table_consumed_compressed_size_bytes_overall_readable,
+            fallback_json=result.source_table_consumed_compressed_size_bytes_overall_json,
         )
         execution_uuid = ""
         if isinstance(variant_params, dict):
@@ -1361,6 +1437,10 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         )
         finished_at = self._to_aware_storage_datetime(
             result.worker_finished_at or datetime.now(_RESULTS_TZ)
+        )
+        variant_mode_id = self._resolve_variant_mode_id(
+            variant_table=variant_table,
+            variant_params=variant_params,
         )
 
         return StoredBenchmarkResult(
@@ -1472,14 +1552,20 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             tested_table_consumed_compressed_size_bytes_with_indexes_readable=(
                 result.tested_table_consumed_compressed_size_bytes_with_indexes_readable
             ),
+            tested_table_consumed_compressed_size_bytes_with_indexes_json=(
+                tested_table_size_with_indexes_json
+            ),
             tested_table_primary_index_size_json=(
                 result.tested_table_primary_index_size_json
             ),
             source_table_consumed_compressed_size_bytes_overall=(
-                result.source_table_consumed_compressed_size_bytes_overall
+                source_size_bytes_overall
             ),
             source_table_consumed_compressed_size_bytes_overall_readable=(
                 result.source_table_consumed_compressed_size_bytes_overall_readable
+            ),
+            source_table_consumed_compressed_size_bytes_overall_json=(
+                source_table_size_overall_json
             ),
             tested_table_compression_overall_coef=result.tested_table_compression_overall_coef,
             tested_table_compression_by_each_column_coef=(
@@ -1495,6 +1581,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             extra_json=result.extra_json,
             variant_table=variant_table,
             variant_mode=variant_mode,
+            variant_mode_id=variant_mode_id,
             variant_params=variant_params,
             rank_in_phase=None,
             is_top_n=False,
@@ -1618,7 +1705,8 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         """
         Строит JSON размеров skip-индексов для `size_bytes_indexes_json`.
 
-        Добавляет только в этот JSON поле `size_percent_from_source_table`,
+        Добавляет только в этот JSON поле
+        `data_skipping_index_size_percent_from_source_table`,
         рассчитанное как `index_size_bytes / source_table_size_bytes_overall * 100`.
         """
         if tested_table_indexes_sizes is None:
@@ -1651,13 +1739,66 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 index_size_bytes = 0.0
             if index_size_bytes <= 0:
                 continue
-            index_stats["size_percent_from_source_table"] = round(
+            index_stats["data_skipping_index_size_percent_from_source_table"] = round(
                 (index_size_bytes / source_size_bytes) * 100.0,
                 6,
             )
 
         return json.dumps(
             parsed,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+
+    @classmethod
+    def _extract_size_bytes_from_value_json(cls, value: Any) -> Optional[float]:
+        """Достаёт `size_bytes` из JSON-колонки вида `{\"size_bytes\": ..., ...}`."""
+        if value is None:
+            return None
+        parsed: Any = value
+        if isinstance(value, str):
+            if not value.strip():
+                return None
+            try:
+                parsed = json.loads(value)
+            except Exception:
+                return None
+        if not isinstance(parsed, dict):
+            return None
+        try:
+            return float(parsed.get("size_bytes"))
+        except Exception:
+            return None
+
+    @classmethod
+    def _build_size_bytes_value_json(
+        cls,
+        *,
+        size_bytes: Optional[float],
+        size_bytes_readable: Optional[str],
+        fallback_json: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Строит JSON размера в формате:
+        `{\"size_bytes\": <float>, \"size_bytes_readable\": <str>}`.
+        """
+        try:
+            numeric_size = float(size_bytes) if size_bytes is not None else None
+        except Exception:
+            numeric_size = None
+
+        if numeric_size is None and isinstance(fallback_json, str) and fallback_json.strip():
+            return fallback_json
+        if numeric_size is None:
+            return None
+
+        readable_value = str(size_bytes_readable or "").strip() or make_readable_bytes(numeric_size)
+        return json.dumps(
+            {
+                "size_bytes": numeric_size,
+                "size_bytes_readable": readable_value,
+            },
             ensure_ascii=False,
             sort_keys=True,
             default=str,
@@ -1743,6 +1884,36 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             normalized = str(value).strip()
             if normalized:
                 return normalized
+        return None
+
+    @staticmethod
+    def _resolve_variant_mode_id(
+        *,
+        variant_table: str,
+        variant_params: Dict[str, Any],
+    ) -> Optional[int]:
+        """
+        Возвращает числовой последовательный id варианта для сортировки.
+
+        Приоритет:
+          1) индекс из `variant_table` (паттерн `...__bench__...__0007`);
+          2) `variant_params.global_index` (если присутствует);
+          3) `None`.
+        """
+        parsed = parse_variant_name(str(variant_table or ""))
+        if parsed is not None:
+            try:
+                return int(parsed[2])
+            except Exception:
+                pass
+
+        if isinstance(variant_params, dict):
+            raw_global_index = variant_params.get("global_index")
+            if raw_global_index is not None:
+                try:
+                    return int(raw_global_index)
+                except Exception:
+                    pass
         return None
 
     def _resolve_parent_result_id(
@@ -1862,8 +2033,9 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 1: "order_by",
                 2: "types",
                 3: "codecs",
-                4: "indexes",
-                5: "final_validation",
+                4: "index_granularity",
+                5: "indexes",
+                6: "final_validation",
             }
             phase_key = phase_key_by_number.get(int(phase))
             if phase_key is not None:
@@ -1964,6 +2136,117 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                     "id": str(row_id),
                 },
             )
+        self._recalculate_stage_column_ranking(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+            phase=phase,
+            variant_mode=variant_mode,
+            phase_name=phase_name,
+            top_n_winners=top_n_winners,
+        )
+
+    def _recalculate_stage_column_ranking(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        phase: Optional[int],
+        variant_mode: Optional[str],
+        phase_name: Optional[str],
+        top_n_winners: int,
+    ) -> None:
+        """
+        Пересчитывает rank/top-N внутри stage-колонки (`stage_column_name`) в phase-scope.
+
+        Источник stage-колонки — `variant_params.stage_column_name`.
+        Для фаз без `stage_column_name` поля остаются пустыми/false.
+        """
+        if phase is None and not variant_mode and not phase_name:
+            return
+        scope_where_clause, scope_params = self._build_phase_scope_clause(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+            phase=phase,
+            variant_mode=variant_mode,
+            phase_name=phase_name,
+        )
+        rows = self._execute(
+            f"""
+            SELECT
+                id,
+                score,
+                JSONExtractString(variant_params, 'stage_column_name') AS stage_column_name
+            FROM `{self._database}`.`{self._table}`
+            WHERE {scope_where_clause}
+            """,
+            scope_params,
+        )
+        if not rows:
+            return
+
+        rows_by_stage_column: Dict[str, List[tuple[str, Optional[float]]]] = {}
+        for row in rows:
+            if not row:
+                continue
+            row_id = str(row[0] or "")
+            if not row_id:
+                continue
+            score_value = row[1] if len(row) > 1 else None
+            stage_column_raw = row[2] if len(row) > 2 else None
+            stage_column_name = str(stage_column_raw or "").strip()
+            if not stage_column_name:
+                continue
+            rows_by_stage_column.setdefault(stage_column_name, []).append((row_id, score_value))
+
+        if not rows_by_stage_column:
+            return
+
+        self._execute(
+            f"""
+            ALTER TABLE `{self._database}`.`{self._table}`
+            UPDATE
+                rank_in_stage_column = NULL,
+                is_top_n_in_stage_column = 0
+            WHERE {scope_where_clause}
+            SETTINGS mutations_sync = 1
+            """,
+            scope_params,
+        )
+
+        stage_top_n = max(1, int(top_n_winners))
+        for ranked_rows in rows_by_stage_column.values():
+            ranked_rows_sorted = sorted(
+                ranked_rows,
+                key=lambda item: (
+                    item[1] is None,
+                    -(float(item[1]) if item[1] is not None else 0.0),
+                    item[0],
+                ),
+            )
+            for rank_index, (row_id, _) in enumerate(ranked_rows_sorted, start=1):
+                self._execute(
+                    f"""
+                    ALTER TABLE `{self._database}`.`{self._table}`
+                    UPDATE
+                        rank_in_stage_column = %(rank_in_stage_column)s,
+                        is_top_n_in_stage_column = %(is_top_n_in_stage_column)s
+                    WHERE {scope_where_clause}
+                      AND id = %(id)s
+                    SETTINGS mutations_sync = 1
+                    """,
+                    {
+                        **scope_params,
+                        "rank_in_stage_column": rank_index,
+                        "is_top_n_in_stage_column": rank_index <= stage_top_n,
+                        "id": row_id,
+                    },
+                )
 
     @staticmethod
     def _build_phase_scope_clause(
@@ -1976,7 +2259,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         variant_mode: Optional[str],
         phase_name: Optional[str],
     ) -> tuple[str, Dict[str, Any]]:
-        """Строит WHERE-клаузу и параметры для phase-scope операций."""
+        """Строит WHERE-клаузу и параметры для stage-scope операций по `variant_mode`."""
         scope_conditions = [
             "benchmark_run_id = %(benchmark_run_id)s",
             "benchmark_id = %(benchmark_id)s",
@@ -1989,15 +2272,26 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             "source_database": source_database,
             "source_table": source_table,
         }
-        if phase is not None:
-            scope_conditions.append("phase = %(phase)s")
-            scope_params["phase"] = int(phase)
-        if variant_mode is not None:
+        resolved_mode: Optional[str] = None
+        if variant_mode is not None and str(variant_mode).strip():
+            resolved_mode = str(variant_mode).strip()
+        elif phase_name is not None and str(phase_name).strip():
+            resolved_mode = str(phase_name).strip()
+        elif phase is not None:
+            phase_to_mode = {
+                0: "source_baseline",
+                1: "order_by",
+                2: "types",
+                3: "codecs",
+                4: "index_granularity",
+                5: "indexes",
+                6: "final_validation",
+            }
+            resolved_mode = phase_to_mode.get(int(phase))
+
+        if resolved_mode is not None:
             scope_conditions.append("variant_mode = %(variant_mode)s")
-            scope_params["variant_mode"] = str(variant_mode)
-        elif phase_name is not None:
-            scope_conditions.append("phase_name = %(phase_name)s")
-            scope_params["phase_name"] = str(phase_name)
+            scope_params["variant_mode"] = resolved_mode
         return " AND\n              ".join(scope_conditions), scope_params
 
     def recalculate_phase_ranking(
@@ -2150,6 +2444,228 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                     variant_mode=variant_mode,
                     phase_name=phase_name,
                 )
+
+    @classmethod
+    def _extract_expression_context_from_score_calculation_json(
+        cls,
+        raw_json: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Извлекает expression-context из `score_calculation_json`."""
+        if not isinstance(raw_json, str) or not raw_json.strip():
+            return None
+        try:
+            payload = json.loads(raw_json)
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        context = payload.get("context")
+        if isinstance(context, dict):
+            return context
+
+        # Backward-compatible fallback: если контекст был сохранен в root-json.
+        fallback_context = {
+            key: payload[key]
+            for key in cls._CUSTOM_SCORE_CONTEXT_FALLBACK_KEYS
+            if key in payload
+        }
+        return fallback_context or None
+
+    def _select_custom_score_target_rows(
+        self,
+        *,
+        table_name: str,
+        benchmark_id: str,
+        benchmark_run_id: Optional[int],
+        source_database: Optional[str],
+        source_table: Optional[str],
+    ) -> List[tuple[str, Any]]:
+        """Читает `(id, score_calculation_json)` для пересчета custom-score."""
+        where_conditions = ["benchmark_id = %(benchmark_id)s"]
+        params: Dict[str, Any] = {"benchmark_id": benchmark_id}
+        if benchmark_run_id is not None:
+            where_conditions.append("benchmark_run_id = %(benchmark_run_id)s")
+            params["benchmark_run_id"] = int(benchmark_run_id)
+        if source_database is not None and str(source_database).strip():
+            where_conditions.append("source_db_name = %(source_database)s")
+            params["source_database"] = str(source_database).strip()
+        if source_table is not None and str(source_table).strip():
+            where_conditions.append("source_table_name = %(source_table)s")
+            params["source_table"] = str(source_table).strip()
+
+        where_clause = " AND ".join(where_conditions)
+        rows = self._execute(
+            f"""
+            SELECT id, score_calculation_json
+            FROM `{self._database}`.`{table_name}`
+            WHERE {where_clause}
+            ORDER BY benchmark_run_id DESC, id DESC
+            """,
+            params,
+        )
+        normalized_rows: list[tuple[str, Any]] = []
+        for row in rows:
+            if not row:
+                continue
+            row_id = str(row[0] or "").strip()
+            if not row_id:
+                continue
+            score_calc_json = row[1] if len(row) > 1 else None
+            normalized_rows.append((row_id, score_calc_json))
+        return normalized_rows
+
+    def _update_custom_score_for_row(
+        self,
+        *,
+        table_name: str,
+        row_id: str,
+        score_custom: Optional[float],
+    ) -> None:
+        """Обновляет `score_custom` у одной записи результата."""
+        self._execute(
+            f"""
+            ALTER TABLE `{self._database}`.`{table_name}`
+            UPDATE score_custom = %(score_custom)s
+            WHERE id = %(id)s
+            SETTINGS mutations_sync = 1
+            """,
+            {
+                "score_custom": score_custom,
+                "id": row_id,
+            },
+        )
+
+    def _recalculate_custom_score_for_table(
+        self,
+        *,
+        table_name: str,
+        benchmark_id: str,
+        expression: str,
+        benchmark_run_id: Optional[int],
+        source_database: Optional[str],
+        source_table: Optional[str],
+    ) -> Dict[str, int]:
+        """Пересчитывает `score_custom` для одной таблицы результатов."""
+        rows = self._select_custom_score_target_rows(
+            table_name=table_name,
+            benchmark_id=benchmark_id,
+            benchmark_run_id=benchmark_run_id,
+            source_database=source_database,
+            source_table=source_table,
+        )
+        total_rows = len(rows)
+        updated_rows = 0
+        failed_rows = 0
+
+        for row_id, score_calculation_json in rows:
+            expression_context = self._extract_expression_context_from_score_calculation_json(
+                score_calculation_json
+            )
+            if not isinstance(expression_context, dict):
+                failed_rows += 1
+                self._update_custom_score_for_row(
+                    table_name=table_name,
+                    row_id=row_id,
+                    score_custom=None,
+                )
+                continue
+
+            try:
+                score_custom = evaluate_score_expression(expression, expression_context)
+            except ScoreEvaluationError as exc:
+                failed_rows += 1
+                logger.warning(
+                    "Custom-score recalc skipped row id=%s in `%s`.`%s`: %s",
+                    row_id,
+                    self._database,
+                    table_name,
+                    exc,
+                )
+                self._update_custom_score_for_row(
+                    table_name=table_name,
+                    row_id=row_id,
+                    score_custom=None,
+                )
+                continue
+
+            updated_rows += 1
+            self._update_custom_score_for_row(
+                table_name=table_name,
+                row_id=row_id,
+                score_custom=float(score_custom),
+            )
+
+        return {
+            "total_rows": total_rows,
+            "updated_rows": updated_rows,
+            "failed_rows": failed_rows,
+        }
+
+    def recalculate_custom_score_for_benchmark(
+        self,
+        *,
+        benchmark_id: str,
+        expression: str,
+        benchmark_run_id: Optional[int] = None,
+        source_database: Optional[str] = None,
+        source_table: Optional[str] = None,
+        target_tables: str = "phased",
+    ) -> Dict[str, Dict[str, int]]:
+        """
+        Пересчитывает `score_custom` по новой формуле для выбранного benchmark scope.
+
+        Основной `score` при этом не изменяется.
+        """
+        normalized_benchmark_id = str(benchmark_id or "").strip()
+        if not normalized_benchmark_id:
+            raise ValueError("benchmark_id не должен быть пустым")
+        normalized_expression = str(expression or "").strip()
+        if not normalized_expression:
+            raise ValueError("expression не должна быть пустой")
+
+        issues = validate_score_expression(normalized_expression)
+        if issues:
+            raise ValueError(
+                "Некорректная expression для custom-score:\n- " + "\n- ".join(issues)
+            )
+
+        scope = str(target_tables or "").strip().lower() or "phased"
+        if scope not in {"phased", "legacy", "both"}:
+            raise ValueError(
+                "target_tables должен быть одним из: phased, legacy, both"
+            )
+        table_names: list[str] = []
+        if scope in {"phased", "both"}:
+            table_names.append(self._phased_table)
+        if scope in {"legacy", "both"}:
+            if self._create_legacy_table or self._legacy_table == self._phased_table:
+                table_names.append(self._legacy_table)
+            elif scope == "legacy":
+                raise ValueError(
+                    "legacy result-table отключена (create_legacy_table=False), "
+                    "target_tables=legacy недоступен"
+                )
+        resolved_table_names: list[str] = []
+        seen_table_names: set[str] = set()
+        for table_name in table_names:
+            normalized = str(table_name or "").strip()
+            if not normalized or normalized in seen_table_names:
+                continue
+            seen_table_names.add(normalized)
+            resolved_table_names.append(normalized)
+
+        result: Dict[str, Dict[str, int]] = {}
+        for table_name in resolved_table_names:
+            result[table_name] = self._recalculate_custom_score_for_table(
+                table_name=table_name,
+                benchmark_id=normalized_benchmark_id,
+                expression=normalized_expression,
+                benchmark_run_id=benchmark_run_id,
+                source_database=source_database,
+                source_table=source_table,
+            )
+        return result
 
     @staticmethod
     def _build_run_record_id(
@@ -2506,15 +3022,45 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         score_calculation_json = self._pretty_json_string_or_as_is(
             record.score_calculation_json
         )
-        tested_size_with_indexes = record.tested_table_consumed_compressed_size_bytes_with_indexes
+        tested_size_with_indexes = self._extract_size_bytes_from_value_json(
+            record.tested_table_consumed_compressed_size_bytes_with_indexes_json
+        )
+        if tested_size_with_indexes is None:
+            tested_size_with_indexes = record.tested_table_consumed_compressed_size_bytes_with_indexes
         if tested_size_with_indexes is None:
             tested_size_with_indexes = record.size_bytes_total
-        source_size_overall = record.source_table_consumed_compressed_size_bytes_overall
+        source_size_overall = self._extract_size_bytes_from_value_json(
+            record.source_table_consumed_compressed_size_bytes_overall_json
+        )
+        if source_size_overall is None:
+            source_size_overall = record.source_table_consumed_compressed_size_bytes_overall
+        tested_size_with_indexes_json = self._pretty_json_string_or_as_is(
+            record.tested_table_consumed_compressed_size_bytes_with_indexes_json
+        )
+        if tested_size_with_indexes_json is None:
+            tested_size_with_indexes_json = self._build_size_bytes_value_json(
+                size_bytes=tested_size_with_indexes,
+                size_bytes_readable=(
+                    record.tested_table_consumed_compressed_size_bytes_with_indexes_readable
+                ),
+            )
+            tested_size_with_indexes_json = self._pretty_json_string_or_as_is(
+                tested_size_with_indexes_json
+            )
+        source_size_overall_json = self._pretty_json_string_or_as_is(
+            record.source_table_consumed_compressed_size_bytes_overall_json
+        )
+        if source_size_overall_json is None:
+            source_size_overall_json = self._build_size_bytes_value_json(
+                size_bytes=source_size_overall,
+                size_bytes_readable=record.source_table_consumed_compressed_size_bytes_overall_readable,
+            )
+            source_size_overall_json = self._pretty_json_string_or_as_is(
+                source_size_overall_json
+            )
         compression_coef = record.tested_table_compression_overall_coef
         variant_mode_normalized = str(record.variant_mode or "").strip().lower()
-        is_source_baseline_mode = (
-            variant_mode_normalized == "source_baseline" or int(record.phase or 0) == 0
-        )
+        is_source_baseline_mode = variant_mode_normalized == "source_baseline"
         if compression_coef is None and not is_source_baseline_mode:
             try:
                 source_size_numeric = float(source_size_overall or 0.0)
@@ -2531,8 +3077,6 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             "benchmark_id": str(record.benchmark_id),
             "id": str(record.id),
             "parent_id": record.parent_id,
-            "phase": record.phase,
-            "phase_name": record.phase_name,
             "celery_task_id": record.celery_task_id,
             "celery_worker_hostname": record.celery_worker_hostname,
             "started_at": started_at_utc,
@@ -2543,22 +3087,19 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             "variant_params_json": self._pretty_json_string_or_as_is(variant_params_json),
             "variant_table": str(record.variant_table),
             "variant_mode": str(record.variant_mode),
+            "variant_mode_id": record.variant_mode_id,
             "variant_params": variant_params,
             "total_n_rows_in_tested_table": record.total_n_rows_in_tested_table,
             "size_bytes_total": record.size_bytes_total,
             "size_bytes_by_column_json": size_bytes_by_column_json,
             "size_bytes_indexes_json": size_bytes_indexes_json,
-            "tested_table_consumed_compressed_size_bytes_with_indexes": tested_size_with_indexes,
-            "tested_table_consumed_compressed_size_bytes_with_indexes_readable": (
-                record.tested_table_consumed_compressed_size_bytes_with_indexes_readable
+            "tested_table_consumed_compressed_size_bytes_with_indexes_json": (
+                tested_size_with_indexes_json
             ),
             "tested_table_primary_index_size_json": self._pretty_json_string_or_as_is(
                 record.tested_table_primary_index_size_json
             ),
-            "source_table_consumed_compressed_size_bytes_overall": source_size_overall,
-            "source_table_consumed_compressed_size_bytes_overall_readable": (
-                record.source_table_consumed_compressed_size_bytes_overall_readable
-            ),
+            "source_table_consumed_compressed_size_bytes_overall_json": source_size_overall_json,
             "tested_table_compression_overall_coef": compression_coef,
             "select_metrics_json": select_metrics_json,
             "insert_metrics_json": insert_metrics_json,

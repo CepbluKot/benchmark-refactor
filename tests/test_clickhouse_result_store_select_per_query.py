@@ -242,6 +242,22 @@ class _FailFastStore(ClickHouseBenchmarkResultStore):
         return []
 
 
+class _CustomScoreRecalcStore(_CapturingStore):
+    def __init__(self) -> None:
+        self.recalc_rows: List[tuple[str, Optional[str]]] = []
+        self.recalc_updates: List[Dict[str, Any]] = []
+        super().__init__()
+
+    def _execute(self, query: str, params: Optional[Any] = None):
+        normalized = " ".join(query.split()).lower()
+        if normalized.startswith("select id, score_calculation_json"):
+            return list(self.recalc_rows)
+        if " alter table " in f" {normalized} " and " update score_custom " in f" {normalized} ":
+            self.recalc_updates.append(dict(params or {}))
+            return []
+        return super()._execute(query, params)
+
+
 class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
     def test_store_uses_localhost_redis_fallback_when_urls_not_set(self) -> None:
         with patch.dict(
@@ -339,12 +355,9 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
             columns,
         )
-        self.assertIn("tested_table_consumed_compressed_size_bytes_with_indexes", columns)
-        self.assertIn(
-            "tested_table_consumed_compressed_size_bytes_with_indexes_readable",
-            columns,
-        )
+        self.assertIn("tested_table_consumed_compressed_size_bytes_with_indexes_json", columns)
         self.assertIn("tested_table_primary_index_size_json", columns)
+        self.assertIn("variant_mode_id", columns)
         tested_per_query_json = json.loads(
             row_by_column["tested_table_select_metrics_by_query_json"] or "{}"
         )
@@ -381,18 +394,17 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
         )
         self.assertIn("\n", row_by_column["variant_params"])
         self.assertEqual(json.loads(row_by_column["variant_params"]), {"mode": "types"})
-        self.assertEqual(
-            row_by_column["tested_table_consumed_compressed_size_bytes_with_indexes"],
-            1234.0,
+        tested_size_json = json.loads(
+            row_by_column["tested_table_consumed_compressed_size_bytes_with_indexes_json"]
+            or "{}"
         )
-        self.assertEqual(
-            row_by_column["tested_table_consumed_compressed_size_bytes_with_indexes_readable"],
-            "1.21 KiB",
-        )
+        self.assertEqual(tested_size_json.get("size_bytes"), 1234.0)
+        self.assertEqual(tested_size_json.get("size_bytes_readable"), "1.21 KiB")
         primary_index_json = json.loads(row_by_column["tested_table_primary_index_size_json"] or "{}")
         self.assertEqual(primary_index_json.get("size_bytes"), 321.0)
         self.assertEqual(primary_index_json.get("size_bytes_readable"), "321 B")
         self.assertEqual(primary_index_json.get("size_percent_from_total_size"), 26.0129)
+        self.assertEqual(int(row_by_column["variant_mode_id"]), 1)
 
     def test_store_formats_sql_ddl_and_queries_before_insert(self) -> None:
         store = _CapturingStore()
@@ -633,6 +645,10 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
 
         self.assertNotIn("tested_table_indexes_sizes_percent_from_col_size", columns)
         self.assertIn("tested_table_primary_index_size_json", columns)
+        self.assertIn("variant_mode_id", columns)
+        row = list(phased_insert_call["data"][0])
+        row_by_column = dict(zip(columns, row))
+        self.assertEqual(int(row_by_column["variant_mode_id"]), 1)
 
     def test_store_phased_size_bytes_indexes_json_contains_percent_from_source_table(self) -> None:
         store = _CapturingStore()
@@ -688,7 +704,11 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
         size_indexes_json = json.loads(row_by_column["size_bytes_indexes_json"] or "{}")
         idx_payload = size_indexes_json.get("idx_country_tokenbf") or {}
         self.assertEqual(idx_payload.get("size_compressed_bytes"), 50)
-        self.assertEqual(idx_payload.get("size_percent_from_source_table"), 5.0)
+        self.assertIsNone(idx_payload.get("size_percent_from_source_table"))
+        self.assertEqual(
+            idx_payload.get("data_skipping_index_size_percent_from_source_table"),
+            5.0,
+        )
 
     def test_store_phased_source_baseline_keeps_compression_coef_empty(self) -> None:
         store = _CapturingStore()
@@ -927,6 +947,60 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
         self.assertFalse(
             any("results_legacy" in query.lower() for query in store.executed_queries)
         )
+
+    def test_recalculate_custom_score_for_benchmark_updates_score_custom(self) -> None:
+        store = _CustomScoreRecalcStore()
+        store.recalc_rows = [
+            (
+                "row_1",
+                json.dumps(
+                    {
+                        "mode": "expression",
+                        "context": {
+                            "source_size_bytes": 200.0,
+                            "tested_size_bytes": 100.0,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+            (
+                "row_2",
+                json.dumps(
+                    {
+                        "mode": "expression",
+                        "context": {
+                            "source_size_bytes": 90.0,
+                            "tested_size_bytes": 30.0,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        ]
+
+        summary = store.recalculate_custom_score_for_benchmark(
+            benchmark_id="bench_custom_score",
+            expression="safe_div(source_size_bytes, tested_size_bytes, 0.0)",
+            target_tables="phased",
+        )
+
+        self.assertIn("results", summary)
+        self.assertEqual(summary["results"]["total_rows"], 2)
+        self.assertEqual(summary["results"]["updated_rows"], 2)
+        self.assertEqual(summary["results"]["failed_rows"], 0)
+        self.assertEqual(len(store.recalc_updates), 2)
+        updates_by_id = {str(item.get("id")): item for item in store.recalc_updates}
+        self.assertAlmostEqual(float(updates_by_id["row_1"]["score_custom"]), 2.0)
+        self.assertAlmostEqual(float(updates_by_id["row_2"]["score_custom"]), 3.0)
+
+    def test_recalculate_custom_score_for_benchmark_validates_expression(self) -> None:
+        store = _CustomScoreRecalcStore()
+        with self.assertRaisesRegex(ValueError, "Некорректная expression"):
+            store.recalculate_custom_score_for_benchmark(
+                benchmark_id="bench_custom_score",
+                expression="unknown_name + 1",
+            )
 
 
 if __name__ == "__main__":

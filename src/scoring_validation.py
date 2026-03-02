@@ -16,9 +16,6 @@ def _issues_for_scoring(
     scope: str,
 ) -> List[str]:
     """Возвращает список проблем для одного scoring-блока."""
-    if scoring.mode != "expression":
-        return []
-
     expression = scoring.expression or ""
     raw_issues = validate_score_expression(expression)
     return [f"{scope}: {issue}" for issue in raw_issues]
@@ -40,8 +37,8 @@ def collect_scoring_formula_issues(
     Валидирует scoring expression в benchmark/table-level конфигах.
 
     Проверяются:
-    - benchmark.scoring (если mode=expression);
-    - table_rules[].scoring (если задано и mode=expression).
+    - benchmark.scoring;
+    - table_rules[].scoring (если задано).
     """
     benchmark_filter = set(benchmark_ids) if benchmark_ids else None
     issues: List[str] = []
