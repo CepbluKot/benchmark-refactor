@@ -504,6 +504,8 @@ def _build_job(
     global_index_counter: List[int],
     column_meta: Optional[ColumnVariantMeta] = None,
     index_meta: Optional[IndexVariantMeta] = None,
+    column_choices: Optional[Mapping[str, Tuple[Optional[str], Optional[str]]]] = None,
+    index_choices: Optional[Mapping[str, Optional[IndexDef]]] = None,
     table_index_granularity: Optional[int] = None,
     parent_variant_table: Optional[str] = None,
     phase_name: Optional[str] = None,
@@ -511,6 +513,52 @@ def _build_job(
     merged_columns: Optional[Sequence[str]] = None,
 ) -> VariantJob:
     """Строит VariantJob с нужным phase-mode."""
+    merged_column_choices: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+    if column_meta is not None:
+        merged_column_choices.update(dict(column_meta.column_choices))
+    if column_choices is not None:
+        for column_name, choice in column_choices.items():
+            if choice is None:
+                continue
+            merged_column_choices[str(column_name)] = (
+                choice[0],
+                choice[1],
+            )
+    effective_column_meta = (
+        ColumnVariantMeta(
+            index=column_meta.index if column_meta is not None else 0,
+            column_choices=merged_column_choices,
+        )
+        if merged_column_choices
+        else None
+    )
+
+    merged_index_choices: Dict[str, Optional[IndexDef]] = {}
+    if index_meta is not None:
+        merged_index_choices.update(dict(index_meta.index_choices))
+    if index_choices is not None:
+        for column_name, selected_index in index_choices.items():
+            merged_index_choices[str(column_name)] = (
+                selected_index.copy() if selected_index is not None else None
+            )
+    effective_index_meta = (
+        IndexVariantMeta(
+            index=index_meta.index if index_meta is not None else 0,
+            index_choices=merged_index_choices,
+            table_index_granularity=(
+                table_index_granularity
+                if table_index_granularity is not None
+                else (
+                    index_meta.table_index_granularity
+                    if index_meta is not None
+                    else None
+                )
+            ),
+        )
+        if merged_index_choices
+        else None
+    )
+
     variant_meta = VariantMeta(
         global_index=_next_global_index(global_index_counter),
         mode=variant_mode,
@@ -519,8 +567,8 @@ def _build_job(
         stage_column_name=stage_column_name,
         merged_columns=list(merged_columns or []),
         table_index_granularity=table_index_granularity,
-        column_meta=column_meta,
-        index_meta=index_meta,
+        column_meta=effective_column_meta,
+        index_meta=effective_index_meta,
     )
     return runner._engine.build_variant_job(
         table_plan=table_plan,
@@ -958,6 +1006,31 @@ def _build_effective_candidate_ddl(candidate: _PhaseCandidate) -> TableDDL:
             ddl.indexes.append(restored_index.copy())
 
     return ddl
+
+
+def _build_column_choices_payload(
+    *,
+    type_choices: Mapping[str, str],
+    codec_choices: Mapping[str, Optional[str]],
+) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
+    """Строит агрегированный payload `column_choices` из type+codec выборов."""
+    payload: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+    for column_name in sorted({*type_choices.keys(), *codec_choices.keys()}):
+        payload[column_name] = (
+            type_choices.get(column_name),
+            codec_choices.get(column_name),
+        )
+    return payload
+
+
+def _build_index_choices_payload(
+    index_choices: Mapping[str, _IndexColumnChoice],
+) -> Dict[str, Optional[IndexDef]]:
+    """Строит агрегированный payload `index_choices` из hashable index choices."""
+    payload: Dict[str, Optional[IndexDef]] = {}
+    for column_name, selected_index in sorted(index_choices.items()):
+        payload[column_name] = selected_index.to_index_def()
+    return payload
 
 
 def _resolve_type_candidates_for_column(
@@ -1796,6 +1869,10 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                         table_index_granularity=(
                             int(table_granularity) if table_granularity is not None else None
                         ),
+                        column_choices=_build_column_choices_payload(
+                            type_choices=merged_candidate.type_choices,
+                            codec_choices=merged_candidate.codec_choices,
+                        ),
                         merged_columns=sorted(
                             {
                                 *merged_candidate.type_choices.keys(),
@@ -1987,6 +2064,13 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                                 if fixed_table_granularity is not None
                                 else None
                             ),
+                            column_choices=_build_column_choices_payload(
+                                type_choices=parent.type_choices,
+                                codec_choices=parent.codec_choices,
+                            ),
+                            index_choices={
+                                column_name: (index_def.copy() if index_def is not None else None)
+                            },
                             parent_variant_table=parent.variant_table,
                             stage_column_name=column_name,
                         )
@@ -2205,6 +2289,11 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                         source_benchmark=source_benchmark,
                         global_index_counter=global_index_counter,
                         parent_variant_table=parent.variant_table,
+                        column_choices=_build_column_choices_payload(
+                            type_choices=candidate.type_choices,
+                            codec_choices=candidate.codec_choices,
+                        ),
+                        index_choices=_build_index_choices_payload(candidate.index_choices),
                         merged_columns=sorted(
                             {
                                 *candidate.type_choices.keys(),

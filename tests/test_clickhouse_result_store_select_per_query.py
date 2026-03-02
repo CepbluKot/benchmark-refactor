@@ -92,6 +92,18 @@ class _CapturingStore(ClickHouseBenchmarkResultStore):
         return []
 
 
+class _IdentityCollisionStore(_CapturingStore):
+    def _execute(self, query: str, params: Optional[Any] = None):
+        normalized = " ".join(query.split()).lower()
+        if normalized.startswith("select 1 from"):
+            return [[1]]
+        if normalized.startswith(
+            "select benchmark_run_id, benchmark_id, source_db_name, source_table_name, variant_table, variant_mode from"
+        ):
+            return [[999, "foreign_bench", "foreign_db", "foreign_table", "foreign_variant", "types"]]
+        return super()._execute(query, params)
+
+
 class _RankingStore(_CapturingStore):
     def __init__(self) -> None:
         self.update_calls: List[Dict[str, Any]] = []
@@ -605,6 +617,97 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
         store.store_worker_result(**payload_kwargs)
 
         self.assertEqual(len(store.capturing_client.insert_calls), 1)
+
+    def test_store_worker_result_same_execution_uuid_for_different_variants_does_not_conflict(self) -> None:
+        store = _CapturingStore()
+
+        base_result = BenchmarkVariantResult(
+            benchmark_run_id=100,
+            benchmark_started_at=datetime(2026, 2, 24, 15, 5, tzinfo=timezone.utc),
+            benchmark_id="bench_uuid_scope",
+            source_database="analytics",
+            source_table="events",
+            variant_table="events__bench__bench_uuid_scope__0001",
+            variant_mode="types",
+            tested_table_ddl=(
+                "CREATE TABLE benchmark_tmp.events__bench__bench_uuid_scope__0001 "
+                "(`user_id` Int32) ENGINE = MergeTree ORDER BY user_id"
+            ),
+            score=1.0,
+        )
+
+        store.store_worker_result(
+            benchmark_run_id=100,
+            benchmark_started_at=datetime(2026, 2, 24, 15, 5, tzinfo=timezone.utc),
+            benchmark_id="bench_uuid_scope",
+            source_database="analytics",
+            source_table="events",
+            variant_table="events__bench__bench_uuid_scope__0001",
+            variant_mode="types",
+            variant_params={"mode": "types", "execution_uuid": "shared-exec-uuid"},
+            tested_table_ddl_fallback=base_result.tested_table_ddl or "",
+            source_table_ddl_fallback=None,
+            result=base_result,
+        )
+
+        second_result = base_result.model_copy(
+            update={
+                "variant_table": "events__bench__bench_uuid_scope__0002",
+                "tested_table_ddl": (
+                    "CREATE TABLE benchmark_tmp.events__bench__bench_uuid_scope__0002 "
+                    "(`user_id` Int32) ENGINE = MergeTree ORDER BY user_id"
+                ),
+            }
+        )
+        store.store_worker_result(
+            benchmark_run_id=100,
+            benchmark_started_at=datetime(2026, 2, 24, 15, 5, tzinfo=timezone.utc),
+            benchmark_id="bench_uuid_scope",
+            source_database="analytics",
+            source_table="events",
+            variant_table="events__bench__bench_uuid_scope__0002",
+            variant_mode="types",
+            variant_params={"mode": "types", "execution_uuid": "shared-exec-uuid"},
+            tested_table_ddl_fallback=second_result.tested_table_ddl or "",
+            source_table_ddl_fallback=None,
+            result=second_result,
+        )
+
+        self.assertEqual(len(store.capturing_client.insert_calls), 2)
+
+    def test_store_worker_result_raises_on_duplicate_id_identity_collision(self) -> None:
+        store = _IdentityCollisionStore()
+
+        result = BenchmarkVariantResult(
+            benchmark_run_id=101,
+            benchmark_started_at=datetime(2026, 2, 24, 15, 10, tzinfo=timezone.utc),
+            benchmark_id="bench_collision_guard",
+            source_database="analytics",
+            source_table="events",
+            variant_table="events__bench__bench_collision_guard__0001",
+            variant_mode="types",
+            tested_table_ddl=(
+                "CREATE TABLE benchmark_tmp.events__bench__bench_collision_guard__0001 "
+                "(`user_id` Int32) ENGINE = MergeTree ORDER BY user_id"
+            ),
+            score=1.0,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "record id collision"):
+            store.store_worker_result(
+                benchmark_run_id=101,
+                benchmark_started_at=datetime(2026, 2, 24, 15, 10, tzinfo=timezone.utc),
+                benchmark_id="bench_collision_guard",
+                source_database="analytics",
+                source_table="events",
+                variant_table="events__bench__bench_collision_guard__0001",
+                variant_mode="types",
+                variant_params={"mode": "types", "execution_uuid": "collision-id"},
+                tested_table_ddl_fallback=result.tested_table_ddl or "",
+                source_table_ddl_fallback=None,
+                result=result,
+            )
+        self.assertEqual(len(store.capturing_client.insert_calls), 0)
 
     def test_store_phased_does_not_include_legacy_indexes_percent_column(self) -> None:
         store = _CapturingStore()

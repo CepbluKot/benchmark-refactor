@@ -1431,7 +1431,20 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             celery_worker_hostname = str(
                 variant_params.get("celery_worker_hostname") or ""
             ).strip()
-        result_id = execution_uuid or str(result.id or "").strip() or str(uuid4())
+        result_token = (
+            execution_uuid
+            or str(result.id or "").strip()
+            or str(variant_table or "").strip()
+            or str(uuid4())
+        )
+        result_id = self._build_scoped_result_id(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+            variant_table=variant_table,
+            raw_result_token=result_token,
+        )
         started_at = self._to_aware_storage_datetime(
             result.worker_started_at or benchmark_started_at
         )
@@ -2682,6 +2695,39 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         )
 
     @staticmethod
+    def _build_scoped_result_id(
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        variant_table: str,
+        raw_result_token: str,
+    ) -> str:
+        """
+        Строит контекстный устойчивый id результата варианта.
+
+        Идентификатор включает scope run/table/variant и исходный токен
+        (`execution_uuid`/`result.id`), чтобы записи разных вариантов
+        не могли конфликтовать даже при одинаковом external-id.
+        """
+        token = str(raw_result_token or "").strip() or str(uuid4())
+        payload = json.dumps(
+            {
+                "benchmark_run_id": int(benchmark_run_id),
+                "benchmark_id": str(benchmark_id),
+                "source_database": str(source_database),
+                "source_table": str(source_table),
+                "variant_table": str(variant_table),
+                "raw_result_token": token,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        return sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
     def _to_naive_storage_datetime(value: Optional[datetime]) -> Optional[datetime]:
         """Приводит datetime к naive storage-timezone для ClickHouse DateTime64."""
         if value is None:
@@ -2745,6 +2791,10 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             record_id=record.id,
         ):
             if self._record_id_exists(table_name=table_name, record_id=record.id):
+                self._assert_duplicate_record_identity_matches(
+                    table_name=table_name,
+                    record=record,
+                )
                 logger.warning(
                     "ClickHouseBenchmarkResultStore: duplicate record id=%s в `%s`.`%s` "
                     "(run_id=%d, benchmark=%s, table=%s.%s, mode=%s) — пропускаем insert",
@@ -2782,6 +2832,10 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             record_id=record.id,
         ):
             if self._record_id_exists(table_name=self._phased_table, record_id=record.id):
+                self._assert_duplicate_record_identity_matches(
+                    table_name=self._phased_table,
+                    record=record,
+                )
                 logger.warning(
                     "ClickHouseBenchmarkResultStore: duplicate phased record id=%s в `%s`.`%s` "
                     "(run_id=%d, benchmark=%s, table=%s.%s, mode=%s) — пропускаем insert",
@@ -2951,6 +3005,101 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             {"id": normalized_id},
         )
         return bool(rows)
+
+    def _fetch_record_identity_by_id(
+        self,
+        *,
+        table_name: str,
+        record_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Возвращает identity-слепок записи по `id` для anti-conflict проверки."""
+        normalized_id = self._normalize_record_id(record_id)
+        if not normalized_id:
+            return None
+        try:
+            rows = self._execute(
+                f"""
+                SELECT
+                    benchmark_run_id,
+                    benchmark_id,
+                    source_db_name,
+                    source_table_name,
+                    variant_table,
+                    variant_mode
+                FROM `{self._database}`.`{table_name}`
+                WHERE id = %(id)s
+                ORDER BY finished_at DESC, benchmark_started_at DESC
+                LIMIT 1
+                """,
+                {"id": normalized_id},
+            )
+        except Exception:
+            logger.exception(
+                "ClickHouseBenchmarkResultStore: не удалось прочитать identity по id=%s "
+                "из `%s`.`%s`",
+                normalized_id,
+                self._database,
+                table_name,
+            )
+            return None
+        if not rows:
+            return None
+        (
+            benchmark_run_id,
+            benchmark_id,
+            source_db_name,
+            source_table_name,
+            variant_table,
+            variant_mode,
+        ) = rows[0]
+        return {
+            "benchmark_run_id": int(benchmark_run_id),
+            "benchmark_id": str(benchmark_id),
+            "source_db_name": str(source_db_name),
+            "source_table_name": str(source_table_name),
+            "variant_table": str(variant_table),
+            "variant_mode": str(variant_mode),
+        }
+
+    def _assert_duplicate_record_identity_matches(
+        self,
+        *,
+        table_name: str,
+        record: StoredBenchmarkResult,
+    ) -> None:
+        """
+        Проверяет, что duplicate `id` принадлежит тому же logical-variant.
+
+        Если `id` уже существует, но identity отличается, это жёсткая
+        коллизия: запись одного варианта может затереть/замаскировать другой.
+        """
+        existing = self._fetch_record_identity_by_id(
+            table_name=table_name,
+            record_id=record.id,
+        )
+        if existing is None:
+            return
+
+        expected = {
+            "benchmark_run_id": int(record.benchmark_run_id),
+            "benchmark_id": str(record.benchmark_id),
+            "source_db_name": str(record.source_db_name),
+            "source_table_name": str(record.source_table_name),
+            "variant_table": str(record.variant_table),
+            "variant_mode": str(record.variant_mode),
+        }
+        mismatches = [
+            key
+            for key, expected_value in expected.items()
+            if existing.get(key) != expected_value
+        ]
+        if not mismatches:
+            return
+        raise RuntimeError(
+            "ClickHouseBenchmarkResultStore: record id collision between different variants "
+            f"in `{self._database}`.`{table_name}` for id={record.id}. "
+            f"mismatched_fields={mismatches}, existing={existing}, expected={expected}"
+        )
 
     def _record_to_clickhouse_map(self, record: StoredBenchmarkResult) -> Dict[str, Any]:
         benchmark_started_at_utc = self._to_naive_storage_datetime(record.benchmark_started_at)

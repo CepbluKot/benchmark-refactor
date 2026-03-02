@@ -2439,6 +2439,9 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         ]
         self.assertTrue(index_granularity_jobs)
         self.assertTrue(
+            any(bool(job.variant_meta.column_choices) for job in index_granularity_jobs)
+        )
+        self.assertTrue(
             any(job.variant_meta.table_index_granularity == 8192 for job in index_granularity_jobs)
         )
         self.assertTrue(
@@ -2470,8 +2473,54 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             if job.variant_meta.mode == "final_validation"
         ]
         self.assertTrue(final_jobs)
+        self.assertTrue(any(bool(job.variant_meta.column_choices) for job in final_jobs))
+        self.assertTrue(any(bool(job.variant_meta.index_choices) for job in final_jobs))
         # Финальная фаза должна собирать объединённый вариант (допускаем >=1 индекса).
         self.assertTrue(any(len(job.variant_ddl.indexes) >= 1 for job in final_jobs))
+
+        # И в сохранённых результатах final_validation также должны быть
+        # агрегированные выборы типов+кодеков и индексов.
+        final_records = [
+            record
+            for record in store.records
+            if str(record.variant_mode) == "final_validation"
+        ]
+        self.assertTrue(final_records)
+        self.assertTrue(
+            any(bool(record.variant_params.get("column_choices")) for record in final_records)
+        )
+        self.assertTrue(
+            any(bool(record.variant_params.get("index_choices")) for record in final_records)
+        )
+        self.assertTrue(
+            any(
+                any(
+                    isinstance(choice, dict)
+                    and (
+                        str(choice.get("type") or "").strip()
+                        or str(choice.get("codec") or "").strip()
+                    )
+                    for choice in (record.variant_params.get("column_choices") or {}).values()
+                )
+                for record in final_records
+            )
+        )
+        self.assertTrue(
+            any(
+                any(
+                    index_payload is None
+                    or (
+                        isinstance(index_payload, dict)
+                        and (
+                            str(index_payload.get("index_type") or "").strip()
+                            or str(index_payload.get("expr") or "").strip()
+                        )
+                    )
+                    for index_payload in (record.variant_params.get("index_choices") or {}).values()
+                )
+                for record in final_records
+            )
+        )
 
     def test_sequential_phased_topn_strategy_supports_stage_specific_top_n(self) -> None:
         """Проверяет, что top-N можно задавать отдельно для каждой фазы."""
