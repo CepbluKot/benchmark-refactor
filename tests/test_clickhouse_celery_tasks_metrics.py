@@ -1203,8 +1203,58 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
         self.assertEqual(fake_client.drop_calls.count(("bench_tmp", "events__bench__bench_var__0001")), 2)
         self.assertTrue(fake_client.closed)
 
-    def test_run_variant_benchmark_reuses_duplicate_ddl_metrics_without_execution(self) -> None:
-        fake_client = _FakeRuntimeClient()
+    def test_run_variant_benchmark_executes_physical_benchmark_even_when_clone_is_available(self) -> None:
+        fake_client = _FakeRuntimeClient(
+            query_metrics_sequence=[
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 1_000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 1_000.0,
+                    "written_bytes": 10_000.0,
+                },
+                {
+                    "elapsed_ns": 120_000_000.0,
+                    "read_rows": 1_000.0,
+                    "read_bytes": 11_000.0,
+                    "written_rows": 1_000.0,
+                    "written_bytes": 11_000.0,
+                },
+                {
+                    "elapsed_ns": 70_000_000.0,
+                    "read_rows": 500.0,
+                    "read_bytes": 5_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+                {
+                    "elapsed_ns": 75_000_000.0,
+                    "read_rows": 500.0,
+                    "read_bytes": 5_500.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+            ],
+            count_rows_map={("bench_tmp", "events__bench__bench_var__0002"): 200},
+            column_sizes_map={
+                ("bench_tmp", "events__bench__bench_var__0002"): {
+                    "user_id": {
+                        "name": "user_id",
+                        "datatype": "UInt32",
+                        "size_compressed_bytes": 200.0,
+                        "size_compressed_bytes_readable": "200 B",
+                    },
+                    "event_time": {
+                        "name": "event_time",
+                        "datatype": "DateTime",
+                        "size_compressed_bytes": 200.0,
+                        "size_compressed_bytes_readable": "200 B",
+                    },
+                }
+            },
+            index_sizes_map={("bench_tmp", "events__bench__bench_var__0002"): {}},
+            total_size_map={("bench_tmp", "events__bench__bench_var__0002"): 400.0},
+        )
         fake_store = _FakeResultStore()
         fake_store.clone_result = {
             "source_result_id": "src_result_1",
@@ -1242,7 +1292,32 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             ),
             source_benchmark={
                 "source_table_ddl": VALID_SOURCE_DDL,
-                "metrics": {},
+                "metrics": {
+                    "total_n_rows_in_source_table": 200,
+                    "source_table_insert_time_ms_measurements_percentiles": [130.0, 140.0],
+                    "source_table_select_time_ms_measurements_percentiles": [90.0, 100.0],
+                    "source_table_insert_rows_per_second_measurements_percentiles": [8_000.0, 9_000.0],
+                    "source_table_insert_bytes_per_second_measurements_percentiles": [80_000.0, 90_000.0],
+                    "source_table_select_rows_per_second_measurements_percentiles": [6_000.0, 7_000.0],
+                    "source_table_select_bytes_per_second_measurements_percentiles": [50_000.0, 60_000.0],
+                    "source_table_consumed_compressed_size_bytes_overall": 500.0,
+                    "source_table_consumed_compressed_size_bytes_by_each_column": {
+                        "user_id": {
+                            "name": "user_id",
+                            "datatype": "UInt64",
+                            "size_compressed_bytes": 250.0,
+                            "size_compressed_bytes_readable": "250 B",
+                        },
+                        "event_time": {
+                            "name": "event_time",
+                            "datatype": "DateTime",
+                            "size_compressed_bytes": 250.0,
+                            "size_compressed_bytes_readable": "250 B",
+                        },
+                    },
+                    "source_table_select_test_query": "SELECT count() FROM source_events",
+                    "source_table_select_time_ms_measurements": [95.0, 100.0],
+                },
             },
             measured_percentiles=[50, 100],
         )
@@ -1260,26 +1335,14 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
                 celery_worker_hostname="worker-a",
             )
 
-        self.assertAlmostEqual(result.score or 0.0, 1.2345)
-        self.assertEqual(result.measurement_quality_flag, "stable")
-        self.assertEqual(len(fake_store.clone_calls), 1)
-        self.assertEqual(len(fake_store.store_calls), 0)
-        clone_call = fake_store.clone_calls[0]
-        self.assertEqual(clone_call["variant_table"], "events__bench__bench_var__0002")
-        self.assertEqual(clone_call["variant_mode"], "types")
-        self.assertIn("__runtime_query_signature", clone_call["variant_params"])
-        self.assertEqual(fake_client.created_databases, [])
-        self.assertEqual(fake_client.execute_calls, [])
-        self.assertEqual(fake_client.insert_with_metrics_calls, [])
-        self.assertEqual(fake_client.select_with_metrics_calls, [])
-        # В dedupe-ветке drop вызывается только из finally.
-        self.assertEqual(len(fake_client.drop_calls), 1)
+        self.assertGreater(len(fake_client.created_databases), 0)
+        self.assertGreater(len(fake_client.execute_calls), 0)
+        self.assertGreater(len(fake_client.insert_with_metrics_calls), 0)
+        self.assertGreater(len(fake_client.select_with_metrics_calls), 0)
+        self.assertEqual(len(fake_store.clone_calls), 0)
+        self.assertGreater(len(fake_store.store_calls), 0)
         extra_payload = json.loads(result.extra_json or "{}")
-        self.assertEqual(extra_payload.get("status"), "reused_existing_ddl_metrics")
-        self.assertEqual(
-            extra_payload.get("source_variant_table"),
-            "events__bench__bench_var__0001",
-        )
+        self.assertNotEqual(extra_payload.get("status"), "reused_existing_ddl_metrics")
         self.assertTrue(fake_client.closed)
 
     def test_run_variant_benchmark_falls_back_to_column_sizes_when_total_size_is_zero(self) -> None:

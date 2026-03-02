@@ -52,12 +52,12 @@
         16384
       ],
       "source_insert_rows_per_operation_limits": {
-        "sequential": 10000000
+        "sequential": 100000
       },
       "insert_rows_per_operation_limits": {
-        "types": 10000000,
-        "indexes": 10000000,
-        "sequential": 10000000
+        "types": 100000,
+        "indexes": 100000,
+        "sequential": 100000
       },
       "global_rules": {
         "order_by_rules": {
