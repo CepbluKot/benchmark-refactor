@@ -69,6 +69,18 @@ _ENABLE_OPTIMIZE_FINAL = str(os.getenv("BENCH_ENABLE_OPTIMIZE_FINAL", "1")).stri
     "yes",
     "on",
 }
+_QUERY_LOG_METRICS_POLL_ATTEMPTS = max(
+    1,
+    int(os.getenv("BENCH_QUERY_LOG_METRICS_POLL_ATTEMPTS", "5")),
+)
+_QUERY_LOG_METRICS_POLL_SLEEP_SEC = max(
+    0.0,
+    float(os.getenv("BENCH_QUERY_LOG_METRICS_POLL_SLEEP_SEC", "0.2")),
+)
+_QUERY_LOG_METRICS_POLL_TOTAL_WAIT_SEC = max(
+    0.0,
+    float(os.getenv("BENCH_QUERY_LOG_METRICS_POLL_TOTAL_WAIT_SEC", "15.0")),
+)
 _OPTIMIZE_FINAL_PERMISSION_DENIED = False
 
 
@@ -2223,6 +2235,25 @@ class _ClickHouseRuntimeClient:
             return query
         return f"/* bench_qid:{query_tag} */ {query}"
 
+    @staticmethod
+    def _build_query_id(
+        query_tag: Optional[str],
+        *,
+        suffix: str,
+    ) -> str:
+        """Строит детерминированный query_id для поиска метрик в system.query_log."""
+        raw_tag = str(query_tag or "").strip() or uuid.uuid4().hex
+        normalized_tag = re.sub(r"[^0-9A-Za-z_.:-]+", "_", raw_tag).strip("_")
+        if not normalized_tag:
+            normalized_tag = uuid.uuid4().hex
+        normalized_suffix = re.sub(r"[^0-9A-Za-z_.:-]+", "_", str(suffix or "q")).strip("_")
+        if not normalized_suffix:
+            normalized_suffix = "q"
+        query_id = f"bench_{normalized_suffix}_{normalized_tag}"
+        if len(query_id) > 120:
+            query_id = query_id[:120]
+        return query_id
+
     def _execute_command_with_summary_metrics(
         self,
         query: str,
@@ -2230,20 +2261,28 @@ class _ClickHouseRuntimeClient:
         query_tag: Optional[str] = None,
     ) -> Dict[str, float]:
         """
-        Выполняет SQL через `command` и достаёт метрики только из `result.summary`.
+        Выполняет SQL через `command` и достаёт метрики из `system.query_log`.
         """
+        query_id = self._build_query_id(query_tag, suffix="cmd")
         tagged_query = self._build_tagged_query(query, query_tag)
         try:
-            command_result = self._client.command(tagged_query)
+            self._client.command(
+                tagged_query,
+                settings={"query_id": query_id},
+            )
         except Exception:
-            logger.exception("Не удалось выполнить command SQL для получения summary")
+            logger.exception("Не удалось выполнить command SQL для query_log-метрик")
             return _error_query_metrics()
 
-        summary_metrics = self._extract_stream_query_summary(command_result)
-        if summary_metrics is not None:
-            return summary_metrics
+        query_log_metrics = self._query_log_metrics_by_query_id(query_id=query_id)
+        if query_log_metrics is not None:
+            return query_log_metrics
 
-        logger.warning("SQL выполнен, но clickhouse-connect не вернул .summary")
+        logger.warning(
+            "SQL выполнен, но метрики в system.query_log не найдены "
+            "(query_id=%s, ожидаем type='QueryFinish')",
+            query_id,
+        )
         return _error_query_metrics()
 
     def execute_select_with_metrics(
@@ -2253,7 +2292,7 @@ class _ClickHouseRuntimeClient:
         query_tag: str,
     ) -> Dict[str, float]:
         """
-        Выполняет SELECT и возвращает метрики только из `.summary`.
+        Выполняет SELECT и возвращает метрики только из `system.query_log`.
 
         Приоритет:
         1) `stream_client.command(...)`;
@@ -2265,33 +2304,146 @@ class _ClickHouseRuntimeClient:
 
         stream_client = self._get_stream_client()
         if stream_client is not None:
+            stream_command_query_id = self._build_query_id(
+                query_tag,
+                suffix="sel_stream_command",
+            )
             try:
-                command_result = stream_client.command(tagged_query)
-                summary_metrics = self._extract_stream_query_summary(command_result)
-                if summary_metrics is not None:
-                    return summary_metrics
+                stream_client.command(
+                    tagged_query,
+                    settings={"query_id": stream_command_query_id},
+                )
+                query_log_metrics = self._query_log_metrics_by_query_id(
+                    query_id=stream_command_query_id
+                )
+                if query_log_metrics is not None:
+                    return query_log_metrics
             except Exception:
                 logger.exception("Stream command для select не удался")
+            stream_query_query_id = self._build_query_id(
+                query_tag,
+                suffix="sel_stream_query",
+            )
             try:
-                query_result = stream_client.query(tagged_query)
-                summary_metrics = self._extract_stream_query_summary(query_result)
-                if summary_metrics is not None:
-                    return summary_metrics
+                stream_client.query(
+                    tagged_query,
+                    settings={"query_id": stream_query_query_id},
+                )
+                query_log_metrics = self._query_log_metrics_by_query_id(
+                    query_id=stream_query_query_id
+                )
+                if query_log_metrics is not None:
+                    return query_log_metrics
             except Exception:
                 logger.exception("Stream query для select не удался")
 
+        client_query_id = self._build_query_id(query_tag, suffix="sel_client_query")
         try:
-            query_result = self._client.query(tagged_query)
+            self._client.query(
+                tagged_query,
+                settings={"query_id": client_query_id},
+            )
         except Exception:
             logger.exception("Client query для select не удался")
             return _error_query_metrics()
 
-        summary_metrics = self._extract_stream_query_summary(query_result)
-        if summary_metrics is not None:
-            return summary_metrics
+        query_log_metrics = self._query_log_metrics_by_query_id(query_id=client_query_id)
+        if query_log_metrics is not None:
+            return query_log_metrics
 
-        logger.warning("SELECT выполнен, но clickhouse-connect не вернул .summary")
+        logger.warning(
+            "SELECT выполнен, но метрики в system.query_log не найдены "
+            "(query_id=%s, ожидаем type='QueryFinish')",
+            client_query_id,
+        )
         return _error_query_metrics()
+
+    def _query_log_metrics_by_query_id(
+        self,
+        *,
+        query_id: Optional[str],
+    ) -> Optional[Dict[str, float]]:
+        """
+        Читает query-метрики из `system.query_log` по `query_id`.
+
+        system.query_log асинхронный, поэтому опрашиваем с retry.
+        """
+        normalized_query_id = str(query_id or "").strip()
+        if not normalized_query_id:
+            return None
+
+        poll_attempts = _QUERY_LOG_METRICS_POLL_ATTEMPTS
+        poll_sleep_sec = _QUERY_LOG_METRICS_POLL_SLEEP_SEC
+        poll_total_wait_sec = _QUERY_LOG_METRICS_POLL_TOTAL_WAIT_SEC
+
+        query_candidates: list[str] = [
+            """
+            SELECT
+                query_duration_ms,
+                read_rows,
+                read_bytes,
+                written_rows,
+                written_bytes
+            FROM system.query_log
+            WHERE type = 'QueryFinish'
+              AND query_id = %(query_id)s
+            ORDER BY event_time_microseconds DESC
+            LIMIT 1
+            """,
+            """
+            SELECT
+                query_duration_ms,
+                read_rows,
+                read_bytes,
+                written_rows,
+                written_bytes
+            FROM system.query_log
+            WHERE type = 'QueryFinish'
+              AND query_id = %(query_id)s
+            ORDER BY event_time DESC
+            LIMIT 1
+            """,
+        ]
+
+        started_at = time.monotonic()
+        min_attempts_by_time = 1
+        if poll_sleep_sec > 0:
+            min_attempts_by_time = int(poll_total_wait_sec / poll_sleep_sec) + 1
+        effective_attempts = max(poll_attempts, min_attempts_by_time)
+
+        for attempt_id in range(effective_attempts):
+            for query_text in query_candidates:
+                try:
+                    rows = self.execute(query_text, {"query_id": normalized_query_id})
+                except Exception:
+                    continue
+                if not rows:
+                    continue
+                row = rows[0]
+                if not isinstance(row, (list, tuple)) or len(row) < 5:
+                    continue
+                elapsed_ms = _to_metric_or_error(row[0])
+                if elapsed_ms < 0:
+                    elapsed_ns = -1.0
+                else:
+                    elapsed_ns = float(elapsed_ms) * 1_000_000.0
+                return {
+                    "elapsed_ns": elapsed_ns,
+                    "read_rows": _to_metric_or_error(row[1]),
+                    "read_bytes": _to_metric_or_error(row[2]),
+                    "written_rows": _to_metric_or_error(row[3]),
+                    "written_bytes": _to_metric_or_error(row[4]),
+                }
+            if attempt_id + 1 >= effective_attempts:
+                continue
+            if poll_sleep_sec <= 0:
+                continue
+            elapsed_sec = time.monotonic() - started_at
+            remaining_sec = poll_total_wait_sec - elapsed_sec
+            if remaining_sec <= 0:
+                break
+            time.sleep(min(poll_sleep_sec, remaining_sec))
+        return None
 
     @check_input_params_decorator
     def execute_user_read_only_query(self, query: str) -> list:
@@ -2555,7 +2707,11 @@ class _ClickHouseRuntimeClient:
 
         Приоритет:
         1) streaming путь через clickhouse-connect (`raw_stream` + `raw_insert`);
-        2) fallback через `INSERT INTO ... SELECT ...` + `.summary`.
+        2) fallback через `INSERT INTO ... SELECT ...`.
+
+        Метрики:
+        - для streaming-insert берём напрямую из `query_summary` (clickhouse-connect);
+        - для fallback `INSERT ... SELECT` используем обычный command-путь.
         """
         if n_rows is not None and n_rows <= 0:
             return _error_query_metrics()
@@ -2590,16 +2746,25 @@ class _ClickHouseRuntimeClient:
                 source_stream = stream_client.raw_stream(source_select_query, fmt="Native")
                 if self._is_stream_empty(source_stream):
                     return _error_query_metrics()
+                insert_query_id = self._build_query_id(
+                    query_tag,
+                    suffix="insert_stream_raw_insert",
+                )
                 query_summary = insert_client.raw_insert(
                     table=f"{target_database}.{target_table}",
                     insert_block=source_stream,
                     fmt="Native",
+                    settings={"query_id": insert_query_id},
                 )
                 summary_metrics = self._extract_stream_query_summary(query_summary)
                 if summary_metrics is not None:
                     self._stream_copy_failure_count = 0
                     return summary_metrics
-                logger.warning("Streaming insert выполнен, но summary недоступен")
+                logger.warning(
+                    "Streaming insert выполнен, но clickhouse-connect не вернул summary-метрики "
+                    "(query_id=%s)",
+                    insert_query_id,
+                )
                 return _error_query_metrics()
             except Exception:
                 failure_count = int(getattr(self, "_stream_copy_failure_count", 0)) + 1

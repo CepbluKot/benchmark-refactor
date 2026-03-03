@@ -3216,7 +3216,8 @@ ORDER BY country
 
     def test_insert_fallback_uses_command_summary_metrics(self) -> None:
         class _DummyClient:
-            def command(self, query: str):
+            def command(self, query: str, settings: Optional[Dict[str, Any]] = None):
+                del settings
                 del query
                 return SimpleNamespace(
                     summary={
@@ -3227,6 +3228,13 @@ ORDER BY country
                         "written_bytes": 10_000.0,
                     }
                 )
+
+            def query(self, query: str):
+                if "FROM system.query_log" in query:
+                    return SimpleNamespace(
+                        result_rows=[(123.0, 1000.0, 10_000.0, 1000.0, 10_000.0)]
+                    )
+                return SimpleNamespace(result_rows=[])
 
         client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
         client._client = _DummyClient()
@@ -3272,12 +3280,20 @@ ORDER BY country
             def __init__(self) -> None:
                 self.raw_insert_calls: List[Dict[str, Any]] = []
 
-            def raw_insert(self, *, table: str, insert_block: Any, fmt: str = "Native"):
+            def raw_insert(
+                self,
+                *,
+                table: str,
+                insert_block: Any,
+                fmt: str = "Native",
+                settings: Optional[Dict[str, Any]] = None,
+            ):
                 self.raw_insert_calls.append(
                     {
                         "table": table,
                         "insert_block": insert_block,
                         "fmt": fmt,
+                        "settings": dict(settings or {}),
                     }
                 )
                 return SimpleNamespace(
@@ -3290,7 +3306,16 @@ ORDER BY country
                     }
                 )
 
+        class _DummyClient:
+            def query(self, query: str):
+                if "FROM system.query_log" in query:
+                    return SimpleNamespace(
+                        result_rows=[(111.0, 777.0, 7_770.0, 777.0, 7_770.0)]
+                    )
+                return SimpleNamespace(result_rows=[])
+
         client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
+        client._client = _DummyClient()
         client._stream_connection = SimpleNamespace(
             host="localhost",
             port=9000,
@@ -3322,13 +3347,15 @@ ORDER BY country
             write_client.raw_insert_calls[0]["table"],
             "bench_tmp.events_variant",
         )
+        self.assertIn("query_id", write_client.raw_insert_calls[0]["settings"])
         self.assertEqual(metrics["elapsed_ns"], 111_000_000.0)
         self.assertEqual(metrics["read_rows"], 777.0)
         self.assertEqual(metrics["written_rows"], 777.0)
 
     def test_select_metrics_use_summary_stream_first(self) -> None:
         class _DummyStreamClient:
-            def command(self, query: str):
+            def command(self, query: str, settings: Optional[Dict[str, Any]] = None):
+                del settings
                 del query
                 return SimpleNamespace(
                     summary={
@@ -3340,9 +3367,17 @@ ORDER BY country
                     }
                 )
 
+            def query(self, query: str, settings: Optional[Dict[str, Any]] = None):
+                del query, settings
+                raise AssertionError("stream_client.query не должен вызываться")
+
         class _DummyClient:
             def query(self, query: str):
-                raise AssertionError(f"client.query не должен вызываться: {query}")
+                if "FROM system.query_log" in query:
+                    return SimpleNamespace(
+                        result_rows=[(50.0, 500.0, 5_000.0, 0.0, 0.0)]
+                    )
+                raise AssertionError(f"Ожидался только system.query_log запрос, получили: {query}")
 
         client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
         client._client = _DummyClient()
@@ -3360,6 +3395,85 @@ ORDER BY country
         )
         self.assertEqual(metrics["elapsed_ns"], 50_000_000.0)
         self.assertEqual(metrics["read_rows"], 500.0)
+
+    def test_select_metrics_fallback_to_query_log_when_summary_missing(self) -> None:
+        class _DummyResult:
+            def __init__(self, *, summary: Any = None, rows: Optional[List[tuple[Any, ...]]] = None) -> None:
+                self.summary = summary
+                self.result_rows = list(rows or [])
+
+        class _DummyClient:
+            def __init__(self) -> None:
+                self.query_calls: List[str] = []
+
+            def query(self, query: str, settings: Optional[Dict[str, Any]] = None):
+                del settings
+                self.query_calls.append(query)
+                if "FROM system.query_log" in query:
+                    return _DummyResult(
+                        rows=[(150.0, 111.0, 2222.0, 0.0, 0.0)]
+                    )
+                return _DummyResult(summary=None, rows=[(1,)])
+
+        client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
+        client._client = _DummyClient()
+        client._stream_client = None
+        client._stream_client_checked = True
+        client._stream_connection = SimpleNamespace(
+            host="localhost",
+            port=9000,
+            login="default",
+        )
+
+        metrics = client.execute_select_with_metrics(
+            "SELECT count() FROM `analytics`.`events`",
+            query_tag="select-query-log-fallback",
+        )
+        self.assertEqual(metrics["elapsed_ns"], 150_000_000.0)
+        self.assertEqual(metrics["read_rows"], 111.0)
+        self.assertEqual(metrics["read_bytes"], 2222.0)
+
+    def test_command_metrics_fallback_to_query_log_when_summary_missing(self) -> None:
+        class _DummyResult:
+            def __init__(self, *, summary: Any = None, rows: Optional[List[tuple[Any, ...]]] = None) -> None:
+                self.summary = summary
+                self.result_rows = list(rows or [])
+
+        class _DummyClient:
+            def __init__(self) -> None:
+                self.query_calls: List[str] = []
+
+            def command(self, query: str, settings: Optional[Dict[str, Any]] = None):
+                del settings
+                del query
+                return _DummyResult(summary=None, rows=[])
+
+            def query(self, query: str, settings: Optional[Dict[str, Any]] = None):
+                del settings
+                self.query_calls.append(query)
+                if "FROM system.query_log" in query:
+                    return _DummyResult(
+                        rows=[(210.0, 333.0, 4444.0, 555.0, 6666.0)]
+                    )
+                return _DummyResult(rows=[])
+
+        client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
+        client._client = _DummyClient()
+        client._stream_connection = SimpleNamespace(
+            host="localhost",
+            port=9000,
+            login="default",
+        )
+
+        metrics = client._execute_command_with_summary_metrics(
+            "INSERT INTO `bench_tmp`.`events` SELECT * FROM `analytics`.`events`",
+            query_tag="command-query-log-fallback",
+        )
+        self.assertEqual(metrics["elapsed_ns"], 210_000_000.0)
+        self.assertEqual(metrics["read_rows"], 333.0)
+        self.assertEqual(metrics["read_bytes"], 4444.0)
+        self.assertEqual(metrics["written_rows"], 555.0)
+        self.assertEqual(metrics["written_bytes"], 6666.0)
 
     def test_stream_empty_check_returns_true_on_summary_parse_error(self) -> None:
         class _BrokenHeaders:
