@@ -197,6 +197,9 @@ class InMemoryBenchmarkResultStore(BenchmarkResultStore):
                 tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json=(
                     result.tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json
                 ),
+                tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json=(
+                    result.tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json
+                ),
                 select_metrics_json=result.tested_table_select_metrics_by_query_json,
                 tested_table_consumed_compressed_size_bytes_by_each_column=(
                     result.tested_table_consumed_compressed_size_bytes_by_each_column

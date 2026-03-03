@@ -209,6 +209,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_select_metrics_by_query_json",
         "source_table_select_metrics_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
+        "tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json",
         "tested_table_consumed_compressed_size_bytes_by_each_column",
         "source_table_consumed_compressed_size_bytes_by_each_column",
@@ -266,6 +267,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "source_table_consumed_compressed_size_bytes_overall_json",
         "tested_table_compression_overall_coef",
         "select_metrics_json",
+        "tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json",
         "insert_metrics_json",
         "score_calculation_json",
@@ -281,6 +283,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_select_metrics_by_query_json",
         "source_table_select_metrics_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
+        "tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json",
         "select_metrics_json",
         "tested_table_insert_metrics_json",
@@ -309,6 +312,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         "tested_table_select_metrics_by_query_json",
         "source_table_select_metrics_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
+        "tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json",
         "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json",
     )
     _CUSTOM_SCORE_CONTEXT_FALLBACK_KEYS: frozenset[str] = frozenset(
@@ -329,6 +333,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             "tested_table_select_metrics_by_query_json",
             "source_table_select_metrics_by_query_json",
             "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json",
+            "tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json",
             "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json",
         }
     )
@@ -501,6 +506,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `source_table_consumed_compressed_size_bytes_overall_json` Nullable(String),
                 `tested_table_compression_overall_coef` Nullable(Float64),
                 `select_metrics_json` Nullable(String),
+                `tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json` Nullable(String),
                 `tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json` Nullable(String),
                 `insert_metrics_json` Nullable(String),
                 `score_calculation_json` Nullable(String),
@@ -536,6 +542,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `source_table_consumed_compressed_size_bytes_overall_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_compression_overall_coef` Nullable(Float64),
                 ADD COLUMN IF NOT EXISTS `select_metrics_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `insert_metrics_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `score_calculation_json` Nullable(String),
@@ -636,6 +643,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 `tested_table_select_metrics_by_query_json` Nullable(String),
                 `source_table_select_metrics_by_query_json` Nullable(String),
                 `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json` Nullable(String),
+                `tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json` Nullable(String),
                 `tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json` Nullable(String),
                 `tested_table_consumed_compressed_size_bytes_by_each_column` Nullable(String),
                 `source_table_consumed_compressed_size_bytes_by_each_column` Nullable(String),
@@ -680,6 +688,7 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 ADD COLUMN IF NOT EXISTS `tested_table_select_metrics_by_query_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `source_table_select_metrics_by_query_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json` Nullable(String),
+                ADD COLUMN IF NOT EXISTS `tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `tested_table_insert_metrics_json` Nullable(String),
                 ADD COLUMN IF NOT EXISTS `source_table_insert_metrics_json` Nullable(String),
@@ -1715,6 +1724,15 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         tested_select_speedup_by_query_json = self._to_query_keyed_json_map(
             result.tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json
         )
+        tested_select_read_bytes_speedup_by_query_json = self._to_query_keyed_json_map(
+            result.tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json
+        )
+        if tested_select_read_bytes_speedup_by_query_json is None:
+            tested_select_read_bytes_speedup_by_query_json = (
+                self._extract_read_bytes_speedup_query_map_json(
+                    tested_select_speedup_by_query_json
+                )
+            )
         size_bytes_total = (
             result.tested_table_consumed_compressed_size_bytes_with_indexes
             if result.tested_table_consumed_compressed_size_bytes_with_indexes is not None
@@ -1869,6 +1887,9 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             source_table_select_metrics_by_query_json=source_select_metrics_json,
             tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json=(
                 tested_select_speedup_by_query_json
+            ),
+            tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json=(
+                tested_select_read_bytes_speedup_by_query_json
             ),
             tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json=(
                 tested_select_speedup_by_query_json
@@ -2030,6 +2051,61 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
 
         return json.dumps(
             query_map,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+
+    @classmethod
+    def _extract_read_bytes_speedup_query_map_json(cls, value: Optional[str]) -> Optional[str]:
+        """
+        Извлекает из map/list per-query speedup только `read_bytes_*` коэффициенты.
+        """
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        if not value.strip():
+            return value
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return None
+
+        if isinstance(parsed, list):
+            map_json = cls._to_query_keyed_json_map(value)
+            if not isinstance(map_json, str):
+                return None
+            try:
+                parsed = json.loads(map_json)
+            except Exception:
+                return None
+
+        if not isinstance(parsed, dict):
+            return None
+
+        read_bytes_map: dict[str, Dict[str, Any]] = {}
+        for query_id, payload in parsed.items():
+            if not isinstance(payload, dict):
+                continue
+            read_bytes_speedup = payload.get("read_bytes_percentiles_speed_up_coefs")
+            if not isinstance(read_bytes_speedup, list):
+                read_bytes_speedup = []
+            query_index = cls._safe_int(payload.get("query_index"), default=0)
+            query = payload.get("query")
+            source_query = payload.get("source_query")
+            read_bytes_map[str(query_id)] = {
+                "query_index": query_index,
+                "query_id": str(query_id),
+                "query": query,
+                "source_query": source_query,
+                "read_bytes_percentiles_speed_up_coefs": read_bytes_speedup,
+            }
+        if not read_bytes_map:
+            return None
+        return json.dumps(
+            read_bytes_map,
             ensure_ascii=False,
             indent=2,
             sort_keys=True,
@@ -3653,6 +3729,17 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 record.tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json
             )
         )
+        tested_select_read_bytes_speedup_by_query_json = self._pretty_json_string_or_as_is(
+            self._format_sql_json_string_or_as_is(
+                record.tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json
+            )
+        )
+        if tested_select_read_bytes_speedup_by_query_json is None:
+            tested_select_read_bytes_speedup_by_query_json = self._pretty_json_string_or_as_is(
+                self._extract_read_bytes_speedup_query_map_json(
+                    tested_select_speedup_by_query_json
+                )
+            )
         tested_select_speedup_vs_source_by_query_json = self._pretty_json_string_or_as_is(
             self._format_sql_json_string_or_as_is(
                 record.tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json
@@ -3754,6 +3841,9 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             "source_table_consumed_compressed_size_bytes_overall_json": source_size_overall_json,
             "tested_table_compression_overall_coef": compression_coef,
             "select_metrics_json": select_metrics_json,
+            "tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json": (
+                tested_select_read_bytes_speedup_by_query_json
+            ),
             "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json": (
                 tested_select_speedup_vs_source_by_query_json
             ),

@@ -366,7 +366,8 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
                 '"memory_usage_percentiles":[768,1024]}]'
             ),
             tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json=(
-                '[{"query_index":0,"elapsed_ms_percentiles_speed_up_coefs":[2.0,2.0]}]'
+                '[{"query_index":0,"elapsed_ms_percentiles_speed_up_coefs":[2.0,2.0],'
+                '"read_bytes_percentiles_speed_up_coefs":[1.8,1.6]}]'
             ),
             tested_table_consumed_compressed_size_bytes_with_indexes=1234.0,
             tested_table_consumed_compressed_size_bytes_with_indexes_readable="1.21 KiB",
@@ -422,6 +423,10 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             "tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json",
             columns,
         )
+        self.assertIn(
+            "tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json",
+            columns,
+        )
         self.assertIn("tested_table_consumed_compressed_size_bytes_with_indexes_json", columns)
         self.assertIn("tested_table_primary_index_size_json", columns)
         self.assertIn("variant_mode_id", columns)
@@ -441,6 +446,12 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             ]
             or "{}"
         )
+        read_bytes_speedup_per_query_json = json.loads(
+            row_by_column[
+                "tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json"
+            ]
+            or "{}"
+        )
         tested_insert_metrics_json = json.loads(
             row_by_column["tested_table_insert_metrics_json"] or "{}"
         )
@@ -450,6 +461,7 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
         self.assertIn("query_0", tested_per_query_json)
         self.assertIn("query_0", source_per_query_json)
         self.assertIn("query_0", speedup_per_query_json)
+        self.assertIn("query_0", read_bytes_speedup_per_query_json)
         self.assertEqual(speedup_vs_source_per_query_json, speedup_per_query_json)
         self.assertIn("insert_main", tested_insert_metrics_json)
         self.assertIn("insert_main", source_insert_metrics_json)
@@ -460,6 +472,12 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
         self.assertEqual(
             speedup_per_query_json["query_0"]["elapsed_ms_percentiles_speed_up_coefs"],
             [2.0, 2.0],
+        )
+        self.assertEqual(
+            read_bytes_speedup_per_query_json["query_0"][
+                "read_bytes_percentiles_speed_up_coefs"
+            ],
+            [1.8, 1.6],
         )
         self.assertIn("\n", row_by_column["score_calculation_json"])
         self.assertEqual(

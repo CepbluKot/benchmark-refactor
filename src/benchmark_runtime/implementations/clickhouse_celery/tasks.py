@@ -3148,6 +3148,45 @@ def _compute_select_time_speedup_by_query(
     return result
 
 
+def _extract_read_bytes_speedup_by_query(
+    speedup_per_query: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Оставляет из per-query speedup только read_bytes коэффициенты."""
+    result: list[dict[str, Any]] = []
+    for fallback_index, entry in enumerate(speedup_per_query):
+        if not isinstance(entry, dict):
+            continue
+        query_index = int(entry.get("query_index", fallback_index))
+        query_id = str(entry.get("query_id", f"query_{query_index}"))
+        read_bytes_speedup = entry.get("read_bytes_percentiles_speed_up_coefs", [])
+        if not isinstance(read_bytes_speedup, list):
+            read_bytes_speedup = []
+        result.append(
+            {
+                "query_index": query_index,
+                "query_id": query_id,
+                "query": entry.get("query"),
+                "source_query": entry.get("source_query"),
+                "read_bytes_percentiles_speed_up_coefs": read_bytes_speedup,
+            }
+        )
+    return result
+
+
+def _map_per_query_entries_by_query_id(
+    entries: Sequence[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Строит map `query_id -> entry` для per-query payload."""
+    result: dict[str, Dict[str, Any]] = {}
+    for fallback_index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        query_index = int(entry.get("query_index", fallback_index))
+        query_id = str(entry.get("query_id", f"query_{query_index}"))
+        result[query_id] = entry
+    return result
+
+
 def _build_per_query_expression_context(
     *,
     source_per_query: Sequence[Dict[str, Any]],
@@ -3155,16 +3194,6 @@ def _build_per_query_expression_context(
     speedup_per_query: Sequence[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """Собирает per-query контекст для scoring expression."""
-
-    def _to_query_id_map(entries: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-        result: dict[str, Dict[str, Any]] = {}
-        for fallback_index, entry in enumerate(entries):
-            if not isinstance(entry, dict):
-                continue
-            query_index = int(entry.get("query_index", fallback_index))
-            query_id = str(entry.get("query_id", f"query_{query_index}"))
-            result[query_id] = entry
-        return result
 
     def _to_query_index_map(entries: Sequence[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
         result: dict[int, Dict[str, Any]] = {}
@@ -3179,9 +3208,9 @@ def _build_per_query_expression_context(
         "source": list(source_per_query),
         "tested": list(tested_per_query),
         "speedup": list(speedup_per_query),
-        "source_by_query_id": _to_query_id_map(source_per_query),
-        "tested_by_query_id": _to_query_id_map(tested_per_query),
-        "speedup_by_query_id": _to_query_id_map(speedup_per_query),
+        "source_by_query_id": _map_per_query_entries_by_query_id(source_per_query),
+        "tested_by_query_id": _map_per_query_entries_by_query_id(tested_per_query),
+        "speedup_by_query_id": _map_per_query_entries_by_query_id(speedup_per_query),
         "source_by_query_index": _to_query_index_map(source_per_query),
         "tested_by_query_index": _to_query_index_map(tested_per_query),
         "speedup_by_query_index": _to_query_index_map(speedup_per_query),
@@ -3749,6 +3778,7 @@ def _build_baseline_variant_result(
         ),
         # baseline не сравнивается сам с собой: per-query speedup не заполняем.
         tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json=None,
+        tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json=None,
         tested_table_consumed_compressed_size_bytes_by_each_column=_to_legacy_pretty_json_or_none(
             tested_columns_size_map
         ),
@@ -4180,6 +4210,12 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             source_select_per_query_metrics,
             source_select_per_query_metrics,
         )
+        baseline_read_bytes_speedup_by_query = _extract_read_bytes_speedup_by_query(
+            baseline_select_time_speedup_by_query
+        )
+        baseline_read_bytes_speedup_by_query_map = _map_per_query_entries_by_query_id(
+            baseline_read_bytes_speedup_by_query
+        )
         baseline_insert_time_speedup = compute_speedup_coefficients(
             insert_time_ms_percentiles,
             insert_time_ms_percentiles,
@@ -4288,6 +4324,9 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
                 "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json": (
                     baseline_per_query_context.get("speedup_by_query_id", {})
                 ),
+                "tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json": (
+                    baseline_read_bytes_speedup_by_query_map
+                ),
             },
             context_label=(
                 "run_source_benchmark "
@@ -4304,8 +4343,8 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             source_table_ddl=payload.source_table_ddl,
             score_calculation_json=baseline_score_calculation_json,
             score=baseline_score,
-                metrics=metrics,
-            )
+            metrics=metrics,
+        )
         _store_source_benchmark_result_if_configured(
             payload=payload,
             baseline_database=baseline_database,
@@ -4633,6 +4672,12 @@ def run_variant_benchmark(
             source_select_per_query_metrics,
             tested_select_per_query_metrics,
         )
+        tested_select_read_bytes_speedup_by_query = _extract_read_bytes_speedup_by_query(
+            tested_select_time_speedup_by_query
+        )
+        tested_select_read_bytes_speedup_by_query_map = _map_per_query_entries_by_query_id(
+            tested_select_read_bytes_speedup_by_query
+        )
 
         source_columns_size_map: Dict[str, Dict[str, Any]] = dict(
             source_metrics.get("source_table_consumed_compressed_size_bytes_by_each_column", {}) or {}
@@ -4854,6 +4899,9 @@ def run_variant_benchmark(
                 "tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json": (
                     per_query_expression_context.get("speedup_by_query_id", {})
                 ),
+                "tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json": (
+                    tested_select_read_bytes_speedup_by_query_map
+                ),
             },
             context_label=(
                 "run_variant_benchmark "
@@ -5067,6 +5115,16 @@ def run_variant_benchmark(
                     sort_keys=True,
                 )
                 if tested_select_time_speedup_by_query
+                else None
+            ),
+            tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json=(
+                json.dumps(
+                    tested_select_read_bytes_speedup_by_query,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                if tested_select_read_bytes_speedup_by_query
                 else None
             ),
             # Legacy-совместимый формат хранения: человекочитаемый JSON с отступами.

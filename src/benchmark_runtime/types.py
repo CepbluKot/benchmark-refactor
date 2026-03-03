@@ -273,6 +273,7 @@ class BenchmarkVariantResult(_FrozenModel):
     tested_table_select_metrics_by_query_json: Optional[str] = None
     source_table_select_metrics_by_query_json: Optional[str] = None
     tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json: Optional[str] = None
+    tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json: Optional[str] = None
     tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json: Optional[str] = (
         None
     )
@@ -452,6 +453,7 @@ class StoredBenchmarkResult(_FrozenModel):
     tested_table_select_metrics_by_query_json: Optional[str] = None
     source_table_select_metrics_by_query_json: Optional[str] = None
     tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json: Optional[str] = None
+    tested_table_select_read_bytes_percentiles_speed_up_coefs_by_query_json: Optional[str] = None
     tested_table_select_time_ms_percentiles_speed_up_coefs_vs_source_by_query_json: Optional[str] = (
         None
     )
