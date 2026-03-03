@@ -70,6 +70,30 @@ _OPTIMIZE_FINAL_WAIT_TIMEOUT_SEC = float(
 _OPTIMIZE_FINAL_WAIT_POLL_SEC = float(
     os.getenv("BENCH_OPTIMIZE_FINAL_WAIT_POLL_SEC", "1.0")
 )
+_ENABLE_OPTIMIZE_FINAL = str(os.getenv("BENCH_ENABLE_OPTIMIZE_FINAL", "1")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+_OPTIMIZE_FINAL_PERMISSION_DENIED = False
+
+
+def _is_optimize_access_denied(exc: Exception) -> bool:
+    """Определяет ошибку отсутствия прав на OPTIMIZE."""
+    message = str(exc or "").lower()
+    return "access_denied" in message or "not enough privileges" in message
+
+
+def _should_run_optimize_final() -> bool:
+    """
+    Возвращает, нужно ли запускать OPTIMIZE FINAL в текущем worker-процессе.
+
+    OPTIMIZE может быть отключён:
+      - через BENCH_ENABLE_OPTIMIZE_FINAL=0;
+      - автоматически после первой ACCESS_DENIED ошибки.
+    """
+    return _ENABLE_OPTIMIZE_FINAL and not _OPTIMIZE_FINAL_PERMISSION_DENIED
 
 
 def _is_phased_strategy(strategy: str) -> bool:
@@ -3967,22 +3991,33 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             payload.measured_percentiles,
         )
 
-        try:
-            client.optimize_table_final(baseline_database, baseline_table)
-            if not client.wait_for_no_active_merges(baseline_database, baseline_table):
-                logger.warning(
-                    "run_source_benchmark: timeout ожидания merges=0 после OPTIMIZE FINAL "
-                    "для %s.%s",
-                    baseline_database,
-                    baseline_table,
-                )
-        except Exception:
-            logger.exception(
-                "run_source_benchmark: не удалось стабилизировать таблицу после INSERT "
-                "(%s.%s)",
-                baseline_database,
-                baseline_table,
-            )
+        if _should_run_optimize_final():
+            try:
+                client.optimize_table_final(baseline_database, baseline_table)
+                if not client.wait_for_no_active_merges(baseline_database, baseline_table):
+                    logger.warning(
+                        "run_source_benchmark: timeout ожидания merges=0 после OPTIMIZE FINAL "
+                        "для %s.%s",
+                        baseline_database,
+                        baseline_table,
+                    )
+            except Exception as exc:
+                if _is_optimize_access_denied(exc):
+                    global _OPTIMIZE_FINAL_PERMISSION_DENIED
+                    _OPTIMIZE_FINAL_PERMISSION_DENIED = True
+                    logger.warning(
+                        "run_source_benchmark: OPTIMIZE FINAL отключён для текущего worker "
+                        "после ACCESS_DENIED (%s.%s)",
+                        baseline_database,
+                        baseline_table,
+                    )
+                else:
+                    logger.exception(
+                        "run_source_benchmark: не удалось стабилизировать таблицу после INSERT "
+                        "(%s.%s)",
+                        baseline_database,
+                        baseline_table,
+                    )
 
         select_stats = _measure_select_queries(
             client,
@@ -4446,22 +4481,36 @@ def run_variant_benchmark(
             measured_percentiles,
         )
 
-        try:
-            client.optimize_table_final(payload.variant_database, payload.variant_table)
-            if not client.wait_for_no_active_merges(payload.variant_database, payload.variant_table):
-                logger.warning(
-                    "run_variant_benchmark: timeout ожидания merges=0 после OPTIMIZE FINAL "
-                    "для %s.%s",
+        if _should_run_optimize_final():
+            try:
+                client.optimize_table_final(payload.variant_database, payload.variant_table)
+                if not client.wait_for_no_active_merges(
                     payload.variant_database,
                     payload.variant_table,
-                )
-        except Exception:
-            logger.exception(
-                "run_variant_benchmark: не удалось стабилизировать таблицу после INSERT "
-                "(%s.%s)",
-                payload.variant_database,
-                payload.variant_table,
-            )
+                ):
+                    logger.warning(
+                        "run_variant_benchmark: timeout ожидания merges=0 после OPTIMIZE FINAL "
+                        "для %s.%s",
+                        payload.variant_database,
+                        payload.variant_table,
+                    )
+            except Exception as exc:
+                if _is_optimize_access_denied(exc):
+                    global _OPTIMIZE_FINAL_PERMISSION_DENIED
+                    _OPTIMIZE_FINAL_PERMISSION_DENIED = True
+                    logger.warning(
+                        "run_variant_benchmark: OPTIMIZE FINAL отключён для текущего worker "
+                        "после ACCESS_DENIED (%s.%s)",
+                        payload.variant_database,
+                        payload.variant_table,
+                    )
+                else:
+                    logger.exception(
+                        "run_variant_benchmark: не удалось стабилизировать таблицу после INSERT "
+                        "(%s.%s)",
+                        payload.variant_database,
+                        payload.variant_table,
+                    )
 
         select_stats = _measure_select_queries(
             client,
