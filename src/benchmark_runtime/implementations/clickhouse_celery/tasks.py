@@ -85,6 +85,60 @@ def _is_optimize_access_denied(exc: Exception) -> bool:
     return "access_denied" in message or "not enough privileges" in message
 
 
+def _is_nullable_sorting_key_error(exc: Exception) -> bool:
+    """Определяет ошибку ClickHouse `ILLEGAL_COLUMN` для Nullable в ORDER BY."""
+    message = str(exc or "").lower()
+    if "sorting key contains nullable columns" not in message:
+        return False
+    return ("code: 44" in message) or ("illegal_column" in message)
+
+
+def _ensure_allow_nullable_key_in_ddl(ddl_sql: str) -> str:
+    """
+    Гарантирует `allow_nullable_key = 1` в SETTINGS CREATE TABLE DDL.
+
+    Используется как fallback для старых версий ClickHouse, где ORDER BY
+    с Nullable-колонками запрещён по умолчанию.
+    """
+    parsed = TableDDL.from_ddl(ddl_sql)
+    settings_indices = [
+        idx
+        for idx, option in enumerate(parsed.other_table_options)
+        if re.match(r"^\s*SETTINGS\b", option, flags=re.IGNORECASE)
+    ]
+    if not settings_indices:
+        parsed.other_table_options.append("SETTINGS allow_nullable_key = 1")
+        return parsed.to_ddl()
+
+    settings_idx = settings_indices[0]
+    option = parsed.other_table_options[settings_idx]
+    settings_body = re.sub(
+        r"^\s*SETTINGS\b",
+        "",
+        option,
+        flags=re.IGNORECASE,
+    ).strip()
+    assignments = [
+        item.strip()
+        for item in TableDDL._split_top_level_commas(settings_body)
+        if item.strip()
+    ]
+    normalized_assignments: list[str] = []
+    has_allow_nullable_key = False
+    for assignment in assignments:
+        if re.match(r"^\s*`?allow_nullable_key`?\s*=", assignment, flags=re.IGNORECASE):
+            normalized_assignments.append("allow_nullable_key = 1")
+            has_allow_nullable_key = True
+            continue
+        normalized_assignments.append(assignment)
+    if not has_allow_nullable_key:
+        normalized_assignments.append("allow_nullable_key = 1")
+    parsed.other_table_options[settings_idx] = (
+        "SETTINGS " + ", ".join(normalized_assignments)
+    )
+    return parsed.to_ddl()
+
+
 def _should_run_optimize_final() -> bool:
     """
     Возвращает, нужно ли запускать OPTIMIZE FINAL в текущем worker-процессе.
@@ -4436,6 +4490,7 @@ def run_variant_benchmark(
                 insert_tested_cols.append(str(column_name))
 
     worker_started_at = datetime.now(timezone.utc)
+    executed_variant_ddl = payload.variant_ddl
     try:
         client.create_database_if_not_exists(payload.variant_database)
         client.drop_table_if_exists(
@@ -4443,7 +4498,23 @@ def run_variant_benchmark(
             payload.variant_table,
             allowed_database=payload.variant_database,
         )
-        client.execute(payload.variant_ddl)
+        try:
+            client.execute(executed_variant_ddl)
+        except Exception as create_exc:
+            if not _is_nullable_sorting_key_error(create_exc):
+                raise
+            logger.warning(
+                "run_variant_benchmark: retry CREATE TABLE with allow_nullable_key=1 "
+                "(benchmark_run_id=%d, benchmark_id=%s, mode=%s, table=%s.%s, error=%s)",
+                payload.benchmark_run_id,
+                payload.benchmark_id,
+                payload.variant_mode,
+                payload.variant_database,
+                payload.variant_table,
+                str(create_exc),
+            )
+            executed_variant_ddl = _ensure_allow_nullable_key_in_ddl(executed_variant_ddl)
+            client.execute(executed_variant_ddl)
         source_table_ddl_for_insert = None
         if payload.source_benchmark and isinstance(payload.source_benchmark, dict):
             source_table_ddl_for_insert = payload.source_benchmark.get("source_table_ddl")
@@ -5027,7 +5098,7 @@ def run_variant_benchmark(
                 if payload.source_benchmark
                 else None
             ),
-            tested_table_ddl=payload.variant_ddl,
+            tested_table_ddl=executed_variant_ddl,
             is_source_table_copy=False,
             index_params=None,
             total_n_rows_in_tested_table=tested_rows_count,
@@ -5252,7 +5323,7 @@ def run_variant_benchmark(
             variant_table=payload.variant_table,
             variant_mode=payload.variant_mode,
             variant_params=runtime_variant_params,
-            tested_table_ddl_fallback=payload.variant_ddl,
+            tested_table_ddl_fallback=executed_variant_ddl,
             source_table_ddl_fallback=(
                 payload.source_benchmark.get("source_table_ddl")
                 if payload.source_benchmark
@@ -5277,6 +5348,101 @@ def run_variant_benchmark(
             )
         result_store.close()
         client.close()
+
+
+def _store_failed_variant_result(
+    *,
+    payload: VariantBenchmarkTaskPayload,
+    error: Exception,
+    celery_task_id: Optional[str] = None,
+    celery_worker_hostname: Optional[str] = None,
+    worker_started_at: Optional[datetime] = None,
+) -> None:
+    """
+    Best-effort запись failed variant результата в result store.
+
+    Это нужно, чтобы стратегия multi-phase не зависала в ожидании summary:
+    даже упавший вариант должен оставить запись для своей `variant_table`.
+    """
+    runtime_variant_params = _augment_variant_params_with_runtime_context(payload)
+    execution_uuid = str(runtime_variant_params.get("execution_uuid") or "").strip()
+    worker_finished_at = datetime.now(timezone.utc)
+    started_at = worker_started_at or worker_finished_at
+    error_text = str(error or "unknown variant task error")
+    score_details = _to_pretty_score_calculation_json(
+        {
+            "mode": "failed_variant",
+            "status": "worker_exception",
+            "error": error_text,
+            "final_score": -1.0,
+        }
+    )
+    quality_details = _to_json_or_none(
+        {
+            "quality_flag": "failed",
+            "error": error_text,
+            "failed_at": worker_finished_at.isoformat(),
+        }
+    )
+    failed_result = BenchmarkVariantResult(
+        benchmark_run_id=payload.benchmark_run_id,
+        benchmark_started_at=payload.benchmark_started_at,
+        benchmark_id=payload.benchmark_id,
+        source_database=payload.source_database,
+        source_table=payload.source_table,
+        variant_table=payload.variant_table,
+        variant_mode=payload.variant_mode,
+        variant_params=runtime_variant_params,
+        id=execution_uuid or None,
+        celery_task_id=(str(celery_task_id).strip() if celery_task_id else None),
+        celery_worker_hostname=(
+            str(celery_worker_hostname).strip() if celery_worker_hostname else None
+        ),
+        worker_started_at=started_at,
+        worker_finished_at=worker_finished_at,
+        source_table_ddl=(
+            payload.source_benchmark.get("source_table_ddl")
+            if payload.source_benchmark
+            else None
+        ),
+        tested_table_ddl=payload.variant_ddl,
+        measured_percentiles=list(payload.measured_percentiles),
+        measurement_quality_flag="failed",
+        measurement_quality_details_json=quality_details,
+        score_calculation_json=score_details,
+        score=-1.0,
+    )
+    result_store = ClickHouseBenchmarkResultStore(
+        connection=payload.result_connection.to_result_store_params(),
+        database=payload.result_database,
+        table=payload.result_table,
+        legacy_table=payload.result_table_legacy,
+        phased_table=payload.result_table_phased,
+        phased_runs_table=payload.result_runs_table_phased,
+        create_legacy_table=not _is_phased_strategy(payload.benchmark_strategy),
+        create_table_if_missing=True,
+    )
+    try:
+        result_store.store_worker_result(
+            benchmark_run_id=payload.benchmark_run_id,
+            benchmark_started_at=payload.benchmark_started_at,
+            benchmark_id=payload.benchmark_id,
+            benchmark_strategy=payload.benchmark_strategy,
+            source_database=payload.source_database,
+            source_table=payload.source_table,
+            variant_table=payload.variant_table,
+            variant_mode=payload.variant_mode,
+            variant_params=runtime_variant_params,
+            tested_table_ddl_fallback=payload.variant_ddl,
+            source_table_ddl_fallback=(
+                payload.source_benchmark.get("source_table_ddl")
+                if payload.source_benchmark
+                else None
+            ),
+            result=failed_result,
+        )
+    finally:
+        result_store.close()
 
 
 def _build_default_celery_app():
@@ -5435,9 +5601,10 @@ if app is not None:
             typed_payload.variant_table,
         )
 
+        celery_task_id: Optional[str] = None
+        celery_worker_hostname: Optional[str] = None
+        worker_started_at = datetime.now(timezone.utc)
         try:
-            celery_task_id: Optional[str] = None
-            celery_worker_hostname: Optional[str] = None
             try:
                 request = getattr(variant_benchmark_task, "request", None)
                 if request is not None:
@@ -5466,6 +5633,24 @@ if app is not None:
                 typed_payload.variant_database,
                 typed_payload.variant_table,
             )
+            try:
+                _store_failed_variant_result(
+                    payload=typed_payload,
+                    error=exc,
+                    celery_task_id=celery_task_id,
+                    celery_worker_hostname=celery_worker_hostname,
+                    worker_started_at=worker_started_at,
+                )
+            except Exception:
+                logger.exception(
+                    "Celery worker: не удалось сохранить failed variant result "
+                    "(benchmark_run_id=%d, benchmark_id=%s, mode=%s, table=%s.%s)",
+                    typed_payload.benchmark_run_id,
+                    typed_payload.benchmark_id,
+                    typed_payload.variant_mode,
+                    typed_payload.variant_database,
+                    typed_payload.variant_table,
+                )
             return {
                 "status": "skipped_invalid_variant",
                 "error": str(exc),

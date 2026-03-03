@@ -335,6 +335,66 @@ def _default_first_order_by_column(source_ddl: TableDDL) -> Optional[str]:
     return None
 
 
+def _is_nullable_column_type(type_sql: Optional[str]) -> bool:
+    """Проверяет, содержит ли тип колонки ClickHouse обёртку `Nullable(...)`."""
+    normalized = str(type_sql or "").strip()
+    if not normalized:
+        return False
+    return re.search(r"\bNullable\s*\(", normalized, flags=re.IGNORECASE) is not None
+
+
+def _is_nullable_column(source_ddl: TableDDL, column_name: str) -> bool:
+    """Возвращает `True`, если колонка из DDL nullable."""
+    column = source_ddl.column(column_name)
+    if column is None:
+        return False
+    return _is_nullable_column_type(column.type)
+
+
+def _pick_non_nullable_first_order_by_column(
+    *,
+    source_ddl: TableDDL,
+    preferred_first_column: str,
+) -> Optional[str]:
+    """
+    Подбирает безопасную first ORDER BY колонку, если исходная nullable.
+
+    Приоритет:
+    1) исходный preferred, если он не nullable;
+    2) компоненты текущего ORDER BY исходной таблицы;
+    3) Date/DateTime колонки;
+    4) первая non-nullable колонка таблицы.
+    """
+    preferred = _normalize_identifier(preferred_first_column)
+    if preferred and not _is_nullable_column(source_ddl, preferred):
+        return preferred
+
+    parsed_order = _parse_order_by_components(source_ddl.order_by)
+    for component in parsed_order:
+        normalized = _normalize_identifier(component)
+        if not normalized:
+            continue
+        if source_ddl.column(normalized) is None:
+            # Может быть выражение, а не имя колонки.
+            continue
+        if _is_nullable_column(source_ddl, normalized):
+            continue
+        return normalized
+
+    for column in source_ddl.columns:
+        normalized_type = str(column.type or "").strip().lower()
+        if _is_nullable_column_type(column.type):
+            continue
+        if normalized_type.startswith("datetime") or normalized_type.startswith("date"):
+            return column.name
+
+    for column in source_ddl.columns:
+        if _is_nullable_column_type(column.type):
+            continue
+        return column.name
+    return None
+
+
 def _extract_filter_columns_from_query_plan(
     query_plan: QueryPlan,
     available_columns: Sequence[str],
@@ -442,6 +502,31 @@ def _build_order_by_candidates(
     if not first_column:
         return []
     first_column = _normalize_identifier(first_column)
+    resolved_first_column = _pick_non_nullable_first_order_by_column(
+        source_ddl=source_ddl,
+        preferred_first_column=first_column,
+    )
+    if not resolved_first_column:
+        logger.warning(
+            "SequentialPhasedTopN: ORDER BY phase skipped — all candidate columns are Nullable "
+            "(benchmark=%s, table=%s.%s, preferred_first_column=%s)",
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+            first_column,
+        )
+        return []
+    if resolved_first_column != first_column:
+        logger.warning(
+            "SequentialPhasedTopN: first ORDER BY column `%s` is Nullable, fallback to `%s` "
+            "(benchmark=%s, table=%s.%s)",
+            first_column,
+            resolved_first_column,
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+        )
+    first_column = resolved_first_column
 
     parsed_order = _parse_order_by_components(source_ddl.order_by)
     parsed_tail = [
@@ -468,7 +553,18 @@ def _build_order_by_candidates(
             continue
         if value in ordered_candidates:
             continue
-        if source_ddl.column(value) is None:
+        column_def = source_ddl.column(value)
+        if column_def is None:
+            continue
+        if _is_nullable_column_type(column_def.type):
+            logger.debug(
+                "SequentialPhasedTopN: skip nullable ORDER BY candidate `%s` "
+                "(benchmark=%s, table=%s.%s)",
+                value,
+                table_plan.benchmark_id,
+                table_plan.database,
+                table_plan.table,
+            )
             continue
         ordered_candidates.append(value)
 

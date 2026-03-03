@@ -14,6 +14,7 @@ from src.benchmark_runtime.implementations.clickhouse_celery.tasks import (
     _ClickHouseRuntimeClient,
     _bytes_per_second,
     _compute_select_time_speedup_by_query,
+    _ensure_allow_nullable_key_in_ddl,
     _error_query_metrics,
     _find_top_level_trailing_comment_span,
     _measure_insert,
@@ -3622,9 +3623,14 @@ ORDER BY country
             self.skipTest("Celery app/task недоступны в текущем окружении")
 
         payload = self._variant_task_payload_dict()
-        with patch(
-            "src.benchmark_runtime.implementations.clickhouse_celery.tasks.run_variant_benchmark",
-            side_effect=RuntimeError("synthetic variant failure"),
+        with (
+            patch(
+                "src.benchmark_runtime.implementations.clickhouse_celery.tasks.run_variant_benchmark",
+                side_effect=RuntimeError("synthetic variant failure"),
+            ),
+            patch(
+                "src.benchmark_runtime.implementations.clickhouse_celery.tasks._store_failed_variant_result"
+            ) as store_failed_mock,
         ):
             result = variant_task(payload)
 
@@ -3633,6 +3639,163 @@ ORDER BY country
         self.assertEqual(result["benchmark_id"], "bench_variant_task")
         self.assertEqual(result["variant_table"], "events__bench__bench_var__0001")
         self.assertIn("synthetic variant failure", result["error"])
+        store_failed_mock.assert_called_once()
+        called_payload = store_failed_mock.call_args.kwargs["payload"]
+        self.assertEqual(called_payload.benchmark_id, "bench_variant_task")
+
+    def test_ensure_allow_nullable_key_in_ddl_adds_setting(self) -> None:
+        ddl = """
+CREATE TABLE bench_tmp.events__bench__nullable__0001
+(
+    `user_id` Nullable(UInt32),
+    `event_time` DateTime
+)
+ENGINE = MergeTree
+ORDER BY user_id
+SETTINGS index_granularity = 8192
+"""
+        updated = _ensure_allow_nullable_key_in_ddl(ddl)
+        self.assertIn("allow_nullable_key = 1", updated)
+        self.assertIn("index_granularity = 8192", updated)
+
+    def test_run_variant_benchmark_retries_create_with_allow_nullable_key(self) -> None:
+        nullable_variant_ddl = """
+CREATE TABLE bench_tmp.events__bench__bench_var__nullable__0001
+(
+    `user_id` Nullable(UInt32),
+    `event_time` DateTime
+)
+ENGINE = MergeTree
+ORDER BY user_id
+"""
+        fake_client = _FakeRuntimeClient(
+            query_metrics_sequence=[
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 10_000.0,
+                },
+                {
+                    "elapsed_ns": 80_000_000.0,
+                    "read_rows": 500.0,
+                    "read_bytes": 5_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+            ],
+            count_rows_map={("bench_tmp", "events__bench__bench_var__nullable__0001"): 200},
+            column_sizes_map={
+                ("bench_tmp", "events__bench__bench_var__nullable__0001"): {
+                    "user_id": {
+                        "name": "user_id",
+                        "datatype": "Nullable(UInt32)",
+                        "size_compressed_bytes": 200,
+                        "size_compressed_bytes_readable": "200 B",
+                    },
+                    "event_time": {
+                        "name": "event_time",
+                        "datatype": "DateTime",
+                        "size_compressed_bytes": 100,
+                        "size_compressed_bytes_readable": "100 B",
+                    },
+                }
+            },
+            index_sizes_map={("bench_tmp", "events__bench__bench_var__nullable__0001"): {}},
+            total_size_map={("bench_tmp", "events__bench__bench_var__nullable__0001"): 1000.0},
+        )
+        fake_store = _FakeResultStore()
+        payload = VariantBenchmarkTaskPayload(
+            connection=self._connection_payload(),
+            result_connection=self._connection_payload(),
+            result_database="benchmark_results",
+            result_table="combined_benchmark_results",
+            benchmark_run_id=77,
+            benchmark_started_at=datetime(2026, 2, 24, 13, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_nullable_retry",
+            source_database="analytics",
+            source_table="events",
+            variant_database="bench_tmp",
+            variant_table="events__bench__bench_var__nullable__0001",
+            variant_mode="order_by",
+            variant_params={},
+            variant_ddl=nullable_variant_ddl,
+            insert_operations_count=1,
+            insert_rows_limit=1000,
+            query_plan=QueryPlanPayload(
+                test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__nullable__0001`"],
+            ),
+            source_benchmark={
+                "source_table_ddl": VALID_SOURCE_DDL,
+                "metrics": {
+                    "total_n_rows_in_source_table": 300,
+                    "source_table_insert_time_ms_measurements_percentiles": [300.0],
+                    "source_table_select_time_ms_measurements_percentiles": [150.0],
+                    "source_table_consumed_compressed_size_bytes_overall": 1500.0,
+                    "source_table_n_rows_in_size_test": 300,
+                    "source_table_insert_rows_per_second_measurements_percentiles": [1.0],
+                    "source_table_insert_bytes_per_second_measurements_percentiles": [1.0],
+                    "source_table_select_rows_per_second_measurements_percentiles": [1.0],
+                    "source_table_select_bytes_per_second_measurements_percentiles": [1.0],
+                    "source_table_select_test_query": "SELECT count() FROM source",
+                    "source_table_consumed_compressed_size_bytes_by_each_column": {
+                        "user_id": {
+                            "name": "user_id",
+                            "datatype": "UInt64",
+                            "size_compressed_bytes": 300,
+                            "size_compressed_bytes_readable": "300 B",
+                        },
+                        "event_time": {
+                            "name": "event_time",
+                            "datatype": "DateTime",
+                            "size_compressed_bytes": 200,
+                            "size_compressed_bytes_readable": "200 B",
+                        },
+                    },
+                },
+            },
+            measured_percentiles=[100],
+        )
+
+        original_execute = fake_client.execute
+        nullable_error_message = (
+            "Code: 44. DB::Exception: Sorting key contains nullable columns, "
+            "but merge tree setting allow_nullable_key is disabled. (ILLEGAL_COLUMN)"
+        )
+        first_create_failed = {"value": False}
+
+        def _execute_with_nullable_failure_once(
+            query: str,
+            params: Optional[Dict[str, Any]] = None,
+        ):
+            if not first_create_failed["value"] and query == nullable_variant_ddl:
+                first_create_failed["value"] = True
+                fake_client.execute_calls.append(query)
+                raise RuntimeError(nullable_error_message)
+            return original_execute(query, params)
+
+        with patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks._ClickHouseRuntimeClient",
+            return_value=fake_client,
+        ), patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks.ClickHouseBenchmarkResultStore",
+            return_value=fake_store,
+        ), patch.object(
+            fake_client,
+            "execute",
+            side_effect=_execute_with_nullable_failure_once,
+        ):
+            result = run_variant_benchmark(payload)
+
+        self.assertGreaterEqual(len(fake_client.execute_calls), 2)
+        self.assertIn("allow_nullable_key = 1", fake_client.execute_calls[1])
+        self.assertIn("allow_nullable_key = 1", result.tested_table_ddl or "")
+        self.assertEqual(len(fake_store.store_calls), 1)
+        self.assertIn(
+            "allow_nullable_key = 1",
+            fake_store.store_calls[0]["tested_table_ddl_fallback"],
+        )
 
 
 if __name__ == "__main__":

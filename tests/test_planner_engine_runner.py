@@ -2837,6 +2837,58 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         # phase5 final: 2 parents * 2 table-granularity = 4
         self.assertEqual(estimated, 28)
 
+    def test_sequential_phased_topn_order_by_skips_nullable_columns(self) -> None:
+        """Проверяет, что nullable-колонки не попадают в ORDER BY кандидаты фазы 1."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_order_by_skip_nullable",
+            connection_id="prod_ch",
+            strategy="sequential_phased_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            insert_operations_count=2,
+            sequential_types_top_n_for_indexes=1,
+            sequential_top_n_limits=InsertRowsLimitsConfig(order_by=5),
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_name="user_id",
+                        by_type="UInt64",
+                        types=["UInt64"],
+                    )
+                ],
+                order_by_rules=OrderByRulesConfig(
+                    first_column="event_time",
+                    candidates=["revenue"],  # revenue в EVENTS_DDL = Nullable(...)
+                    auto_generate_candidates=False,
+                )
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[
+                    QueryConfigItem(query="SELECT count() FROM {table} WHERE event_time >= now()")
+                ],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = SequentialPhasedScoringAdapter()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=InMemoryBenchmarkResultStore(),
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+        order_jobs = [
+            job for job in adapter.executed_jobs if job.variant_meta.mode == "order_by"
+        ]
+        self.assertEqual(len(order_jobs), 1)
+        self.assertEqual(order_jobs[0].variant_ddl.order_by, "`event_time`")
+
     def test_sequential_phased_topn_strategy_supports_multiple_winners_per_parent(self) -> None:
         """Проверяет, что max_winners_per_parent_limits реально даёт >1 кандидата на parent."""
         benchmark = BenchmarkConfig(
