@@ -105,6 +105,17 @@ class ClickHouseCeleryScoringExpressionTests(unittest.TestCase):
         score = evaluate_score_expression("max(values, -1)", {"values": [float("nan"), None]})
         self.assertEqual(score, -1.0)
 
+    def test_expression_supports_list_and_dict_literals_for_safe_defaults(self) -> None:
+        score = evaluate_score_expression(
+            "median(at(at(select_time_speedup_by_query, 0, {}), 'read_bytes_percentiles_speed_up_coefs', []), 1.0)",
+            {
+                "select_time_speedup_by_query": [
+                    {"read_bytes_percentiles_speed_up_coefs": [1.2, 1.1]}
+                ]
+            },
+        )
+        self.assertAlmostEqual(score, 1.15)
+
     def test_static_validation_accepts_supported_expression(self) -> None:
         issues = validate_score_expression(
             "safe_div(pct(tested_select_time_ms_by_percentile, 95), 2)",

@@ -1200,7 +1200,7 @@ def _resolve_score(
     )
     effective_on_error_score = (
         stage_override.on_error_score
-        if stage_override is not None
+        if stage_override is not None and stage_override.on_error_score is not None
         else scoring.on_error_score
     )
     effective_top_selection = (

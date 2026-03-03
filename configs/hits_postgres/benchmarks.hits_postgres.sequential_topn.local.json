@@ -34,7 +34,7 @@
       },
       "scoring": {
         "mode": "expression",
-        "expression": "pow(median(at(at(tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json, 'select_country_cold', {}), 'elapsed_ms_percentiles_speed_up_coefs', []), 1.0), 0.8) * pow(median(at(at(tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json, 'select_country_cold', {}), 'read_bytes_percentiles_speed_up_coefs', []), 1.0), 0.2)",
+        "expression": "pow(median(at(at(tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json, 'select_country_cold', None), 'elapsed_ms_percentiles_speed_up_coefs', None), 1.0), 0.8) * pow(median(at(at(tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json, 'select_country_cold', None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.2)",
         "on_error_score": -1.0
       },
       "max_benchmarks_limits": {
@@ -63,7 +63,7 @@
         "order_by_rules": {
           "first_column": "event_date",
           "candidates": [
-            "event_date"
+            "event_date", "country"
           ],
           "auto_generate_candidates": false
         },

@@ -2577,6 +2577,127 @@ ORDER BY country
         self.assertEqual(score_details.get("stage_name"), "types")
         self.assertTrue(score_details.get("stage_override_used"))
 
+    def test_run_variant_benchmark_stage_override_inherits_global_on_error_score(
+        self,
+    ) -> None:
+        fake_client = _FakeRuntimeClient(
+            query_metrics_sequence=[
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 10_000.0,
+                },
+                {
+                    "elapsed_ns": 200_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 10_000.0,
+                },
+                {
+                    "elapsed_ns": 50_000_000.0,
+                    "read_rows": 500.0,
+                    "read_bytes": 5_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 500.0,
+                    "read_bytes": 5_000.0,
+                    "written_rows": 0.0,
+                    "written_bytes": 0.0,
+                },
+            ],
+            count_rows_map={("bench_tmp", "events__bench__bench_var__0001"): 222},
+            column_sizes_map={
+                ("bench_tmp", "events__bench__bench_var__0001"): {
+                    "user_id": {
+                        "name": "user_id",
+                        "datatype": "UInt64",
+                        "size_compressed_bytes": 200,
+                        "size_compressed_bytes_readable": "200 B",
+                    }
+                }
+            },
+            total_size_map={("bench_tmp", "events__bench__bench_var__0001"): 2000.0},
+        )
+        fake_store = _FakeResultStore()
+        source_metrics = {
+            "total_n_rows_in_source_table": 300,
+            "source_table_insert_time_ms_measurements_percentiles": [300.0, 400.0],
+            "source_table_select_time_ms_measurements_percentiles": [150.0, 200.0],
+            "source_table_consumed_compressed_size_bytes_overall": 4000.0,
+            "source_table_insert_rows_per_second_measurements_percentiles": [1.0, 1.0],
+            "source_table_insert_bytes_per_second_measurements_percentiles": [1.0, 1.0],
+            "source_table_insert_memory_usage_measurements_percentiles": [1.0, 1.0],
+            "source_table_select_rows_per_second_measurements_percentiles": [1.0, 1.0],
+            "source_table_select_bytes_per_second_measurements_percentiles": [1.0, 1.0],
+            "source_table_select_memory_usage_measurements_percentiles": [1.0, 1.0],
+            "source_table_consumed_compressed_size_bytes_by_each_column": {
+                "user_id": {
+                    "name": "user_id",
+                    "datatype": "UInt64",
+                    "size_compressed_bytes": 400,
+                    "size_compressed_bytes_readable": "400 B",
+                }
+            },
+        }
+
+        payload = VariantBenchmarkTaskPayload(
+            connection=self._connection_payload(),
+            result_connection=self._connection_payload(),
+            result_database="benchmark_results",
+            result_table="combined_benchmark_results",
+            benchmark_run_id=2,
+            benchmark_started_at=datetime(2026, 2, 24, 13, 0, tzinfo=timezone.utc),
+            benchmark_id="bench_var",
+            source_database="analytics",
+            source_table="events",
+            variant_database="bench_tmp",
+            variant_table="events__bench__bench_var__0001",
+            variant_mode="types",
+            scoring={
+                "mode": "expression",
+                "expression": "41",
+                "on_error_score": -7.5,
+                "by_stage": {
+                    "types": {
+                        "mode": "expression",
+                        "expression": "source.select.time_ms_percentiles[999]",
+                    }
+                },
+            },
+            variant_params={},
+            variant_ddl=VALID_VARIANT_DDL,
+            insert_operations_count=2,
+            insert_rows_limit=1000,
+            query_plan=QueryPlanPayload(
+                test_queries=["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
+            ),
+            source_benchmark={
+                "source_table_ddl": VALID_SOURCE_DDL,
+                "metrics": source_metrics,
+            },
+            measured_percentiles=[50, 100],
+        )
+
+        with patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks._ClickHouseRuntimeClient",
+            return_value=fake_client,
+        ), patch(
+            "src.benchmark_runtime.implementations.clickhouse_celery.tasks.ClickHouseBenchmarkResultStore",
+            return_value=fake_store,
+        ):
+            result = run_variant_benchmark(payload)
+
+        self.assertEqual(result.score, -7.5)
+        score_details = json.loads(result.score_calculation_json or "{}")
+        self.assertEqual(score_details.get("status"), "fallback_on_error")
+        self.assertTrue(score_details.get("stage_override_used"))
+
     def test_run_variant_benchmark_custom_scoring_error_without_on_error_returns_none(
         self,
     ) -> None:

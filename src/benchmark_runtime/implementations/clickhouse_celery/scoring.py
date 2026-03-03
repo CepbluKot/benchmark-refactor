@@ -235,6 +235,28 @@ def evaluate_score_expression(
     )
     evaluator.ATTR_INDEX_FALLBACK = True
 
+    # simpleeval по умолчанию не умеет literal list/dict/set/tuple.
+    # В наших scoring-expression они используются как безопасные default-значения
+    # (например, at(x, key, {}) / at(x, key, [])).
+    def _eval_list_literal(node: ast.List) -> list[Any]:
+        return [evaluator._eval(item) for item in node.elts]  # type: ignore[attr-defined]
+
+    def _eval_tuple_literal(node: ast.Tuple) -> tuple[Any, ...]:
+        return tuple(evaluator._eval(item) for item in node.elts)  # type: ignore[attr-defined]
+
+    def _eval_set_literal(node: ast.Set) -> set[Any]:
+        return {evaluator._eval(item) for item in node.elts}  # type: ignore[attr-defined]
+
+    def _eval_dict_literal(node: ast.Dict) -> dict[Any, Any]:
+        keys = [evaluator._eval(item) for item in node.keys]  # type: ignore[attr-defined]
+        values = [evaluator._eval(item) for item in node.values]  # type: ignore[attr-defined]
+        return dict(zip(keys, values))
+
+    evaluator.nodes[ast.List] = _eval_list_literal
+    evaluator.nodes[ast.Tuple] = _eval_tuple_literal
+    evaluator.nodes[ast.Set] = _eval_set_literal
+    evaluator.nodes[ast.Dict] = _eval_dict_literal
+
     try:
         result = evaluator.eval(expression)
     except InvalidExpression as exc:

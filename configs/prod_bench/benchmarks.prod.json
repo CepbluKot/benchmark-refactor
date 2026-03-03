@@ -38,7 +38,7 @@
       },
       "scoring": {
         "mode": "expression",
-        "expression": "pow(median(at(at(select_time_speedup_by_query, 0, {}), 'read_bytes_percentiles_speed_up_coefs', []), 1.0), 0.75) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.25)",
+        "expression": "pow(median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.75) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.25)",
         "on_error_score": -1.0,
         "by_stage": {
           "source_baseline": {
@@ -49,7 +49,7 @@
             "mode": "expression",
             "expression": "pow(select_read_bytes_speedup, 0.75) * pow(compression_coef, 0.25)",
             "variables": {
-              "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, {}), 'read_bytes_percentiles_speed_up_coefs', []), 1.0)",
+              "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0)",
               "compression_coef": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
             }
           },
@@ -57,7 +57,7 @@
             "mode": "expression",
             "expression": "pow(select_read_bytes_speedup, 0.75) * pow(compression_coef, 0.25)",
             "variables": {
-              "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, {}), 'read_bytes_percentiles_speed_up_coefs', []), 1.0)",
+              "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0)",
               "compression_coef": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
             }
           },
@@ -65,7 +65,7 @@
             "mode": "expression",
             "expression": "pow(select_read_bytes_speedup, 0.75) * pow(compression_coef, 0.25)",
             "variables": {
-              "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, {}), 'read_bytes_percentiles_speed_up_coefs', []), 1.0)",
+              "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0)",
               "compression_coef": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
             }
           },
@@ -73,7 +73,7 @@
             "mode": "expression",
             "expression": "pow(select_read_bytes_speedup, 0.75) * pow(compression_coef, 0.25)",
             "variables": {
-              "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, {}), 'read_bytes_percentiles_speed_up_coefs', []), 1.0)",
+              "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0)",
               "compression_coef": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
             }
           },
@@ -81,13 +81,13 @@
             "mode": "expression",
             "expression": "pow(select_read_bytes_speedup, 0.75) * pow(compression_coef, 0.25)",
             "variables": {
-              "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, {}), 'read_bytes_percentiles_speed_up_coefs', []), 1.0)",
+              "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0)",
               "compression_coef": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
             }
           }
         },
         "variables": {
-          "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, {}), 'read_bytes_percentiles_speed_up_coefs', []), 1.0)",
+          "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0)",
           "compression_coef": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
         }
       },
