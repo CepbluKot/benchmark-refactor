@@ -270,8 +270,8 @@ SQL-строки (`*_ddl`, `*_query`, SQL внутри JSON) перед запи
 `score_calculation_json` сохраняется рядом со `score`.
 Для phased-ранжирования `is_top_n` выставляется по winners фазы; если фактически помечено меньше
 ожидаемого top-N, store автоматически делает fallback-перерасчёт `rank_in_phase`/`is_top_n` по `score`.
-В `sequential_phased_topn_strategy` noisy-варианты (`score=NULL`) не проходят в stage winners,
-если в стадии есть хотя бы один scored-кандидат.
+В `sequential_phased_topn_strategy` варианты без рассчитанного `score` (`score=NULL`)
+не проходят в stage winners, если в стадии есть хотя бы один scored-кандидат.
 Идемпотентность записи варианта обеспечивается по `id`:
 вокруг `check -> insert` используется Redis lock в result-store.
 Lock настраивается через `BENCH_RESULT_STORE_REDIS_URL`
@@ -977,15 +977,10 @@ print(run_id)
   `INSERT ... SELECT ... ORDER BY <source_ddl.order_by>` (если в исходном DDL есть ORDER BY).
 - Per-query select метрики теперь включают:
   - `read_bytes_measurements` / `read_bytes_percentiles`;
-  - `elapsed_ms_mad` / `elapsed_ms_nmad`;
-  - флаги шума `is_noisy_too_fast`, `is_noisy_high_nmad`, `is_noisy`.
-- Noise-gate:
-  - `median(elapsed_ms) < BENCH_SELECT_NOISE_GATE_MEDIAN_MS` (default `20ms`) => noisy;
-  - при `N >= BENCH_SELECT_NOISE_MIN_MEASUREMENTS_FOR_NMAD` (default `10`):
-    `nMAD > BENCH_SELECT_NOISE_GATE_NMAD` (default `0.2`) => noisy.
-- Качество варианта сохраняется в `measurement_quality_flag`:
-  `stable | partially_noisy | noisy`.
-  Если флаг `noisy`, `score` принудительно сохраняется как `NULL`.
+  - `elapsed_ms_median`.
+- Noise-gate отключён: шумовые коэффициенты/флаги в ранжировании не участвуют.
+- Качество варианта сохраняется как `measurement_quality_flag = stable`
+  (служебное поле, на `score` не влияет).
 
 ### `scoring`: как настроить формулу score
 

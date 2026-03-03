@@ -66,20 +66,22 @@ class ClickHouseCelerySettingsTests(unittest.TestCase):
         self.assertEqual(settings.backend_url, "redis://localhost:6379/0")
 
     def test_default_urls_are_valid(self) -> None:
-        settings = ClickHouseCeleryWorkerSettings(_env_file=None)
-        self.assertEqual(settings.broker_url, "pyamqp://guest:guest@localhost:5672//")
-        self.assertEqual(settings.backend_url, "rpc://guest:guest@localhost:5672//")
-        self.assertEqual(settings.celery_queue_name, "bench.benchmark")
-        self.assertEqual(settings.clickhouse_manager_max_concurrent_streams_per_process, 1)
-        self.assertIsNone(settings.clickhouse_stream_slot_acquire_timeout_sec)
-        self.assertEqual(settings.max_copy_n_retries, 100)
-        self.assertEqual(settings.max_copy_retry_sleep_sec, 10.0)
-        self.assertEqual(settings.max_copy_retry_sleep_sec_increment, 2.0)
-        self.assertIsNone(settings.celery_task_default_expires_sec)
-        self.assertIsNone(settings.celery_result_expires_sec)
-        self.assertIsNone(settings.celery_task_soft_time_limit_sec)
-        self.assertIsNone(settings.celery_task_time_limit_sec)
-        self.assertEqual(settings.celery_broker_visibility_timeout_sec, 86_400)
+        with patch.dict(os.environ, {}, clear=True):
+            settings = ClickHouseCeleryWorkerSettings(_env_file=None)
+
+            self.assertEqual(settings.broker_url, "pyamqp://guest:guest@localhost:5672//")
+            self.assertEqual(settings.backend_url, "rpc://guest:guest@localhost:5672//")
+            self.assertEqual(settings.celery_queue_name, "bench.benchmark")
+            self.assertEqual(settings.clickhouse_manager_max_concurrent_streams_per_process, 1)
+            self.assertIsNone(settings.clickhouse_stream_slot_acquire_timeout_sec)
+            self.assertEqual(settings.max_copy_n_retries, 100)
+            self.assertEqual(settings.max_copy_retry_sleep_sec, 10.0)
+            self.assertEqual(settings.max_copy_retry_sleep_sec_increment, 2.0)
+            self.assertIsNone(settings.celery_task_default_expires_sec)
+            self.assertIsNone(settings.celery_result_expires_sec)
+            self.assertIsNone(settings.celery_task_soft_time_limit_sec)
+            self.assertIsNone(settings.celery_task_time_limit_sec)
+            self.assertEqual(settings.celery_broker_visibility_timeout_sec, 86_400)
 
     def test_rejects_empty_bench_urls(self) -> None:
         with patch.dict(

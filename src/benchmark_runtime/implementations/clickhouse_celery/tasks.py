@@ -57,13 +57,6 @@ _COLD_SELECT_SETTINGS_ASSIGNMENTS = (
     "use_uncompressed_cache = 0",
 )
 _PHASED_STRATEGIES = ("sequential_phased_topn_strategy",)
-_SELECT_NOISE_GATE_MEDIAN_MS = float(
-    os.getenv("BENCH_SELECT_NOISE_GATE_MEDIAN_MS", "20.0")
-)
-_SELECT_NOISE_GATE_NMAD = float(os.getenv("BENCH_SELECT_NOISE_GATE_NMAD", "0.2"))
-_SELECT_NOISE_MIN_MEASUREMENTS_FOR_NMAD = int(
-    os.getenv("BENCH_SELECT_NOISE_MIN_MEASUREMENTS_FOR_NMAD", "10")
-)
 _OPTIMIZE_FINAL_WAIT_TIMEOUT_SEC = float(
     os.getenv("BENCH_OPTIMIZE_FINAL_WAIT_TIMEOUT_SEC", "600.0")
 )
@@ -880,51 +873,6 @@ def _median_positive_finite(values: Sequence[Any]) -> Optional[float]:
     if len(valid) % 2 == 1:
         return float(valid[mid])
     return float((valid[mid - 1] + valid[mid]) / 2.0)
-
-
-def _median_any_finite(values: Sequence[Any]) -> Optional[float]:
-    """Считает медиану по любым finite значениям (включая 0)."""
-    valid: list[float] = []
-    for value in values:
-        try:
-            numeric = float(value)
-        except Exception:
-            continue
-        if math.isfinite(numeric):
-            valid.append(numeric)
-    if not valid:
-        return None
-    valid.sort()
-    mid = len(valid) // 2
-    if len(valid) % 2 == 1:
-        return float(valid[mid])
-    return float((valid[mid - 1] + valid[mid]) / 2.0)
-
-
-def _mad_and_nmad(values: Sequence[Any]) -> tuple[Optional[float], Optional[float], Optional[float]]:
-    """
-    Возвращает (median, mad, nmad), где:
-      - mad = median(|x - median|)
-      - nmad = mad / median
-    """
-    median_value = _median_positive_finite(values)
-    if median_value is None:
-        return None, None, None
-    deviations = []
-    for value in values:
-        try:
-            numeric = float(value)
-        except Exception:
-            continue
-        if not math.isfinite(numeric) or numeric <= 0:
-            continue
-        deviations.append(abs(numeric - median_value))
-    mad_value = _median_any_finite(deviations)
-    if mad_value is None:
-        return median_value, None, None
-    if median_value <= 0:
-        return median_value, mad_value, None
-    return median_value, mad_value, float(mad_value / median_value)
 
 
 def _median_from_measurements_or_percentiles(
@@ -3005,18 +2953,7 @@ def _build_select_per_query_metrics(
         read_bytes_percentiles_readable = [
             make_readable_bytes(value) for value in read_bytes_percentiles
         ]
-        elapsed_ms_median, elapsed_ms_mad, elapsed_ms_nmad = _mad_and_nmad(
-            elapsed_ms_measurements
-        )
-        is_noisy_too_fast = (
-            elapsed_ms_median is not None and elapsed_ms_median < _SELECT_NOISE_GATE_MEDIAN_MS
-        )
-        is_noisy_high_nmad = (
-            len(elapsed_ms_measurements) >= _SELECT_NOISE_MIN_MEASUREMENTS_FOR_NMAD
-            and elapsed_ms_nmad is not None
-            and elapsed_ms_nmad > _SELECT_NOISE_GATE_NMAD
-        )
-        is_noisy = bool(is_noisy_too_fast or is_noisy_high_nmad)
+        elapsed_ms_median = _median_positive_finite(elapsed_ms_measurements)
 
         result.append(
             {
@@ -3044,11 +2981,6 @@ def _build_select_per_query_metrics(
                 "read_bytes_percentiles": read_bytes_percentiles,
                 "read_bytes_percentiles_readable": read_bytes_percentiles_readable,
                 "elapsed_ms_median": elapsed_ms_median,
-                "elapsed_ms_mad": elapsed_ms_mad,
-                "elapsed_ms_nmad": elapsed_ms_nmad,
-                "is_noisy_too_fast": is_noisy_too_fast,
-                "is_noisy_high_nmad": is_noisy_high_nmad,
-                "is_noisy": is_noisy,
             }
         )
     return result
@@ -3156,11 +3088,6 @@ def _extract_source_select_per_query_metrics(
             "elapsed_ms_median": _median_positive_finite(
                 [float(v) for v in legacy_elapsed_ms_measurements]
             ),
-            "elapsed_ms_mad": None,
-            "elapsed_ms_nmad": None,
-            "is_noisy_too_fast": False,
-            "is_noisy_high_nmad": False,
-            "is_noisy": False,
         }
     ]
 
@@ -3298,88 +3225,24 @@ def _build_per_query_expression_context(
 def _resolve_measurement_quality_flag(
     per_query_metrics: Sequence[Dict[str, Any]],
 ) -> str:
-    """
-    Классифицирует качество замеров:
-      - stable: шумных запросов нет;
-      - partially_noisy: часть запросов шумные;
-      - noisy: все запросы шумные.
-    """
-    if not per_query_metrics:
-        return "stable"
-    total = 0
-    noisy = 0
-    for entry in per_query_metrics:
-        if not isinstance(entry, dict):
-            continue
-        total += 1
-        if bool(entry.get("is_noisy")):
-            noisy += 1
-    if total <= 0:
-        return "stable"
-    if noisy <= 0:
-        return "stable"
-    if noisy >= total:
-        return "noisy"
-    return "partially_noisy"
+    """Noise gating disabled: measurement quality is always `stable`."""
+    del per_query_metrics
+    return "stable"
 
 
 def _build_measurement_quality_details(
     per_query_metrics: Sequence[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Строит агрегированные детали качества замеров для storage/debug."""
+    """Строит нейтральные детали качества (noise gating отключен)."""
     total_queries = 0
-    noisy_queries = 0
-    noisy_high_nmad_queries = 0
-    noisy_too_fast_queries = 0
-    max_elapsed_ms_nmad: Optional[float] = None
-    min_elapsed_ms_median: Optional[float] = None
-
     for entry in per_query_metrics:
         if not isinstance(entry, dict):
             continue
         total_queries += 1
-        if bool(entry.get("is_noisy")):
-            noisy_queries += 1
-        if bool(entry.get("is_noisy_high_nmad")):
-            noisy_high_nmad_queries += 1
-        if bool(entry.get("is_noisy_too_fast")):
-            noisy_too_fast_queries += 1
-
-        try:
-            nmad = float(entry.get("elapsed_ms_nmad"))
-        except Exception:
-            nmad = float("nan")
-        if math.isfinite(nmad) and nmad >= 0:
-            if max_elapsed_ms_nmad is None or nmad > max_elapsed_ms_nmad:
-                max_elapsed_ms_nmad = nmad
-
-        try:
-            median_ms = float(entry.get("elapsed_ms_median"))
-        except Exception:
-            median_ms = float("nan")
-        if math.isfinite(median_ms) and median_ms >= 0:
-            if min_elapsed_ms_median is None or median_ms < min_elapsed_ms_median:
-                min_elapsed_ms_median = median_ms
-
-    noisy_share: float = 0.0
-    if total_queries > 0:
-        noisy_share = noisy_queries / float(total_queries)
 
     return {
-        "quality_flag": _resolve_measurement_quality_flag(per_query_metrics),
+        "quality_flag": "stable",
         "total_queries": total_queries,
-        "noisy_queries": noisy_queries,
-        "noisy_share": round(noisy_share, 6),
-        "noisy_high_nmad_queries": noisy_high_nmad_queries,
-        "noisy_too_fast_queries": noisy_too_fast_queries,
-        "max_elapsed_ms_nmad": (
-            round(max_elapsed_ms_nmad, 6) if max_elapsed_ms_nmad is not None else None
-        ),
-        "min_elapsed_ms_median": (
-            round(min_elapsed_ms_median, 6) if min_elapsed_ms_median is not None else None
-        ),
-        "nmad_gate_gt": _SELECT_NOISE_GATE_NMAD,
-        "median_ms_gate_lt": _SELECT_NOISE_GATE_MEDIAN_MS,
     }
 
 
@@ -4227,10 +4090,6 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             "source_table_select_metrics_by_query": source_select_per_query_metrics,
             "measurement_quality_flag": measurement_quality_flag,
             "measurement_quality_details_json": measurement_quality_details,
-            "select_noise_gate": {
-                "median_ms_lt": _SELECT_NOISE_GATE_MEDIAN_MS,
-                "nmad_gt": _SELECT_NOISE_GATE_NMAD,
-            },
             "tested_table_consumed_compressed_size_bytes_by_each_column": tested_columns_sizes,
             "source_table_consumed_compressed_size_bytes_by_each_column": source_columns_sizes,
             "tested_table_consumed_compressed_size_bytes_overall": tested_total_size_bytes,

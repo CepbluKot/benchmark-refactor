@@ -1121,7 +1121,6 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
         )
         self.assertEqual(measurement_quality_details.get("quality_flag"), "stable")
         self.assertEqual(measurement_quality_details.get("total_queries"), 1)
-        self.assertEqual(measurement_quality_details.get("noisy_queries"), 0)
         self.assertIn("index_choices", result.variant_params)
         self.assertIn("user_id", result.variant_params.get("index_choices", {}))
         self.assertEqual(

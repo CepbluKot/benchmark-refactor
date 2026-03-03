@@ -381,7 +381,7 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
             ),
             measurement_quality_flag="stable",
             measurement_quality_details_json=(
-                '{"quality_flag":"stable","total_queries":1,"noisy_queries":0}'
+                '{"quality_flag":"stable","total_queries":1}'
             ),
             score_calculation_json='{"mode":"expression","final_score":1.0}',
             score=1.0,
@@ -501,7 +501,7 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
         self.assertEqual(row_by_column.get("measurement_quality_flag"), "stable")
         self.assertEqual(
             json.loads(row_by_column.get("measurement_quality_details_json") or "{}"),
-            {"quality_flag": "stable", "total_queries": 1, "noisy_queries": 0},
+            {"quality_flag": "stable", "total_queries": 1},
         )
         self.assertEqual(int(row_by_column["variant_mode_id"]), 1)
 

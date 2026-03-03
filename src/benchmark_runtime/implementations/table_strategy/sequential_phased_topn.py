@@ -874,8 +874,8 @@ def _take_top_scored_or_fallback(
     """
     Возвращает top-N, исключая `score=None`, если есть scored-кандидаты.
 
-    Это не даёт noisy-вариантам (`score=None`) попадать в winners, пока есть
-    хотя бы один стабильный вариант в текущем stage.
+    Это не даёт вариантам с отсутствующим score (`score=None`) попадать в
+    winners, пока есть хотя бы один scored-кандидат в текущем stage.
     """
     safe_limit = max(1, int(limit))
     scored = [candidate for candidate in candidates if candidate.score is not None]

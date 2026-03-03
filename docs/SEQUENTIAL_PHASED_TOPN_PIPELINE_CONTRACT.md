@@ -94,16 +94,11 @@ Worker-side select measurements use the same stabilization protocol for baseline
 Per-query select metrics include:
 
 - `read_bytes_measurements` / `read_bytes_percentiles`;
-- `elapsed_ms_mad` / `elapsed_ms_nmad`;
-- `is_noisy_too_fast`, `is_noisy_high_nmad`, `is_noisy`.
+- `elapsed_ms_median`;
+- no noise-gating coefficients/flags are used in ranking.
 
-Variant quality is persisted in `measurement_quality_flag`:
-
-- `stable`
-- `partially_noisy`
-- `noisy`
-
-If all query measurements are noisy, `score` is stored as `NULL`.
+Variant quality is persisted as `measurement_quality_flag = stable`
+(noise gating disabled).
 
 ## `variant_params` Fields (actual runtime)
 
