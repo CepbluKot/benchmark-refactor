@@ -17,7 +17,7 @@
         ]
       },
       "test_database": "benchmark_tmp",
-      "insert_operations_count": 10,
+      "insert_operations_count": 20,
       "sequential_top_n_limits": {
         "order_by": 3,
         "types": 3,

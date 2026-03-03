@@ -3029,7 +3029,6 @@ ORDER BY country
             n_rows=1000,
             offset=2000,
             strictly_adhere_n_rows=True,
-            total_rows_in_source_table=300,
         )
         self.assertIn("numbers(repeats_not_equal_zero)", query)
         self.assertIn("intDiv(3000 + cnt - 1, cnt)", query)
@@ -3055,7 +3054,6 @@ ORDER BY country
             n_rows=100,
             offset=0,
             strictly_adhere_n_rows=False,
-            total_rows_in_source_table=None,
             tested_cols=["payload", "user`id"],
         )
         self.assertIn("toString(`payload`) != ''", query)
@@ -3366,7 +3364,7 @@ ORDER BY country
             source_table="events",
             target_database="bench_tmp",
             target_table="events_variant",
-            n_rows=1000,
+            n_rows=None,
             n_measurements=2,
         )
 

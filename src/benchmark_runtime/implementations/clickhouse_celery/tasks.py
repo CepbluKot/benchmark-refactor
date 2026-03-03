@@ -2358,7 +2358,6 @@ class _ClickHouseRuntimeClient:
         n_rows: Optional[int],
         offset: int,
         strictly_adhere_n_rows: bool,
-        total_rows_in_source_table: Optional[int],
         tested_cols: Optional[Sequence[str]] = None,
         deterministic_order_by: Optional[str] = None,
     ) -> str:
@@ -2379,16 +2378,13 @@ class _ClickHouseRuntimeClient:
         if n_rows is None:
             return f"SELECT * FROM {source_ref}{where_clause}{order_by_clause}"
 
-        if (
-            strictly_adhere_n_rows
-            and total_rows_in_source_table is not None
-            and total_rows_in_source_table > 0
-            and total_rows_in_source_table < n_rows
-        ):
+        if strictly_adhere_n_rows:
             required_rows = offset + n_rows
             return (
                 "WITH\n"
-                f"    ifNull((SELECT count() FROM {source_ref}), 0) AS cnt,\n"
+                # Важно: считаем cnt на том же фильтре, что и в INSERT SELECT.
+                # Иначе при OFFSET можно недооценить repeats и вставить меньше n_rows.
+                f"    ifNull((SELECT count() FROM {source_ref}{where_clause}), 0) AS cnt,\n"
                 f"    if(cnt = 0, 0, intDiv({required_rows} + cnt - 1, cnt)) AS repeats,\n"
                 "    if(repeats = 0, 1, repeats) AS repeats_not_equal_zero\n"
                 "SELECT *\n"
@@ -2475,9 +2471,6 @@ class _ClickHouseRuntimeClient:
         if n_rows is not None and n_rows <= 0:
             return _error_query_metrics()
         safe_offset = max(0, offset)
-        total_rows_in_source_table: Optional[int] = None
-        if n_rows is not None and strictly_adhere_n_rows:
-            total_rows_in_source_table = self.count_rows(source_database, source_table)
 
         source_select_query = self._build_source_select_for_insert(
             source_database=source_database,
@@ -2485,7 +2478,6 @@ class _ClickHouseRuntimeClient:
             n_rows=n_rows,
             offset=safe_offset,
             strictly_adhere_n_rows=strictly_adhere_n_rows,
-            total_rows_in_source_table=total_rows_in_source_table,
             tested_cols=tested_cols,
             deterministic_order_by=deterministic_order_by,
         )
@@ -2583,6 +2575,7 @@ def _measure_insert(
     read_bytes_per_second_entries: list[float] = []
     written_rows_entries: list[float] = []
     max_retries, initial_sleep_sec, retry_sleep_increment = client.get_retry_policy()
+    expected_rows_per_measurement = float(n_rows) if n_rows is not None else None
 
     for measurement_id in range(max(1, n_measurements)):
         offset = max(0, measurement_id * n_rows) if n_rows is not None else 0
@@ -2603,9 +2596,33 @@ def _measure_insert(
                 deterministic_order_by=deterministic_order_by,
             )
             if not _is_error_query_metrics(query_metrics):
-                break
+                # Гарантируем "ровно n_rows" на каждой insert-итерации, если лимит задан.
+                if expected_rows_per_measurement is not None:
+                    inserted_rows = float(query_metrics.get("written_rows", -1.0))
+                    if inserted_rows + 1e-9 < expected_rows_per_measurement:
+                        logger.warning(
+                            "INSERT вставил меньше требуемого объёма "
+                            "(table=%s.%s, measurement=%d, expected_rows=%d, inserted_rows=%.0f). "
+                            "Считаем итерацию неуспешной и повторяем.",
+                            target_database,
+                            target_table,
+                            measurement_id,
+                            int(expected_rows_per_measurement),
+                            inserted_rows,
+                        )
+                        query_metrics = _error_query_metrics()
+                    else:
+                        break
+                else:
+                    break
 
             if max_retries != -1 and attempt_n >= max_retries:
+                if expected_rows_per_measurement is not None:
+                    raise RuntimeError(
+                        "Не удалось вставить требуемый объём строк "
+                        f"для {target_database}.{target_table} (measurement={measurement_id}, "
+                        f"expected_rows={int(expected_rows_per_measurement)}, retries={max_retries})"
+                    )
                 logger.error(
                     "Не удалось получить корректные insert-метрики для %s.%s (measurement=%d): "
                     "достигнут лимит retries=%d",
