@@ -25,21 +25,21 @@
       "test_database": "benchmark_tmp",
       "insert_operations_count": 10,
       "sequential_top_n_limits": {
-        "order_by": 2,
-        "types": 2,
-        "codecs": 2,
-        "indexes": 2,
-        "final_validation": 2
+        "order_by": 5,
+        "types": 5,
+        "codecs": 5,
+        "indexes": 5,
+        "final_validation": 5
       },
       "max_winners_per_parent_limits": {
-        "types": 2,
-        "codecs": 2,
-        "indexes": 2
+        "types": 5,
+        "codecs": 5,
+        "indexes": 5
       },
       "scoring": {
         "mode": "expression",
         "expression": "pow(median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.75) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.25)",
-        "on_error_score": -1.0,
+        "on_error_score": -1,
         "by_stage": {
           "source_baseline": {
             "mode": "expression",
@@ -47,57 +47,37 @@
           },
           "order_by": {
             "mode": "expression",
-            "expression": "pow(select_read_bytes_speedup, 0.75) * pow(compression_coef, 0.25)",
-            "variables": {
-              "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0)",
-              "compression_coef": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
-            }
+            "expression": "pow(median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.75) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.25)"
           },
           "types": {
             "mode": "expression",
-            "expression": "pow(select_read_bytes_speedup, 0.75) * pow(compression_coef, 0.25)",
-            "variables": {
-              "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0)",
-              "compression_coef": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
-            }
+            "expression": "pow(median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.75) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.25)"
           },
           "codecs": {
             "mode": "expression",
-            "expression": "pow(select_read_bytes_speedup, 0.75) * pow(compression_coef, 0.25)",
-            "variables": {
-              "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0)",
-              "compression_coef": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
-            }
+            "expression": "pow(median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.75) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.25)"
+          },
+          "index_granularity": {
+            "mode": "expression",
+            "expression": "pow(median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.75) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.25)"
           },
           "indexes": {
             "mode": "expression",
-            "expression": "pow(select_read_bytes_speedup, 0.75) * pow(compression_coef, 0.25)",
-            "variables": {
-              "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0)",
-              "compression_coef": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
-            }
+            "expression": "pow(median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.75) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.25)"
           },
           "final_validation": {
             "mode": "expression",
-            "expression": "pow(select_read_bytes_speedup, 0.75) * pow(compression_coef, 0.25)",
-            "variables": {
-              "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0)",
-              "compression_coef": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
-            }
+            "expression": "pow(median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.75) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.25)"
           }
-        },
-        "variables": {
-          "select_read_bytes_speedup": "median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0)",
-          "compression_coef": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
         }
       },
       "max_benchmarks_limits": {
-        "order_by": 6,
-        "types": 6,
-        "codecs": 6,
-        "indexes": 6,
-        "final_validation": 6,
-        "sequential": 3
+        "order_by": 1000,
+        "types": 1000,
+        "codecs": 1000,
+        "indexes": 1000,
+        "final_validation": 1000,
+        "sequential": 1000
       },
       "source_insert_rows_per_operation_limit": 100000,
       "source_insert_rows_per_operation_limits": {
@@ -162,11 +142,11 @@
             "logger"
           ],
           "max_benchmarks_limits": {
-            "order_by": 10,
-            "types": 8,
-            "codecs": 40,
-            "indexes": 240,
-            "final_validation": 10
+            "order_by": 1000,
+            "types": 1000,
+            "codecs": 1000,
+            "indexes": 1000,
+            "final_validation": 1000
           },
           "queries": {
             "mode": "manual",
@@ -512,11 +492,11 @@
             "attempt"
           ],
           "max_benchmarks_limits": {
-            "order_by": 10,
-            "types": 8,
-            "codecs": 40,
-            "indexes": 240,
-            "final_validation": 10
+            "order_by": 1000,
+            "types": 1000,
+            "codecs": 1000,
+            "indexes": 1000,
+            "final_validation": 1000
           },
           "queries": {
             "mode": "manual",
@@ -868,11 +848,11 @@
             "run"
           ],
           "max_benchmarks_limits": {
-            "order_by": 10,
-            "types": 8,
-            "codecs": 50,
-            "indexes": 280,
-            "final_validation": 10
+            "order_by": 1000,
+            "types": 1000,
+            "codecs": 1000,
+            "indexes": 1000,
+            "final_validation": 1000
           },
           "queries": {
             "mode": "manual",
@@ -1192,11 +1172,11 @@
             "host_name"
           ],
           "max_benchmarks_limits": {
-            "order_by": 10,
-            "types": 10,
-            "codecs": 40,
-            "indexes": 200,
-            "final_validation": 10
+            "order_by": 1000,
+            "types": 1000,
+            "codecs": 1000,
+            "indexes": 1000,
+            "final_validation": 1000
           },
           "queries": {
             "mode": "manual",
@@ -1554,11 +1534,11 @@
             "table_name"
           ],
           "max_benchmarks_limits": {
-            "order_by": 10,
-            "types": 10,
-            "codecs": 40,
-            "indexes": 220,
-            "final_validation": 10
+            "order_by": 1000,
+            "types": 1000,
+            "codecs": 1000,
+            "indexes": 1000,
+            "final_validation": 1000
           },
           "queries": {
             "mode": "manual",
@@ -1951,11 +1931,11 @@
             "table_name"
           ],
           "max_benchmarks_limits": {
-            "order_by": 10,
-            "types": 10,
-            "codecs": 40,
-            "indexes": 220,
-            "final_validation": 10
+            "order_by": 1000,
+            "types": 1000,
+            "codecs": 1000,
+            "indexes": 1000,
+            "final_validation": 1000
           },
           "queries": {
             "mode": "manual",
@@ -2283,11 +2263,11 @@
             "level"
           ],
           "max_benchmarks_limits": {
-            "order_by": 12,
-            "types": 20,
-            "codecs": 60,
-            "indexes": 320,
-            "final_validation": 12
+            "order_by": 1000,
+            "types": 1000,
+            "codecs": 1000,
+            "indexes": 1000,
+            "final_validation": 1000
           },
           "queries": {
             "mode": "manual",
@@ -2785,11 +2765,11 @@
             "ext_ClusterEventType"
           ],
           "max_benchmarks_limits": {
-            "order_by": 12,
-            "types": 20,
-            "codecs": 60,
-            "indexes": 320,
-            "final_validation": 12
+            "order_by": 1000,
+            "types": 1000,
+            "codecs": 1000,
+            "indexes": 1000,
+            "final_validation": 1000
           },
           "queries": {
             "mode": "manual",
@@ -3268,11 +3248,11 @@
             "container_name"
           ],
           "max_benchmarks_limits": {
-            "order_by": 10,
-            "types": 14,
-            "codecs": 50,
-            "indexes": 260,
-            "final_validation": 10
+            "order_by": 1000,
+            "types": 1000,
+            "codecs": 1000,
+            "indexes": 1000,
+            "final_validation": 1000
           },
           "queries": {
             "mode": "manual",
