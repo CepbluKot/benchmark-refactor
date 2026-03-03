@@ -102,6 +102,35 @@ class ModelsValidationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             QueriesConfig(mode="manual")
 
+    def test_queries_validates_auto_like_token_length_bounds(self) -> None:
+        """Проверяет границы min/max длины токена data-aware LIKE генератора."""
+        with self.assertRaises(ValidationError):
+            QueriesConfig(
+                mode="auto",
+                auto_like_on_measured_columns=True,
+                auto_like_min_token_length=10,
+                auto_like_max_token_length=5,
+            )
+
+    def test_queries_validates_auto_select_limit(self) -> None:
+        """Проверяет, что auto_select_limit должен быть положительным."""
+        with self.assertRaises(ValidationError):
+            QueriesConfig(
+                mode="auto",
+                auto_select_limit=0,
+            )
+
+    def test_queries_rejects_removed_auto_like_max_columns(self) -> None:
+        """Проверяет, что удаленный auto_like_max_columns больше не поддерживается."""
+        with self.assertRaises(ValidationError):
+            QueriesConfig.model_validate(
+                {
+                    "mode": "auto",
+                    "auto_like_on_measured_columns": True,
+                    "auto_like_max_columns": 1,
+                }
+            )
+
     def test_test_query_rejects_removed_weight_field(self) -> None:
         """Проверяет, что `weight` больше не поддерживается в test_queries[]."""
         with self.assertRaises(ValidationError):

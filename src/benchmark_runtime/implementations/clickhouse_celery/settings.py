@@ -27,6 +27,11 @@ class ClickHouseCeleryWorkerSettings(BaseSettings):
         validation_alias="CLICKHOUSE_STREAM_SLOT_ACQUIRE_TIMEOUT_SEC",
         gt=0,
     )
+    clickhouse_stream_copy_disable_after_failures: int = Field(
+        default=5,
+        validation_alias="CLICKHOUSE_STREAM_COPY_DISABLE_AFTER_FAILURES",
+        gt=0,
+    )
     max_copy_n_retries: int = Field(
         default=100,
         validation_alias="MAX_COPY_N_RETRIES",

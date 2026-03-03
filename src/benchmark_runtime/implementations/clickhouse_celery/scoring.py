@@ -468,6 +468,7 @@ _ALLOWED_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "sqrt": math.sqrt,
     "log": math.log,
     "ln": math.log,
+    "exp": math.exp,
     "pow": math.pow,
 }
 

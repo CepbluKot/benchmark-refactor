@@ -38,37 +38,85 @@
       },
       "scoring": {
         "mode": "expression",
-        "expression": "pow(median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.75) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.25)",
+        "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
         "on_error_score": -1,
         "by_stage": {
           "source_baseline": {
             "mode": "expression",
-            "expression": "1.0"
+            "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+            "variables": {
+              "baseline_median_read_bytes": "medians.source_select_read_bytes",
+              "test_median_read_bytes": "medians.tested_select_read_bytes",
+              "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+              "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+            }
           },
           "order_by": {
             "mode": "expression",
-            "expression": "pow(median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.75) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.25)"
+            "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+            "variables": {
+              "baseline_median_read_bytes": "medians.source_select_read_bytes",
+              "test_median_read_bytes": "medians.tested_select_read_bytes",
+              "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+              "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+            }
           },
           "types": {
             "mode": "expression",
-            "expression": "pow(median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.75) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.25)"
+            "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+            "variables": {
+              "baseline_median_read_bytes": "medians.source_select_read_bytes",
+              "test_median_read_bytes": "medians.tested_select_read_bytes",
+              "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+              "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+            }
           },
           "codecs": {
             "mode": "expression",
-            "expression": "pow(median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.75) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.25)"
+            "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+            "variables": {
+              "baseline_median_read_bytes": "medians.source_select_read_bytes",
+              "test_median_read_bytes": "medians.tested_select_read_bytes",
+              "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+              "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+            }
           },
           "index_granularity": {
             "mode": "expression",
-            "expression": "pow(median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.75) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.25)"
+            "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+            "variables": {
+              "baseline_median_read_bytes": "medians.source_select_read_bytes",
+              "test_median_read_bytes": "medians.tested_select_read_bytes",
+              "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+              "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+            }
           },
           "indexes": {
             "mode": "expression",
-            "expression": "pow(median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.75) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.25)"
+            "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+            "variables": {
+              "baseline_median_read_bytes": "medians.source_select_read_bytes",
+              "test_median_read_bytes": "medians.tested_select_read_bytes",
+              "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+              "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+            }
           },
           "final_validation": {
             "mode": "expression",
-            "expression": "pow(median(at(at(select_time_speedup_by_query, 0, None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.75) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.25)"
+            "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+            "variables": {
+              "baseline_median_read_bytes": "medians.source_select_read_bytes",
+              "test_median_read_bytes": "medians.tested_select_read_bytes",
+              "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+              "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+            }
           }
+        },
+        "variables": {
+          "baseline_median_read_bytes": "medians.source_select_read_bytes",
+          "test_median_read_bytes": "medians.tested_select_read_bytes",
+          "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+          "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
         }
       },
       "max_benchmarks_limits": {
@@ -94,7 +142,7 @@
       },
       "global_rules": {
         "order_by_rules": {
-          "auto_generate_candidates": true
+          "auto_generate_candidates": false
         },
         "column_rules": [],
         "index_rules": [
@@ -104,12 +152,16 @@
               {
                 "type": "ngrambf_v1(3, 32768, 2, 0)",
                 "granularity": [
-                  1,
-                  2
+                  4,
+                  8,
+                  16
                 ],
                 "index_granularity_values": [
                   8192,
-                  16384
+                  16384,
+                  32768,
+                  65536,
+                  131072
                 ]
               }
             ]
@@ -120,12 +172,16 @@
               {
                 "type": "ngrambf_v1(3, 32768, 2, 0)",
                 "granularity": [
-                  1,
-                  2
+                  4,
+                  8,
+                  16
                 ],
                 "index_granularity_values": [
                   8192,
-                  16384
+                  16384,
+                  32768,
+                  65536,
+                  131072
                 ]
               }
             ]
@@ -149,37 +205,12 @@
             "final_validation": 1000
           },
           "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_adqm_dec25_message_error",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%error%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_adqm_dec25_message_long_nomatch",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%very ooooooong str %'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_adqm_dec25_log_level_error",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_level` = 'ERROR'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_adqm_dec25_logger",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `logger` LIKE '%adqm%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              }
-            ]
+            "mode": "auto",
+            "auto_like_on_measured_columns": true,
+            "auto_like_sample_rows_per_column": 20,
+            "auto_like_min_token_length": 3,
+            "auto_like_max_token_length": 24,
+            "auto_select_limit": 10
           },
           "rules": {
             "column_rules": [],
@@ -223,12 +254,16 @@
                   {
                     "type": "set(8)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -240,12 +275,16 @@
                   {
                     "type": "set(200)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -257,12 +296,16 @@
                   {
                     "type": "bloom_filter(0.01)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -274,12 +317,16 @@
                   {
                     "type": "bloom_filter(0.01)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -290,9 +337,17 @@
                 "indexes": [
                   {
                     "type": "ngrambf_v1(3, 1024, 3, 0)",
-                    "granularity": 1,
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ],
                     "index_granularity_values": [
-                      8192
+                      8192,
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -318,37 +373,12 @@
             "final_validation": 1000
           },
           "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_airflow_dec25_message_error",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `airflow_message` LIKE '%error%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_airflow_dec25_message_long_nomatch",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `airflow_message` LIKE '%very ooooooong str %'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_airflow_dec25_log_level_error",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `airflow_log_level` = 'ERROR'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_airflow_dec25_task",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `task` LIKE '%dag.task%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              }
-            ]
+            "mode": "auto",
+            "auto_like_on_measured_columns": true,
+            "auto_like_sample_rows_per_column": 20,
+            "auto_like_min_token_length": 3,
+            "auto_like_max_token_length": 24,
+            "auto_select_limit": 10
           },
           "rules": {
             "column_rules": [],
@@ -399,12 +429,16 @@
                   {
                     "type": "set(8)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -416,12 +450,16 @@
                   {
                     "type": "bloom_filter(0.01)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -433,12 +471,16 @@
                   {
                     "type": "set(200)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -450,12 +492,16 @@
                   {
                     "type": "bloom_filter(0.01)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -466,9 +512,17 @@
                 "indexes": [
                   {
                     "type": "ngrambf_v1(3, 1024, 3, 0)",
-                    "granularity": 1,
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ],
                     "index_granularity_values": [
-                      8192
+                      8192,
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -493,37 +547,12 @@
             "final_validation": 1000
           },
           "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_dbt_dec25_msg_error",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `msg` LIKE '%error%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_dbt_dec25_msg_long_nomatch",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `msg` LIKE '%very ooooooong str %'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_dbt_dec25_dbt_msg_error",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND ifNull(`dbt_msg`, '') LIKE '%error%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_dbt_dec25_log_level",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_level` = 'ERROR'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              }
-            ]
+            "mode": "auto",
+            "auto_like_on_measured_columns": true,
+            "auto_like_sample_rows_per_column": 20,
+            "auto_like_min_token_length": 3,
+            "auto_like_max_token_length": 24,
+            "auto_select_limit": 10
           },
           "rules": {
             "column_rules": [],
@@ -581,12 +610,16 @@
                   {
                     "type": "set(8)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -598,12 +631,16 @@
                   {
                     "type": "set(50)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -615,12 +652,16 @@
                   {
                     "type": "set(100)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -632,12 +673,16 @@
                   {
                     "type": "bloom_filter(0.01)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -649,12 +694,16 @@
                   {
                     "type": "bloom_filter(0.01)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -666,12 +715,16 @@
                   {
                     "type": "set(50)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -683,12 +736,16 @@
                   {
                     "type": "bloom_filter(0.01)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -699,9 +756,17 @@
                 "indexes": [
                   {
                     "type": "ngrambf_v1(3, 1024, 3, 0)",
-                    "granularity": 1,
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ],
                     "index_granularity_values": [
-                      8192
+                      8192,
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -726,37 +791,12 @@
             "final_validation": 1000
           },
           "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_general_dec25_flex_msg_error",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%error%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_general_dec25_flex_msg_long_nomatch",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%very ooooooong str %'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_general_dec25_flex_logger_core",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_logger` LIKE '%core%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_general_dec25_log_file_path_log",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_file_path` LIKE '%.log%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              }
-            ]
+            "mode": "auto",
+            "auto_like_on_measured_columns": true,
+            "auto_like_sample_rows_per_column": 20,
+            "auto_like_min_token_length": 3,
+            "auto_like_max_token_length": 24,
+            "auto_select_limit": 10
           },
           "rules": {
             "codec_rules": [
@@ -800,9 +840,17 @@
                 "indexes": [
                   {
                     "type": "ngrambf_v1(3, 1024, 3, 0)",
-                    "granularity": 1,
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ],
                     "index_granularity_values": [
-                      8192
+                      8192,
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -814,12 +862,16 @@
                   {
                     "type": "set(8)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -831,12 +883,16 @@
                   {
                     "type": "bloom_filter(0.01)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -861,37 +917,12 @@
             "final_validation": 1000
           },
           "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_loaders_dec25_flex_msg_error",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%error%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_loaders_dec25_flex_msg_long_nomatch",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%very ooooooong str %'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_loaders_dec25_log_file_path_log",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_file_path` LIKE '%.log%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_loaders_dec25_log_file_path_json",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_file_path` LIKE '%.json%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              }
-            ]
+            "mode": "auto",
+            "auto_like_on_measured_columns": true,
+            "auto_like_sample_rows_per_column": 20,
+            "auto_like_min_token_length": 3,
+            "auto_like_max_token_length": 24,
+            "auto_select_limit": 10
           },
           "rules": {
             "column_rules": [
@@ -963,9 +994,17 @@
                 "indexes": [
                   {
                     "type": "ngrambf_v1(3, 1024, 3, 0)",
-                    "granularity": 1,
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ],
                     "index_granularity_values": [
-                      8192
+                      8192,
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -977,12 +1016,16 @@
                   {
                     "type": "set(8)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -994,12 +1037,16 @@
                   {
                     "type": "bloom_filter(0.01)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1023,37 +1070,12 @@
             "final_validation": 1000
           },
           "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_spark_dec25_flex_msg_error",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%error%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_spark_dec25_flex_msg_long_nomatch",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `flex_msg` LIKE '%very ooooooong str %'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_spark_dec25_log_file_path_log",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `log_file_path` LIKE '%.log%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_spark_dec25_host_name_node",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `host_name` LIKE '%node%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              }
-            ]
+            "mode": "auto",
+            "auto_like_on_measured_columns": true,
+            "auto_like_sample_rows_per_column": 20,
+            "auto_like_min_token_length": 3,
+            "auto_like_max_token_length": 24,
+            "auto_select_limit": 10
           },
           "rules": {
             "codec_rules": [
@@ -1087,9 +1109,17 @@
                 "indexes": [
                   {
                     "type": "ngrambf_v1(3, 1024, 3, 0)",
-                    "granularity": 1,
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ],
                     "index_granularity_values": [
-                      8192
+                      8192,
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1101,12 +1131,16 @@
                   {
                     "type": "bloom_filter(0.01)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1132,37 +1166,12 @@
             "final_validation": 1000
           },
           "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_audit_dec25_rsp_msg_error",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `responseStatus_message` LIKE '%error%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_audit_dec25_rsp_msg_long_nomatch",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `responseStatus_message` LIKE '%very ooooooong str %'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_audit_dec25_request_uri_api",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND requestURI LIKE '%/api/%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_audit_dec25_verb_main",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND verb IN ('GET', 'POST', 'DELETE', 'PATCH', 'LIST')",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              }
-            ]
+            "mode": "auto",
+            "auto_like_on_measured_columns": true,
+            "auto_like_sample_rows_per_column": 20,
+            "auto_like_min_token_length": 3,
+            "auto_like_max_token_length": 24,
+            "auto_select_limit": 10
           },
           "rules": {
             "column_rules": [
@@ -1247,7 +1256,11 @@
                 "indexes": [
                   {
                     "type": "set(20)",
-                    "granularity": 1
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ]
                   }
                 ]
               },
@@ -1257,7 +1270,11 @@
                 "indexes": [
                   {
                     "type": "set(20)",
-                    "granularity": 1
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ]
                   }
                 ]
               },
@@ -1267,7 +1284,11 @@
                 "indexes": [
                   {
                     "type": "set(100)",
-                    "granularity": 1
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ]
                   }
                 ]
               },
@@ -1277,7 +1298,11 @@
                 "indexes": [
                   {
                     "type": "set(100)",
-                    "granularity": 1
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ]
                   }
                 ]
               },
@@ -1287,7 +1312,11 @@
                 "indexes": [
                   {
                     "type": "set(8)",
-                    "granularity": 1
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ]
                   }
                 ]
               },
@@ -1297,7 +1326,11 @@
                 "indexes": [
                   {
                     "type": "set(8)",
-                    "granularity": 1
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ]
                   }
                 ]
               },
@@ -1307,7 +1340,11 @@
                 "indexes": [
                   {
                     "type": "set(8)",
-                    "granularity": 1
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ]
                   }
                 ]
               },
@@ -1317,7 +1354,11 @@
                 "indexes": [
                   {
                     "type": "set(8)",
-                    "granularity": 1
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ]
                   }
                 ]
               }
@@ -1342,37 +1383,12 @@
             "final_validation": 1000
           },
           "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_events_dec25_message_error",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%error%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_events_dec25_message_long_nomatch",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%very ooooooong str %'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_events_dec25_event_type",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND ext_ClusterEventType IN ('Normal', 'Warning')",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_events_dec25_cluster_name",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND ext_ClusterName LIKE '%prod%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              }
-            ]
+            "mode": "auto",
+            "auto_like_on_measured_columns": true,
+            "auto_like_sample_rows_per_column": 20,
+            "auto_like_min_token_length": 3,
+            "auto_like_max_token_length": 24,
+            "auto_select_limit": 10
           },
           "rules": {
             "column_rules": [
@@ -1456,9 +1472,17 @@
                 "indexes": [
                   {
                     "type": "ngrambf_v1(3, 1024, 3, 0)",
-                    "granularity": 1,
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ],
                     "index_granularity_values": [
-                      8192
+                      8192,
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1470,12 +1494,16 @@
                   {
                     "type": "set(8)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1487,12 +1515,16 @@
                   {
                     "type": "set(8)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1504,12 +1536,16 @@
                   {
                     "type": "set(50)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1521,12 +1557,16 @@
                   {
                     "type": "set(50)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1538,12 +1578,16 @@
                   {
                     "type": "set(20)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1555,12 +1599,16 @@
                   {
                     "type": "set(20)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1572,12 +1620,16 @@
                   {
                     "type": "set(50)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1602,37 +1654,12 @@
             "final_validation": 1000
           },
           "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_k8s_nova_dec25_message_error",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%error%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_k8s_nova_dec25_message_long_nomatch",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `message` LIKE '%very ooooooong str %'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_k8s_nova_dec25_namespace",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `namespace` IN ('default', 'kube-system', 'monitoring')",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              },
-              {
-                "query_id": "q_k8s_nova_dec25_workspace",
-                "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND `workspace` LIKE '%kube%'",
-                "cache_mode": "cold",
-                "select_operations_count": 3,
-                "warmup_queries": []
-              }
-            ]
+            "mode": "auto",
+            "auto_like_on_measured_columns": true,
+            "auto_like_sample_rows_per_column": 20,
+            "auto_like_min_token_length": 3,
+            "auto_like_max_token_length": 24,
+            "auto_select_limit": 10
           },
           "rules": {
             "column_rules": [
@@ -1708,12 +1735,16 @@
                   {
                     "type": "set(100)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1725,12 +1756,16 @@
                   {
                     "type": "set(100)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1742,12 +1777,16 @@
                   {
                     "type": "set(50)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1759,12 +1798,16 @@
                   {
                     "type": "set(50)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1776,12 +1819,16 @@
                   {
                     "type": "set(200)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1793,12 +1840,16 @@
                   {
                     "type": "set(200)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1810,12 +1861,16 @@
                   {
                     "type": "bloom_filter(0.01)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1827,12 +1882,16 @@
                   {
                     "type": "bloom_filter(0.01)",
                     "granularity": [
-                      1,
-                      2
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192,
-                      16384
+                      16384,
+                      32768,
+                      65536,
+                      131072
                     ]
                   }
                 ]
@@ -1842,16 +1901,12 @@
         }
       ],
       "queries": {
-        "mode": "manual",
-        "test_queries": [
-          {
-            "query_id": "q_fallback_like_error",
-            "query": "SELECT count() FROM {table} WHERE `timestamp` >= toDateTime64('2025-12-01 00:00:00', 6) AND `timestamp` < toDateTime64('2026-01-01 00:00:00', 6) AND toString(tuple(*)) LIKE '%error%'",
-            "cache_mode": "cold",
-            "select_operations_count": 3,
-            "warmup_queries": []
-          }
-        ]
+        "mode": "auto",
+        "auto_like_on_measured_columns": true,
+        "auto_like_sample_rows_per_column": 20,
+        "auto_like_min_token_length": 3,
+        "auto_like_max_token_length": 24,
+        "auto_select_limit": 10
       }
     }
   ]

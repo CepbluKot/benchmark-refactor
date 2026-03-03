@@ -908,6 +908,18 @@ def _build_score_context_medians(
 ) -> Dict[str, Any]:
     """Собирает медианы всех ключевых метрик для score_calculation_json."""
 
+    def _collect_values(entries: Sequence[Dict[str, Any]], key: str) -> list[Any]:
+        values: list[Any] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            raw_values = entry.get(key, [])
+            if isinstance(raw_values, Sequence) and not isinstance(
+                raw_values, (str, bytes, bytearray)
+            ):
+                values.extend(list(raw_values))
+        return values
+
     def _query_id(entry: Dict[str, Any], fallback_index: int) -> str:
         raw_id = str(entry.get("query_id", "")).strip()
         if raw_id:
@@ -929,6 +941,32 @@ def _build_score_context_medians(
     source_by_query_id = _entry_map(source_per_query)
     tested_by_query_id = _entry_map(tested_per_query)
     speedup_by_query_id = _entry_map(speedup_per_query)
+
+    source_select_read_bytes = _median_from_measurements_or_percentiles(
+        _collect_values(source_per_query, "read_bytes_measurements"),
+        _collect_values(source_per_query, "read_bytes_percentiles"),
+    )
+    tested_select_read_bytes = _median_from_measurements_or_percentiles(
+        _collect_values(tested_per_query, "read_bytes_measurements"),
+        _collect_values(tested_per_query, "read_bytes_percentiles"),
+    )
+    select_read_bytes_speedup: Optional[float] = None
+    try:
+        source_rb = float(source_select_read_bytes) if source_select_read_bytes is not None else None
+        tested_rb = float(tested_select_read_bytes) if tested_select_read_bytes is not None else None
+        if (
+            source_rb is not None
+            and tested_rb is not None
+            and math.isfinite(source_rb)
+            and math.isfinite(tested_rb)
+            and source_rb > 0
+            and tested_rb > 0
+        ):
+            select_read_bytes_speedup = source_rb / tested_rb
+            if not math.isfinite(select_read_bytes_speedup) or select_read_bytes_speedup <= 0:
+                select_read_bytes_speedup = None
+    except Exception:
+        select_read_bytes_speedup = None
 
     ordered_query_ids: list[str] = []
     seen_query_ids: set[str] = set()
@@ -1065,14 +1103,27 @@ def _build_score_context_medians(
             if source_select_bytes_per_second_median is not None
             else None
         ),
+        "source_select_read_bytes": source_select_read_bytes,
+        "source_select_read_bytes_readable": (
+            make_readable_bytes(source_select_read_bytes)
+            if source_select_read_bytes is not None
+            else None
+        ),
         "tested_select_bytes_per_second": tested_select_bytes_per_second_median,
         "tested_select_bytes_per_second_readable": (
             make_readable_bytes(tested_select_bytes_per_second_median)
             if tested_select_bytes_per_second_median is not None
             else None
         ),
+        "tested_select_read_bytes": tested_select_read_bytes,
+        "tested_select_read_bytes_readable": (
+            make_readable_bytes(tested_select_read_bytes)
+            if tested_select_read_bytes is not None
+            else None
+        ),
         "insert_time_speedup": _median_positive_finite(insert_time_speedup),
         "select_time_speedup": _median_positive_finite(select_time_speedup),
+        "select_read_bytes_speedup": select_read_bytes_speedup,
         "per_query": per_query_medians,
     }
 
@@ -1354,6 +1405,7 @@ class QueryPayload(BaseModel):
 
     query_id: Optional[str] = None
     query: str
+    query_type: Literal["hit", "miss", "manual", "generic"] = "generic"
     cache_mode: Literal["warm", "cold"] = "warm"
     select_operations_count: Optional[int] = Field(default=None, gt=0)
     warmup_queries: List[str] = Field(default_factory=list)
@@ -1541,6 +1593,11 @@ class _ClickHouseRuntimeClient:
         self._stream_client_checked = False
         self._stream_insert_client: Any = None
         self._stream_insert_client_checked = False
+        self._stream_copy_disabled = False
+        self._stream_copy_failure_count = 0
+        self._stream_copy_disable_after_failures = (
+            worker_settings.clickhouse_stream_copy_disable_after_failures
+        )
         self._max_concurrent_streams_per_process = (
             worker_settings.clickhouse_manager_max_concurrent_streams_per_process
         )
@@ -2389,6 +2446,8 @@ class _ClickHouseRuntimeClient:
     ) -> str:
         """Строит SELECT-часть для insert benchmark (обычный режим или strict-fill)."""
         source_ref = f"`{source_database}`.`{source_table}`"
+        source_alias = "src"
+        projection = f"{source_alias}.*"
         filter_columns = [str(col).strip() for col in (tested_cols or []) if str(col).strip()]
         where_clause = ""
         if filter_columns:
@@ -2402,7 +2461,11 @@ class _ClickHouseRuntimeClient:
             order_by_clause = f" ORDER BY {deterministic_order_by}"
 
         if n_rows is None:
-            return f"SELECT * FROM {source_ref}{where_clause}{order_by_clause}"
+            return (
+                f"SELECT {projection} "
+                f"FROM {source_ref} AS {source_alias}"
+                f"{where_clause}{order_by_clause}"
+            )
 
         if strictly_adhere_n_rows:
             required_rows = offset + n_rows
@@ -2413,17 +2476,17 @@ class _ClickHouseRuntimeClient:
                 f"    ifNull((SELECT count() FROM {source_ref}{where_clause}), 0) AS cnt,\n"
                 f"    if(cnt = 0, 0, intDiv({required_rows} + cnt - 1, cnt)) AS repeats,\n"
                 "    if(repeats = 0, 1, repeats) AS repeats_not_equal_zero\n"
-                "SELECT *\n"
-                "FROM (\n"
-                f"    SELECT * FROM {source_ref}, numbers(repeats_not_equal_zero) AS n\n"
+                f"SELECT {projection}\n"
+                f"FROM {source_ref} AS {source_alias}\n"
+                "CROSS JOIN numbers(repeats_not_equal_zero) AS n\n"
                 f"{where_clause}\n"
                 f"{order_by_clause}\n"
-                f"    LIMIT {n_rows} OFFSET {offset}\n"
-                ")"
+                f"LIMIT {n_rows} OFFSET {offset}"
             )
 
         return (
-            f"SELECT * FROM {source_ref}{where_clause}{order_by_clause} "
+            f"SELECT {projection} FROM {source_ref} AS {source_alias}"
+            f"{where_clause}{order_by_clause} "
             f"LIMIT {n_rows} OFFSET {offset}"
         )
 
@@ -2507,7 +2570,8 @@ class _ClickHouseRuntimeClient:
             tested_cols=tested_cols,
             deterministic_order_by=deterministic_order_by,
         )
-        stream_client = self._get_stream_client()
+        stream_copy_disabled = bool(getattr(self, "_stream_copy_disabled", False))
+        stream_client = None if stream_copy_disabled else self._get_stream_client()
         if stream_client is not None:
             insert_client = self._get_stream_insert_client()
             if insert_client is None:
@@ -2533,11 +2597,32 @@ class _ClickHouseRuntimeClient:
                 )
                 summary_metrics = self._extract_stream_query_summary(query_summary)
                 if summary_metrics is not None:
+                    self._stream_copy_failure_count = 0
                     return summary_metrics
                 logger.warning("Streaming insert выполнен, но summary недоступен")
                 return _error_query_metrics()
             except Exception:
-                logger.exception("Streaming insert не удался: переключаемся на fallback INSERT ... SELECT")
+                failure_count = int(getattr(self, "_stream_copy_failure_count", 0)) + 1
+                self._stream_copy_failure_count = failure_count
+                disable_after_failures = int(
+                    getattr(self, "_stream_copy_disable_after_failures", 1)
+                )
+                if failure_count >= disable_after_failures:
+                    self._stream_copy_disabled = True
+                    logger.exception(
+                        "Streaming insert не удался (failures=%d/%d): переключаемся на "
+                        "fallback INSERT ... SELECT и отключаем stream copy "
+                        "до конца текущей worker-задачи",
+                        failure_count,
+                        disable_after_failures,
+                    )
+                else:
+                    logger.exception(
+                        "Streaming insert не удался (failures=%d/%d): переключаемся на "
+                        "fallback INSERT ... SELECT, stream copy остаётся включён",
+                        failure_count,
+                        disable_after_failures,
+                    )
             finally:
                 if source_stream is not None:
                     close_method = getattr(source_stream, "close", None)
@@ -2862,6 +2947,7 @@ def _measure_select_queries(
                 "query_index": query_index,
                 "query_id": query_id,
                 "query": query,
+                "query_type": query_payload.query_type,
                 "cache_mode": query_cache_mode,
                 "select_operations_count": query_measurements_count,
                 "warmup_queries": query_warmup_queries,
@@ -2960,6 +3046,7 @@ def _build_select_per_query_metrics(
                 "query_index": query_index,
                 "query_id": query_id,
                 "query": query,
+                "query_type": str(raw_entry.get("query_type") or "generic"),
                 "cache_mode": str(raw_entry.get("cache_mode", "warm")),
                 "select_operations_count": int(
                     raw_entry.get(
@@ -3007,6 +3094,7 @@ def _extract_source_select_per_query_metrics(
             query_index = int(normalized_entry.get("query_index", fallback_index))
             normalized_entry.setdefault("query_index", query_index)
             normalized_entry.setdefault("query_id", f"query_{query_index}")
+            normalized_entry.setdefault("query_type", "generic")
             normalized_entries.append(normalized_entry)
         return normalized_entries
 
@@ -3066,6 +3154,7 @@ def _extract_source_select_per_query_metrics(
             "query_index": 0,
             "query_id": "query_0",
             "query": str(legacy_query or ""),
+            "query_type": "generic",
             "cache_mode": "warm",
             "select_operations_count": len(legacy_elapsed_ms_measurements),
             "warmup_queries": [],
@@ -3145,6 +3234,11 @@ def _compute_select_time_speedup_by_query(
                 "query_index": query_index,
                 "query_id": query_id,
                 "query": tested_entry.get("query"),
+                "query_type": (
+                    tested_entry.get("query_type")
+                    or (source_entry.get("query_type") if source_entry is not None else None)
+                    or "generic"
+                ),
                 "source_query": source_entry.get("query") if source_entry is not None else None,
                 "elapsed_ms_percentiles_speed_up_coefs": speed_up_coefs,
                 "read_bytes_percentiles_speed_up_coefs": read_bytes_speed_up_coefs,
@@ -3171,6 +3265,7 @@ def _extract_read_bytes_speedup_by_query(
                 "query_index": query_index,
                 "query_id": query_id,
                 "query": entry.get("query"),
+                "query_type": entry.get("query_type") or "generic",
                 "source_query": entry.get("source_query"),
                 "read_bytes_percentiles_speed_up_coefs": read_bytes_speedup,
             }
@@ -3264,6 +3359,7 @@ def _build_query_plan_signature(test_queries: Sequence[QueryPayload]) -> str:
             {
                 "query_id": str(query.query_id or "").strip(),
                 "query": str(query.query or "").strip(),
+                "query_type": str(query.query_type or "").strip(),
                 "cache_mode": str(query.cache_mode or "").strip(),
                 "select_operations_count": (
                     int(query.select_operations_count)

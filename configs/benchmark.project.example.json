@@ -21,7 +21,22 @@
         "types": 1500000
       },
       "queries": {
-        "mode": "auto"
+        "mode": "auto",
+        "auto_like_on_measured_columns": true,
+        "auto_like_sample_rows_per_column": 20,
+        "auto_like_min_token_length": 3,
+        "auto_like_max_token_length": 24,
+        "auto_select_limit": 10
+      },
+      "scoring": {
+        "mode": "expression",
+        "variables": {
+          "baseline_median_read_bytes": "medians.source_select_read_bytes",
+          "test_median_read_bytes": "medians.tested_select_read_bytes",
+          "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+          "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+        },
+        "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))"
       }
     },
     {
@@ -47,14 +62,12 @@
         "rule_bank": "aggressive_zstd"
       },
       "queries": {
-        "mode": "auto_with_manual",
-        "test_queries": [
-          {
-            "query": "SELECT count() FROM {table} WHERE event_time >= now() - INTERVAL 1 DAY",
-            "cache_mode": "warm",
-            "select_operations_count": 5
-          }
-        ]
+        "mode": "auto",
+        "auto_like_on_measured_columns": true,
+        "auto_like_sample_rows_per_column": 20,
+        "auto_like_min_token_length": 3,
+        "auto_like_max_token_length": 24,
+        "auto_select_limit": 10
       },
       "table_rules": [
         {
@@ -85,20 +98,25 @@
             ]
           },
           "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query": "SELECT sum(revenue) FROM {table}",
-                "cache_mode": "warm",
-                "select_operations_count": 2,
-                "warmup_queries": [
-                  "SELECT count() FROM {table}"
-                ]
-              }
-            ]
+            "mode": "auto",
+            "auto_like_on_measured_columns": true,
+            "auto_like_sample_rows_per_column": 20,
+            "auto_like_min_token_length": 3,
+            "auto_like_max_token_length": 24,
+            "auto_select_limit": 10
           }
         }
-      ]
+      ],
+      "scoring": {
+        "mode": "expression",
+        "variables": {
+          "baseline_median_read_bytes": "medians.source_select_read_bytes",
+          "test_median_read_bytes": "medians.tested_select_read_bytes",
+          "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+          "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+        },
+        "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))"
+      }
     }
   ]
 }

@@ -45,6 +45,7 @@ class Query(_FrozenModel):
 
     query_id: str
     query: str
+    query_type: str = "generic"
     cache_mode: str = "warm"
     select_operations_count: Optional[int] = None
     warmup_queries: List[str] = Field(default_factory=list)

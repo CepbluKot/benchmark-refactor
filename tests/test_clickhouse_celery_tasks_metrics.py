@@ -331,6 +331,7 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             {
                 "query_index": 0,
                 "query_id": "q_main",
+                "query_type": "hit",
                 "elapsed_ms_percentiles": [100.0, 200.0],
                 "read_bytes_percentiles": [1_000.0, 2_000.0],
             }
@@ -339,6 +340,7 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             {
                 "query_index": 0,
                 "query_id": "q_main",
+                "query_type": "hit",
                 "elapsed_ms_percentiles": [50.0, 100.0],
                 "read_bytes_percentiles": [500.0, 1_000.0],
             }
@@ -355,6 +357,7 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             speedup[0]["read_bytes_percentiles_speed_up_coefs"],
             [2.0, 2.0],
         )
+        self.assertEqual(speedup[0]["query_type"], "hit")
 
     def test_run_source_benchmark_calculates_metrics_and_baseline_score(self) -> None:
         fake_client = _FakeRuntimeClient(
@@ -3391,6 +3394,7 @@ ORDER BY country
         self.assertEqual(stats["elapsed_ns"], [100_000_000.0])
         self.assertEqual(len(stats["per_query"]), 1)
         self.assertEqual(stats["per_query"][0]["query"], "SELECT count() FROM `analytics`.`events`")
+        self.assertEqual(stats["per_query"][0]["query_type"], "generic")
         self.assertEqual(len(fake_client.select_with_metrics_calls), 2)
 
     def test_measure_select_queries_tracks_each_query_separately(self) -> None:
@@ -3426,8 +3430,10 @@ ORDER BY country
         self.assertEqual(stats["elapsed_ns"], [100_000_000.0, 300_000_000.0])
         self.assertEqual(len(stats["per_query"]), 2)
         self.assertEqual(stats["per_query"][0]["query"], "SELECT count() FROM t1")
+        self.assertEqual(stats["per_query"][0]["query_type"], "generic")
         self.assertEqual(stats["per_query"][0]["elapsed_ns_measurements"], [100_000_000.0])
         self.assertEqual(stats["per_query"][1]["query"], "SELECT count() FROM t2")
+        self.assertEqual(stats["per_query"][1]["query_type"], "generic")
         self.assertEqual(stats["per_query"][1]["elapsed_ns_measurements"], [300_000_000.0])
 
     def test_measure_insert_retries_until_success(self) -> None:
@@ -3553,6 +3559,7 @@ ORDER BY country
             test_queries=[
                 QueryPayload(
                     query="SELECT count() FROM t1",
+                    query_type="miss",
                     cache_mode="cold",
                     select_operations_count=2,
                 )
@@ -3570,6 +3577,7 @@ ORDER BY country
         )
         self.assertEqual(stats["per_query"][0]["select_operations_count"], 2)
         self.assertEqual(stats["per_query"][0]["cache_mode"], "cold")
+        self.assertEqual(stats["per_query"][0]["query_type"], "miss")
 
     def test_with_cold_select_settings_appends_settings_when_missing(self) -> None:
         query = "SELECT count() FROM t1"
@@ -3648,6 +3656,7 @@ ORDER BY country
             test_queries=[
                 QueryPayload(
                     query="SELECT count() FROM t1",
+                    query_type="hit",
                     cache_mode="warm",
                     select_operations_count=3,
                     warmup_queries=["SELECT 1"],
@@ -3660,6 +3669,7 @@ ORDER BY country
         self.assertEqual(len(fake_client.select_with_metrics_calls), 3)
         self.assertEqual(stats["per_query"][0]["select_operations_count"], 3)
         self.assertEqual(stats["per_query"][0]["cache_mode"], "warm")
+        self.assertEqual(stats["per_query"][0]["query_type"], "hit")
         self.assertEqual(stats["per_query"][0]["warmup_queries"], ["SELECT 1"])
 
     def test_query_plan_rejects_dangerous_query_level_warmup_sql(self) -> None:

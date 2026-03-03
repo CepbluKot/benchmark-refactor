@@ -49,8 +49,14 @@
       },
       "scoring": {
         "mode": "expression",
-        "expression": "pow(safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0), 0.9) * pow(safe_div(source_size_bytes, tested_size_bytes, 1.0), 0.1)",
-        "on_error_score": -1.0
+        "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+        "on_error_score": -1.0,
+        "variables": {
+          "baseline_median_read_bytes": "medians.source_select_read_bytes",
+          "test_median_read_bytes": "medians.tested_select_read_bytes",
+          "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+          "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+        }
       },
       "global_rules": {
         "order_by_rules": {
@@ -79,7 +85,11 @@
             "indexes": [
               {
                 "type": "tokenbf_v1(32768, 3, 0)",
-                "granularity": 2,
+                "granularity": [
+                  4,
+                  8,
+                  16
+                ],
                 "index_granularity_values": [
                   8192
                 ]
@@ -89,21 +99,12 @@
         ]
       },
       "queries": {
-        "mode": "manual",
-        "test_queries": [
-          {
-            "query_id": "q_page_url_like_catalog_item",
-            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%catalog/item/%'",
-            "cache_mode": "cold",
-            "select_operations_count": 5
-          },
-          {
-            "query_id": "q_page_url_like_help_delivery",
-            "query": "SELECT count() FROM {table} WHERE page_url LIKE '%help/delivery%'",
-            "cache_mode": "cold",
-            "select_operations_count": 5
-          }
-        ]
+        "mode": "auto",
+        "auto_like_on_measured_columns": true,
+        "auto_like_sample_rows_per_column": 20,
+        "auto_like_min_token_length": 3,
+        "auto_like_max_token_length": 24,
+        "auto_select_limit": 10
       }
     }
   ]

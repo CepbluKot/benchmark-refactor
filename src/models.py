@@ -437,6 +437,7 @@ class TestQueryConfig(_Base):
         serialization_alias="query_id",
     )
     query: str
+    query_type: Literal["hit", "miss", "manual", "generic"] = "manual"
     cache_mode: SelectQueryCacheMode = "warm"
     select_operations_count: int = Field(default=1, gt=0)
     warmup_queries: List[str] = Field(default_factory=list)
@@ -487,12 +488,50 @@ class QueriesConfig(_Base):
 
     mode: Literal["auto", "manual", "auto_with_manual"] = "auto"
     test_queries: List[TestQueryConfig] = Field(default_factory=list)
+    auto_like_on_measured_columns: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("auto_like_on_measured_columns"),
+        serialization_alias="auto_like_on_measured_columns",
+    )
+    auto_like_replace_default_auto_queries: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("auto_like_replace_default_auto_queries"),
+        serialization_alias="auto_like_replace_default_auto_queries",
+    )
+    auto_like_sample_rows_per_column: int = Field(
+        default=20,
+        gt=0,
+        validation_alias=AliasChoices("auto_like_sample_rows_per_column"),
+        serialization_alias="auto_like_sample_rows_per_column",
+    )
+    auto_select_limit: int = Field(
+        default=10,
+        gt=0,
+        validation_alias=AliasChoices("auto_select_limit"),
+        serialization_alias="auto_select_limit",
+    )
+    auto_like_min_token_length: int = Field(
+        default=3,
+        gt=0,
+        validation_alias=AliasChoices("auto_like_min_token_length"),
+        serialization_alias="auto_like_min_token_length",
+    )
+    auto_like_max_token_length: int = Field(
+        default=24,
+        gt=0,
+        validation_alias=AliasChoices("auto_like_max_token_length"),
+        serialization_alias="auto_like_max_token_length",
+    )
 
     @model_validator(mode="after")
     def check_manual_has_queries(self) -> "QueriesConfig":
         """Гарантирует, что `manual` режим не запущен с пустым списком запросов."""
         if self.mode == "manual" and not self.test_queries:
             raise ValueError("mode=manual требует хотя бы одного test_query")
+        if self.auto_like_max_token_length < self.auto_like_min_token_length:
+            raise ValueError(
+                "auto_like_max_token_length должен быть >= auto_like_min_token_length"
+            )
         seen_query_ids: set[str] = set()
         for query in self.test_queries:
             if query.query_id is None:

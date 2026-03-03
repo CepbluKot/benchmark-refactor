@@ -34,11 +34,19 @@
             "indexes": [
               {
                 "type": "minmax",
-                "granularity": 4
+                "granularity": [
+                  4,
+                  8,
+                  16
+                ]
               },
               {
                 "type": "set(100)",
-                "granularity": 2
+                "granularity": [
+                  4,
+                  8,
+                  16
+                ]
               }
             ]
           }
@@ -76,8 +84,14 @@
       ],
       "scoring": {
         "mode": "expression",
-        "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)",
-        "on_error_score": -1.0
+        "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+        "on_error_score": -1.0,
+        "variables": {
+          "baseline_median_read_bytes": "medians.source_select_read_bytes",
+          "test_median_read_bytes": "medians.tested_select_read_bytes",
+          "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+          "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+        }
       },
       "insert_rows_per_operation_limits": {
         "types": 800000,
@@ -89,23 +103,12 @@
       "column_rules_mode": "global_bank_with_inline_priority",
       "index_rules_mode": "global_bank_with_inline_priority",
       "queries": {
-        "mode": "auto_with_manual",
-        "test_queries": [
-          {
-            "query": "SELECT count() FROM {table} WHERE event_time >= now() - INTERVAL 7 DAY",
-            "cache_mode": "warm",
-            "select_operations_count": 4,
-            "warmup_queries": [
-              "SELECT count() FROM {table}",
-              "SELECT min(event_time), max(event_time) FROM {table}"
-            ]
-          },
-          {
-            "query": "SELECT user_id, sum(revenue) FROM {table} GROUP BY user_id ORDER BY sum(revenue) DESC LIMIT 100",
-            "cache_mode": "cold",
-            "select_operations_count": 2
-          }
-        ]
+        "mode": "auto",
+        "auto_like_on_measured_columns": true,
+        "auto_like_sample_rows_per_column": 20,
+        "auto_like_min_token_length": 3,
+        "auto_like_max_token_length": 24,
+        "auto_select_limit": 10
       },
       "table_rules": [
         {
@@ -141,7 +144,11 @@
                 "indexes": [
                   {
                     "type": "bloom_filter(0.01)",
-                    "granularity": 8
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ]
                   }
                 ]
               }
@@ -162,17 +169,12 @@
           },
           "column_order_mode": "compressed_size_desc",
           "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query": "SELECT sum(revenue) FROM {table}",
-                "cache_mode": "warm",
-                "select_operations_count": 3,
-                "warmup_queries": [
-                  "SELECT count() FROM {table}"
-                ]
-              }
-            ]
+            "mode": "auto",
+            "auto_like_on_measured_columns": true,
+            "auto_like_sample_rows_per_column": 20,
+            "auto_like_min_token_length": 3,
+            "auto_like_max_token_length": 24,
+            "auto_select_limit": 10
           },
           "insert_operations_count": 12,
           "sequential_types_top_n_for_indexes": 3,
@@ -184,7 +186,13 @@
           ],
           "scoring": {
             "mode": "expression",
-            "expression": "safe_div(source_select_time_ms_percentiles[1], tested_select_time_ms_percentiles[1])",
+            "variables": {
+              "baseline_median_read_bytes": "medians.source_select_read_bytes",
+              "test_median_read_bytes": "medians.tested_select_read_bytes",
+              "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+              "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+            },
+            "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
             "on_error_score": -1.0
           },
           "insert_rows_per_operation_limits": {

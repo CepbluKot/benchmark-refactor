@@ -460,6 +460,7 @@ def _filter_query_plan_by_column(
     column_name: str,
     *,
     where_only: bool = True,
+    exclusive_columns: Optional[Sequence[str]] = None,
 ) -> Optional[QueryPlan]:
     """
     Возвращает подмножество test_queries по колонке.
@@ -467,13 +468,35 @@ def _filter_query_plan_by_column(
     - `where_only=True`: колонка должна участвовать в WHERE (актуально для skip-index).
     - `where_only=False`: колонка может встречаться в любой части SELECT-запроса
       (актуально для type/codec one-column фаз).
+    - `exclusive_columns`: если задан, в query не должно быть ссылок на другие
+      колонки из этого списка (строгий one-column режим).
 
     Если подходящих запросов нет, возвращает `None`.
     """
     predicate = _query_filters_column if where_only else _query_references_column
-    filtered_queries = [
-        query for query in query_plan.test_queries if predicate(query.query, column_name)
-    ]
+    exclusive_others: list[str] = []
+    if exclusive_columns:
+        seen: set[str] = set()
+        normalized_target = str(column_name).strip()
+        for raw_column in exclusive_columns:
+            candidate = str(raw_column).strip()
+            if not candidate or candidate == normalized_target:
+                continue
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            exclusive_others.append(candidate)
+
+    filtered_queries = []
+    for query in query_plan.test_queries:
+        if not predicate(query.query, column_name):
+            continue
+        if exclusive_others and any(
+            _query_references_column(query.query, other_column)
+            for other_column in exclusive_others
+        ):
+            continue
+        filtered_queries.append(query)
     if not filtered_queries:
         return None
     return QueryPlan(test_queries=filtered_queries)
@@ -1631,6 +1654,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                     raw_query_plan,
                     column.name,
                     where_only=False,
+                    exclusive_columns=[value.name for value in base_ddl.columns],
                 )
                 if column_query_plan is None:
                     continue
@@ -1798,6 +1822,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                     raw_query_plan,
                     column.name,
                     where_only=False,
+                    exclusive_columns=[value.name for value in base_ddl.columns],
                 )
                 if column_query_plan is None:
                     continue
@@ -2232,7 +2257,12 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                     )
                     if not options:
                         continue
-                    column_query_plan = _filter_query_plan_by_column(raw_query_plan, column_name)
+                    column_query_plan = _filter_query_plan_by_column(
+                        raw_query_plan,
+                        column_name,
+                        where_only=True,
+                        exclusive_columns=[value.name for value in base_ddl.columns],
+                    )
                     if column_query_plan is None:
                         continue
                     for option in options:

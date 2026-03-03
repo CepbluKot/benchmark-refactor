@@ -17,7 +17,7 @@
         ]
       },
       "test_database": "benchmark_tmp",
-      "insert_operations_count": 20,
+      "insert_operations_count": 5,
       "sequential_top_n_limits": {
         "order_by": 3,
         "types": 3,
@@ -34,8 +34,14 @@
       },
       "scoring": {
         "mode": "expression",
-        "expression": "pow(median(at(at(tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json, 'select_country_cold', None), 'elapsed_ms_percentiles_speed_up_coefs', None), 1.0), 0.8) * pow(median(at(at(tested_table_select_time_ms_percentiles_speed_up_coefs_by_query_json, 'select_country_cold', None), 'read_bytes_percentiles_speed_up_coefs', None), 1.0), 0.2)",
-        "on_error_score": -1.0
+        "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+        "on_error_score": -1.0,
+        "variables": {
+          "baseline_median_read_bytes": "medians.source_select_read_bytes",
+          "test_median_read_bytes": "medians.tested_select_read_bytes",
+          "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+          "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+        }
       },
       "max_benchmarks_limits": {
         "order_by": 10,
@@ -63,15 +69,13 @@
         "order_by_rules": {
           "first_column": "event_date",
           "candidates": [
-            "event_date", "country"
+            "event_date",
+            "country"
           ],
           "auto_generate_candidates": false
         },
-        "column_rules": [
-            
-        ],
+        "column_rules": [],
         "index_rules": [
-
           {
             "by_name": "page_url",
             "by_type": "String",
@@ -79,14 +83,18 @@
             "indexes": [
               {
                 "type": "ngrambf_v1(3, 32768, 3, 0)",
-                "granularity": [1, 2],
+                "granularity": [
+                  4,
+                  8,
+                  16
+                ],
                 "index_granularity_values": [
-                  8192, 16384
+                  8192,
+                  16384
                 ]
               }
             ]
           },
-
           {
             "by_name": "country",
             "by_type": "String",
@@ -94,46 +102,28 @@
             "indexes": [
               {
                 "type": "ngrambf_v1(3, 32768, 3, 0)",
-                "granularity": [1, 2],
+                "granularity": [
+                  4,
+                  8,
+                  16
+                ],
                 "index_granularity_values": [
-                  8192, 16384
+                  8192,
+                  16384
                 ]
               }
             ]
           }
         ]
       },
-      "table_rules": [
-        
-      ],
+      "table_rules": [],
       "queries": {
-        "mode": "manual",
-        "test_queries": [
-          {
-            "query_id": "select_page_url_cold",
-            "query": "select * from {table} where page_url != '' and page_url LIKE '%/catalog/%'",
-            "cache_mode": "cold",
-            "select_operations_count": 10
-          },
-          {
-            "query_id": "select_country_cold",
-            "query": "select * from {table} where country != '' and country LIKE '%RU%'",
-            "cache_mode": "cold",
-            "select_operations_count": 10
-          },
-          {
-            "query_id": "select_page_url_warm",
-            "query": "select * from {table} where page_url != '' and page_url LIKE '%/catalog/%'",
-            "cache_mode": "warm",
-            "select_operations_count": 10
-          },
-          {
-            "query_id": "select_country_warm",
-            "query": "select * from {table} where country != '' and country LIKE '%RU%'",
-            "cache_mode": "warm",
-            "select_operations_count": 10
-          }
-        ]
+        "mode": "auto",
+        "auto_like_on_measured_columns": true,
+        "auto_like_sample_rows_per_column": 20,
+        "auto_like_min_token_length": 3,
+        "auto_like_max_token_length": 24,
+        "auto_select_limit": 10
       }
     }
   ]

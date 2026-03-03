@@ -16,8 +16,9 @@ from __future__ import annotations
 import logging
 import re
 import time
+from uuid import uuid4
 from pydantic import BaseModel, Field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from src.models import ConnectionConfig
 from src.clickhouse_ddl import TableDDL
@@ -188,6 +189,39 @@ class Fetcher:
         return f"'{escaped}'"
 
     @staticmethod
+    def _quote_ident(value: str) -> str:
+        """Безопасно квотирует SQL-идентификатор для ClickHouse."""
+        return f"`{str(value).replace('`', '``')}`"
+
+    @staticmethod
+    def _extract_like_token_from_value(
+        value: object,
+        *,
+        min_token_length: int,
+        max_token_length: int,
+    ) -> Optional[str]:
+        """
+        Извлекает токен для LIKE-поиска из значения строки.
+
+        Токен нормализуется так, чтобы не содержать wildcard-символы `%`/`_`.
+        """
+        raw_value = str(value or "")
+        normalized = re.sub(r"\s+", " ", raw_value).strip()
+        if not normalized:
+            return None
+
+        chunks = re.findall(r"[0-9A-Za-zА-Яа-я./:-]+", normalized)
+        for chunk in chunks:
+            candidate = chunk[:max_token_length]
+            if len(candidate) >= min_token_length:
+                return candidate
+
+        fallback = normalized[:max_token_length]
+        if len(fallback) >= min_token_length:
+            return fallback
+        return None
+
+    @staticmethod
     def _strip_leading_sql_comments(query: str) -> str:
         """Удаляет ведущие block comments и пробелы."""
         stripped = query.lstrip()
@@ -286,6 +320,104 @@ class Fetcher:
             {"db": database, "tbl": table},
         )
         return {str(column): int(size or 0) for column, size in rows}
+
+    def fetch_like_tokens(
+        self,
+        database: str,
+        table: str,
+        columns: Sequence[str],
+        *,
+        sample_rows_per_column: int = 20,
+        min_token_length: int = 3,
+        max_token_length: int = 24,
+    ) -> Dict[str, Dict[str, str]]:
+        """
+        Возвращает data-aware LIKE токены (`hit`/`miss`) для колонок.
+
+        `hit_token` выбирается из реальных данных таблицы и гарантированно матчится.
+        `miss_token` подбирается как строка, отсутствующая в колонке.
+        """
+        if not columns:
+            return {}
+
+        unique_columns: List[str] = []
+        seen: set[str] = set()
+        for raw_column in columns:
+            column_name = str(raw_column).strip()
+            if not column_name or column_name in seen:
+                continue
+            seen.add(column_name)
+            unique_columns.append(column_name)
+
+        if not unique_columns:
+            return {}
+
+        database_ident = self._quote_ident(database)
+        table_ident = self._quote_ident(table)
+        result: Dict[str, Dict[str, str]] = {}
+
+        for column_name in unique_columns:
+            column_ident = self._quote_ident(column_name)
+            try:
+                rows = self._execute(
+                    f"""
+                    SELECT {column_ident}
+                    FROM {database_ident}.{table_ident}
+                    WHERE {column_ident} IS NOT NULL
+                      AND notEmpty(toString({column_ident}))
+                    LIMIT %(sample_rows)s
+                    """,
+                    {"sample_rows": int(sample_rows_per_column)},
+                )
+            except Exception:
+                logger.exception(
+                    "Не удалось получить sample rows для data-aware LIKE токенов: %s.%s.%s",
+                    database,
+                    table,
+                    column_name,
+                )
+                continue
+
+            hit_token: Optional[str] = None
+            for row in rows:
+                if not row:
+                    continue
+                hit_token = self._extract_like_token_from_value(
+                    row[0],
+                    min_token_length=min_token_length,
+                    max_token_length=max_token_length,
+                )
+                if hit_token:
+                    break
+
+            if not hit_token:
+                continue
+
+            miss_token: Optional[str] = None
+            column_marker = re.sub(r"[^0-9A-Za-z]+", "", column_name)[:24] or "col"
+            for attempt in range(1, 10):
+                candidate = f"bench_nomatch_{column_marker}_{uuid4().hex[:10]}_{attempt}"
+                has_match_rows = self._execute(
+                    f"""
+                    SELECT 1
+                    FROM {database_ident}.{table_ident}
+                    WHERE {column_ident} LIKE %(pattern)s
+                    LIMIT 1
+                    """,
+                    {"pattern": f"%{candidate}%"},
+                )
+                if not has_match_rows:
+                    miss_token = candidate
+                    break
+            if not miss_token:
+                miss_token = f"bench_nomatch_{column_marker}_{uuid4().hex[:16]}"
+
+            result[column_name] = {
+                "hit_token": hit_token,
+                "miss_token": miss_token,
+            }
+
+        return result
 
     def create_table(self, table_ddl: TableDDL) -> None:
         """Создаёт таблицу по TableDDL-объекту."""

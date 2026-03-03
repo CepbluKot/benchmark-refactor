@@ -1240,6 +1240,23 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                 """Возвращает тестовые размеры колонок."""
                 return {"event_time": 1000}
 
+            def fetch_like_tokens(
+                self,
+                database: str,
+                table: str,
+                columns: List[str],
+                *,
+                sample_rows_per_column: int = 20,
+                min_token_length: int = 3,
+                max_token_length: int = 24,
+            ) -> Dict[str, Dict[str, str]]:
+                return {
+                    "event_time": {
+                        "hit_token": "2025",
+                        "miss_token": "bench_nomatch",
+                    }
+                }
+
         provider_without_sizes = FetcherMetadataProvider(FetcherNoSizes())
         provider_with_sizes = FetcherMetadataProvider(FetcherWithSizes())
 
@@ -1248,8 +1265,81 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             provider_with_sizes.fetch_column_sizes("analytics", "events"),
             {"event_time": 1000},
         )
+        self.assertEqual(
+            provider_without_sizes.fetch_like_tokens("analytics", "events", ["event_time"]),
+            {},
+        )
+        self.assertEqual(
+            provider_with_sizes.fetch_like_tokens("analytics", "events", ["event_time"]),
+            {"event_time": {"hit_token": "2025", "miss_token": "bench_nomatch"}},
+        )
         ddl = provider_with_sizes.fetch_table_ddl("analytics", "events")
         self.assertEqual(ddl.name, "analytics.events")
+
+    def test_query_plan_builder_can_add_data_aware_like_queries(self) -> None:
+        """Проверяет data-aware LIKE автогенерацию для измеряемых string-колонок."""
+        table_ddl = TableDDL.from_ddl(
+            """
+            CREATE TABLE analytics.events
+            (
+                `event_time` DateTime,
+                `page_url` String,
+                `country` LowCardinality(String),
+                `value` UInt64
+            )
+            ENGINE = MergeTree
+            ORDER BY event_time
+            """
+        )
+
+        class ProviderWithLikeTokens(MetadataProvider):
+            def list_databases(self) -> List[str]:
+                return ["analytics"]
+
+            def list_tables(self, database: str) -> List[str]:
+                return ["events"]
+
+            def fetch_table_ddl(self, database: str, table: str) -> TableDDL:
+                return table_ddl.copy()
+
+            def fetch_like_tokens(
+                self,
+                database: str,
+                table: str,
+                columns: List[str],
+                *,
+                sample_rows_per_column: int = 20,
+                min_token_length: int = 3,
+                max_token_length: int = 24,
+            ) -> Dict[str, Dict[str, str]]:
+                self.columns_seen = list(columns)
+                return {
+                    "page_url": {"hit_token": "/catalog", "miss_token": "zzzz_not_found"},
+                }
+
+        provider = ProviderWithLikeTokens()
+        builder = QueryPlanBuilder()
+        plan = builder.build(
+            table_ddl,
+            QueriesConfig(
+                mode="auto",
+                auto_like_on_measured_columns=True,
+                auto_like_replace_default_auto_queries=True,
+            ),
+            provider=provider,
+            source_database="analytics",
+            source_table="events",
+            measured_columns=["value", "page_url", "country"],
+        )
+        self.assertEqual(getattr(provider, "columns_seen", []), ["page_url", "country"])
+        sqls = [query.query for query in plan.test_queries]
+        self.assertEqual(len(sqls), 6)
+        self.assertTrue(any("`value` IS NULL OR `value` IS NOT NULL" in sql for sql in sqls))
+        self.assertTrue(any("`value` IS NULL AND `value` IS NOT NULL" in sql for sql in sqls))
+        self.assertTrue(any("`page_url` LIKE" in sql for sql in sqls))
+        self.assertTrue(any("`country` LIKE" in sql for sql in sqls))
+        self.assertTrue(any("/catalog" in sql for sql in sqls))
+        self.assertTrue(any("zzzz_not_found" in sql for sql in sqls))
 
     def test_result_store_validates_result_identity(self) -> None:
         """Проверяет, что result store validates result identity."""
@@ -2747,6 +2837,173 @@ class PlannerEngineRunnerTests(unittest.TestCase):
             stage_column = str(job.variant_meta.stage_column_name or "")
             for query in job.query_plan.test_queries:
                 self.assertIn(stage_column, query.query)
+
+    def test_sequential_phased_topn_one_column_stages_exclude_multi_column_queries(self) -> None:
+        """Проверяет strict one-column фильтрацию в types/codecs/indexes стадиях."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_phased_topn_strict_one_column_queries",
+            connection_id="prod_ch",
+            strategy="sequential_phased_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            insert_operations_count=10,
+            sequential_types_top_n_for_indexes=1,
+            index_granularity_values=[8192],
+            order_by_first="event_time",
+            order_by_candidates=["user_id"],
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                        codecs=["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+                    ),
+                    ColumnRuleConfig(
+                        by_type="Nullable(Decimal(18,4))",
+                        by_name="revenue",
+                        types=["Nullable(Decimal(18,4))", "Nullable(Float64)"],
+                        codecs=["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+                    ),
+                ],
+                index_rules=[
+                    IndexRuleConfig(
+                        by_type="UInt32",
+                        by_name="user_id",
+                        indexes=[IndexConfig(type="minmax", granularity=1)],
+                    ),
+                    IndexRuleConfig(
+                        by_type="Nullable(Decimal(18,4))",
+                        by_name="revenue",
+                        indexes=[IndexConfig(type="minmax", granularity=1)],
+                    ),
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[
+                    QueryConfigItem(
+                        query="SELECT count() FROM {table} WHERE user_id > 0"
+                    ),
+                    QueryConfigItem(
+                        query="SELECT count() FROM {table} WHERE revenue > 0"
+                    ),
+                    QueryConfigItem(
+                        query=(
+                            "SELECT count() FROM {table} "
+                            "WHERE user_id > 0 AND revenue > 0"
+                        )
+                    ),
+                ],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = SequentialPhasedScoringAdapter()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=InMemoryBenchmarkResultStore(),
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+
+        one_column_jobs = [
+            job
+            for job in adapter.executed_jobs
+            if job.variant_meta.mode in {"types", "codecs", "indexes"}
+        ]
+        self.assertGreaterEqual(len(one_column_jobs), 1)
+        for job in one_column_jobs:
+            stage_column = str(job.variant_meta.stage_column_name or "")
+            self.assertIn(stage_column, {"user_id", "revenue"})
+            for query in job.query_plan.test_queries:
+                sql = str(query.query)
+                self.assertIn(stage_column, sql)
+                if stage_column == "user_id":
+                    self.assertNotIn("revenue", sql)
+                else:
+                    self.assertNotIn("user_id", sql)
+
+    def test_sequential_phased_topn_merge_stage_uses_full_query_plan(self) -> None:
+        """Проверяет, что merge стадия final_validation использует полный набор select-запросов."""
+        benchmark = BenchmarkConfig(
+            id="bench_sequential_phased_topn_merge_full_query_plan",
+            connection_id="prod_ch",
+            strategy="sequential_phased_topn_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            insert_operations_count=10,
+            sequential_types_top_n_for_indexes=1,
+            index_granularity_values=[8192],
+            order_by_first="event_time",
+            order_by_candidates=["user_id"],
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                        codecs=["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+                    ),
+                    ColumnRuleConfig(
+                        by_type="Nullable(Decimal(18,4))",
+                        by_name="revenue",
+                        types=["Nullable(Decimal(18,4))", "Nullable(Float64)"],
+                        codecs=["CODEC(LZ4)", "CODEC(ZSTD(1))"],
+                    ),
+                ],
+            ),
+            queries=QueriesConfig(
+                mode="manual",
+                test_queries=[
+                    QueryConfigItem(
+                        query="SELECT count() FROM {table} WHERE user_id > 0"
+                    ),
+                    QueryConfigItem(
+                        query="SELECT count() FROM {table} WHERE revenue > 0"
+                    ),
+                    QueryConfigItem(
+                        query=(
+                            "SELECT count() FROM {table} "
+                            "WHERE user_id > 0 AND revenue > 0"
+                        )
+                    ),
+                ],
+            ),
+        )
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = SequentialPhasedScoringAdapter()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=InMemoryBenchmarkResultStore(),
+        )
+
+        run_id = runner.run()
+        self.assertEqual(run_id, 1)
+
+        final_jobs = [
+            job for job in adapter.executed_jobs if job.variant_meta.mode == "final_validation"
+        ]
+        self.assertGreaterEqual(len(final_jobs), 1)
+        self.assertTrue(
+            any(
+                any(
+                    "user_id > 0 AND revenue > 0" in str(query.query)
+                    for query in job.query_plan.test_queries
+                )
+                for job in final_jobs
+            )
+        )
 
     def test_runner_estimates_global_progress_for_phased_strategy_by_real_candidates(self) -> None:
         """Проверяет fixed global target для phased-стратегии по реальным candidate-правилам."""

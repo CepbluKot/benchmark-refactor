@@ -5,246 +5,632 @@
       "column_rules": [
         {
           "by_type": "UInt8",
-          "types": ["UInt8"],
-          "codecs": ["CODEC(LZ4)", "CODEC(ZSTD(1))"]
+          "types": [
+            "UInt8"
+          ],
+          "codecs": [
+            "CODEC(LZ4)",
+            "CODEC(ZSTD(1))"
+          ]
         },
         {
           "by_type": "UInt16",
-          "types": ["UInt16", "UInt8"],
-          "codecs": ["CODEC(Delta(2), LZ4)", "CODEC(Delta(2), ZSTD(1))", "CODEC(T64, ZSTD(1))"]
+          "types": [
+            "UInt16",
+            "UInt8"
+          ],
+          "codecs": [
+            "CODEC(Delta(2), LZ4)",
+            "CODEC(Delta(2), ZSTD(1))",
+            "CODEC(T64, ZSTD(1))"
+          ]
         },
         {
           "by_type": "UInt32",
-          "types": ["UInt32", "UInt16"],
-          "codecs": ["CODEC(Delta(4), LZ4)", "CODEC(Delta(4), ZSTD(1))", "CODEC(T64, ZSTD(1))"]
+          "types": [
+            "UInt32",
+            "UInt16"
+          ],
+          "codecs": [
+            "CODEC(Delta(4), LZ4)",
+            "CODEC(Delta(4), ZSTD(1))",
+            "CODEC(T64, ZSTD(1))"
+          ]
         },
         {
           "by_type": "UInt64",
-          "types": ["UInt64", "UInt32"],
-          "codecs": ["CODEC(Delta(8), LZ4)", "CODEC(Delta(8), ZSTD(1))", "CODEC(T64, ZSTD(1))"]
+          "types": [
+            "UInt64",
+            "UInt32"
+          ],
+          "codecs": [
+            "CODEC(Delta(8), LZ4)",
+            "CODEC(Delta(8), ZSTD(1))",
+            "CODEC(T64, ZSTD(1))"
+          ]
         },
         {
           "by_type": "Int32",
-          "types": ["Int32", "Int16"],
-          "codecs": ["CODEC(Delta(4), LZ4)", "CODEC(Delta(4), ZSTD(1))", "CODEC(T64, ZSTD(1))"]
+          "types": [
+            "Int32",
+            "Int16"
+          ],
+          "codecs": [
+            "CODEC(Delta(4), LZ4)",
+            "CODEC(Delta(4), ZSTD(1))",
+            "CODEC(T64, ZSTD(1))"
+          ]
         },
         {
           "by_type": "Int64",
-          "types": ["Int64", "Int32"],
-          "codecs": ["CODEC(Delta(8), LZ4)", "CODEC(Delta(8), ZSTD(1))", "CODEC(T64, ZSTD(1))"]
+          "types": [
+            "Int64",
+            "Int32"
+          ],
+          "codecs": [
+            "CODEC(Delta(8), LZ4)",
+            "CODEC(Delta(8), ZSTD(1))",
+            "CODEC(T64, ZSTD(1))"
+          ]
         },
         {
           "by_type": "Float32",
-          "types": ["Float32"],
-          "codecs": ["CODEC(Gorilla, LZ4)", "CODEC(Gorilla, ZSTD(1))", "CODEC(ZSTD(1))"]
+          "types": [
+            "Float32"
+          ],
+          "codecs": [
+            "CODEC(Gorilla, LZ4)",
+            "CODEC(Gorilla, ZSTD(1))",
+            "CODEC(ZSTD(1))"
+          ]
         },
         {
           "by_type": "Float64",
-          "types": ["Float64", "Float32"],
-          "codecs": ["CODEC(Gorilla, LZ4)", "CODEC(Gorilla, ZSTD(1))", "CODEC(ZSTD(1))"]
+          "types": [
+            "Float64",
+            "Float32"
+          ],
+          "codecs": [
+            "CODEC(Gorilla, LZ4)",
+            "CODEC(Gorilla, ZSTD(1))",
+            "CODEC(ZSTD(1))"
+          ]
         },
         {
           "by_type": "Date",
-          "types": ["Date"],
-          "codecs": ["CODEC(Delta(2), LZ4)", "CODEC(Delta(2), ZSTD(1))"]
+          "types": [
+            "Date"
+          ],
+          "codecs": [
+            "CODEC(Delta(2), LZ4)",
+            "CODEC(Delta(2), ZSTD(1))"
+          ]
         },
         {
           "by_type": "DateTime",
-          "types": ["DateTime"],
-          "codecs": ["CODEC(DoubleDelta, LZ4)", "CODEC(DoubleDelta, ZSTD(1))"]
+          "types": [
+            "DateTime"
+          ],
+          "codecs": [
+            "CODEC(DoubleDelta, LZ4)",
+            "CODEC(DoubleDelta, ZSTD(1))"
+          ]
         },
         {
           "by_type": "DateTime64(3)",
-          "types": ["DateTime64(3)", "DateTime"],
-          "codecs": ["CODEC(DoubleDelta, LZ4)", "CODEC(DoubleDelta, ZSTD(1))"]
+          "types": [
+            "DateTime64(3)",
+            "DateTime"
+          ],
+          "codecs": [
+            "CODEC(DoubleDelta, LZ4)",
+            "CODEC(DoubleDelta, ZSTD(1))"
+          ]
         },
         {
           "by_type": "String",
-          "types": ["String", "LowCardinality(String)"],
-          "codecs": ["CODEC(LZ4)", "CODEC(ZSTD(1))", "CODEC(ZSTD(3))"]
+          "types": [
+            "String",
+            "LowCardinality(String)"
+          ],
+          "codecs": [
+            "CODEC(LZ4)",
+            "CODEC(ZSTD(1))",
+            "CODEC(ZSTD(3))"
+          ]
         },
         {
           "by_type": "FixedString(16)",
-          "types": ["FixedString(16)", "String"],
-          "codecs": ["CODEC(LZ4)", "CODEC(ZSTD(1))"]
+          "types": [
+            "FixedString(16)",
+            "String"
+          ],
+          "codecs": [
+            "CODEC(LZ4)",
+            "CODEC(ZSTD(1))"
+          ]
         },
         {
           "by_type": "LowCardinality(String)",
-          "types": ["LowCardinality(String)", "String"],
-          "codecs": ["CODEC(LZ4)", "CODEC(ZSTD(1))", "CODEC(ZSTD(3))"]
+          "types": [
+            "LowCardinality(String)",
+            "String"
+          ],
+          "codecs": [
+            "CODEC(LZ4)",
+            "CODEC(ZSTD(1))",
+            "CODEC(ZSTD(3))"
+          ]
         },
         {
           "by_type": "LowCardinality(UInt32)",
-          "types": ["LowCardinality(UInt32)", "UInt32"],
-          "codecs": ["CODEC(LZ4)", "CODEC(ZSTD(1))"]
+          "types": [
+            "LowCardinality(UInt32)",
+            "UInt32"
+          ],
+          "codecs": [
+            "CODEC(LZ4)",
+            "CODEC(ZSTD(1))"
+          ]
         },
         {
           "by_type": "Decimal(12,2)",
-          "types": ["Decimal(12,2)", "Decimal(9,2)"],
-          "codecs": ["CODEC(T64, ZSTD(1))", "CODEC(ZSTD(1))"]
+          "types": [
+            "Decimal(12,2)",
+            "Decimal(9,2)"
+          ],
+          "codecs": [
+            "CODEC(T64, ZSTD(1))",
+            "CODEC(ZSTD(1))"
+          ]
         },
         {
           "by_type": "Decimal(18,4)",
-          "types": ["Decimal(18,4)", "Decimal(12,2)"],
-          "codecs": ["CODEC(T64, ZSTD(1))", "CODEC(ZSTD(1))"]
+          "types": [
+            "Decimal(18,4)",
+            "Decimal(12,2)"
+          ],
+          "codecs": [
+            "CODEC(T64, ZSTD(1))",
+            "CODEC(ZSTD(1))"
+          ]
         },
         {
           "by_type": "UUID",
-          "types": ["UUID"],
-          "codecs": ["CODEC(LZ4)", "CODEC(ZSTD(1))"]
+          "types": [
+            "UUID"
+          ],
+          "codecs": [
+            "CODEC(LZ4)",
+            "CODEC(ZSTD(1))"
+          ]
         },
         {
           "by_type": "IPv4",
-          "types": ["IPv4"],
-          "codecs": ["CODEC(LZ4)", "CODEC(ZSTD(1))"]
+          "types": [
+            "IPv4"
+          ],
+          "codecs": [
+            "CODEC(LZ4)",
+            "CODEC(ZSTD(1))"
+          ]
         },
         {
           "by_type": "IPv6",
-          "types": ["IPv6"],
-          "codecs": ["CODEC(LZ4)", "CODEC(ZSTD(1))"]
+          "types": [
+            "IPv6"
+          ],
+          "codecs": [
+            "CODEC(LZ4)",
+            "CODEC(ZSTD(1))"
+          ]
         },
         {
           "by_type": "Nullable(UInt32)",
-          "types": ["Nullable(UInt32)", "Nullable(UInt16)"],
-          "codecs": ["CODEC(ZSTD(1))", "CODEC(ZSTD(3))"]
+          "types": [
+            "Nullable(UInt32)",
+            "Nullable(UInt16)"
+          ],
+          "codecs": [
+            "CODEC(ZSTD(1))",
+            "CODEC(ZSTD(3))"
+          ]
         },
         {
           "by_type": "Nullable(UInt64)",
-          "types": ["Nullable(UInt64)", "Nullable(UInt32)"],
-          "codecs": ["CODEC(ZSTD(1))", "CODEC(ZSTD(3))"]
+          "types": [
+            "Nullable(UInt64)",
+            "Nullable(UInt32)"
+          ],
+          "codecs": [
+            "CODEC(ZSTD(1))",
+            "CODEC(ZSTD(3))"
+          ]
         },
         {
           "by_type": "Nullable(Float64)",
-          "types": ["Nullable(Float64)", "Nullable(Float32)"],
-          "codecs": ["CODEC(ZSTD(1))", "CODEC(ZSTD(3))"]
+          "types": [
+            "Nullable(Float64)",
+            "Nullable(Float32)"
+          ],
+          "codecs": [
+            "CODEC(ZSTD(1))",
+            "CODEC(ZSTD(3))"
+          ]
         },
         {
           "by_type": "Nullable(DateTime)",
-          "types": ["Nullable(DateTime)"],
-          "codecs": ["CODEC(DoubleDelta, ZSTD(1))"]
+          "types": [
+            "Nullable(DateTime)"
+          ],
+          "codecs": [
+            "CODEC(DoubleDelta, ZSTD(1))"
+          ]
         },
         {
           "by_type": "Nullable(String)",
-          "types": ["Nullable(String)", "Nullable(LowCardinality(String))"],
-          "codecs": ["CODEC(ZSTD(1))", "CODEC(ZSTD(3))"]
+          "types": [
+            "Nullable(String)",
+            "Nullable(LowCardinality(String))"
+          ],
+          "codecs": [
+            "CODEC(ZSTD(1))",
+            "CODEC(ZSTD(3))"
+          ]
         },
         {
           "by_type": "Nullable(LowCardinality(String))",
-          "types": ["Nullable(LowCardinality(String))", "Nullable(String)"],
-          "codecs": ["CODEC(ZSTD(1))", "CODEC(ZSTD(3))"]
+          "types": [
+            "Nullable(LowCardinality(String))",
+            "Nullable(String)"
+          ],
+          "codecs": [
+            "CODEC(ZSTD(1))",
+            "CODEC(ZSTD(3))"
+          ]
         },
         {
           "by_type": "Nullable(Decimal(18,4))",
-          "types": ["Nullable(Decimal(18,4))", "Nullable(Decimal(12,2))"],
-          "codecs": ["CODEC(ZSTD(1))", "CODEC(ZSTD(3))"]
+          "types": [
+            "Nullable(Decimal(18,4))",
+            "Nullable(Decimal(12,2))"
+          ],
+          "codecs": [
+            "CODEC(ZSTD(1))",
+            "CODEC(ZSTD(3))"
+          ]
         }
       ],
       "index_rules": [
         {
           "by_type": "UInt32",
           "indexes": [
-            {"type": "minmax", "granularity": 4},
-            {"type": "set(200)", "granularity": 4},
-            {"type": "bloom_filter(0.01)", "granularity": 2}
+            {
+              "type": "minmax",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "set(200)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "bloom_filter(0.01)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            }
           ]
         },
         {
           "by_type": "UInt64",
           "indexes": [
-            {"type": "minmax", "granularity": 4},
-            {"type": "set(200)", "granularity": 4},
-            {"type": "bloom_filter(0.01)", "granularity": 2}
+            {
+              "type": "minmax",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "set(200)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "bloom_filter(0.01)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            }
           ]
         },
         {
           "by_type": "Int32",
           "indexes": [
-            {"type": "minmax", "granularity": 4},
-            {"type": "set(200)", "granularity": 4},
-            {"type": "bloom_filter(0.01)", "granularity": 2}
+            {
+              "type": "minmax",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "set(200)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "bloom_filter(0.01)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            }
           ]
         },
         {
           "by_type": "Int64",
           "indexes": [
-            {"type": "minmax", "granularity": 4},
-            {"type": "set(200)", "granularity": 4},
-            {"type": "bloom_filter(0.01)", "granularity": 2}
+            {
+              "type": "minmax",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "set(200)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "bloom_filter(0.01)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            }
           ]
         },
         {
           "by_type": "Float64",
           "indexes": [
-            {"type": "minmax", "granularity": 4},
-            {"type": "bloom_filter(0.01)", "granularity": 2}
+            {
+              "type": "minmax",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "bloom_filter(0.01)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            }
           ]
         },
         {
           "by_type": "Date",
           "indexes": [
-            {"type": "minmax", "granularity": 4}
+            {
+              "type": "minmax",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            }
           ]
         },
         {
           "by_type": "DateTime",
           "indexes": [
-            {"type": "minmax", "granularity": 4}
+            {
+              "type": "minmax",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            }
           ]
         },
         {
           "by_type": "DateTime64(3)",
           "indexes": [
-            {"type": "minmax", "granularity": 4}
+            {
+              "type": "minmax",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            }
           ]
         },
         {
           "by_type": "String",
           "indexes": [
-            {"type": "bloom_filter(0.01)", "granularity": 2},
-            {"type": "tokenbf_v1(32768, 3, 0)", "granularity": 1},
-            {"type": "ngrambf_v1(3, 256, 2, 0)", "granularity": 1}
+            {
+              "type": "bloom_filter(0.01)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "tokenbf_v1(32768, 3, 0)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "ngrambf_v1(3, 256, 2, 0)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            }
           ]
         },
         {
           "by_type": "FixedString(16)",
           "indexes": [
-            {"type": "set(500)", "granularity": 4},
-            {"type": "bloom_filter(0.01)", "granularity": 2}
+            {
+              "type": "set(500)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "bloom_filter(0.01)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            }
           ]
         },
         {
           "by_type": "LowCardinality(String)",
           "indexes": [
-            {"type": "set(500)", "granularity": 4},
-            {"type": "bloom_filter(0.01)", "granularity": 2}
+            {
+              "type": "set(500)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "bloom_filter(0.01)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            }
           ]
         },
         {
           "by_type": "LowCardinality(UInt32)",
           "indexes": [
-            {"type": "set(500)", "granularity": 4},
-            {"type": "bloom_filter(0.01)", "granularity": 2}
+            {
+              "type": "set(500)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "bloom_filter(0.01)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            }
           ]
         },
         {
           "by_type": "UUID",
           "indexes": [
-            {"type": "set(500)", "granularity": 4},
-            {"type": "bloom_filter(0.01)", "granularity": 2}
+            {
+              "type": "set(500)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "bloom_filter(0.01)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            }
           ]
         },
         {
           "by_type": "IPv4",
           "indexes": [
-            {"type": "set(500)", "granularity": 4},
-            {"type": "bloom_filter(0.01)", "granularity": 2}
+            {
+              "type": "set(500)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "bloom_filter(0.01)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            }
           ]
         },
         {
           "by_type": "IPv6",
           "indexes": [
-            {"type": "set(500)", "granularity": 4},
-            {"type": "bloom_filter(0.01)", "granularity": 2}
+            {
+              "type": "set(500)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            },
+            {
+              "type": "bloom_filter(0.01)",
+              "granularity": [
+                4,
+                8,
+                16
+              ]
+            }
           ]
         }
       ]

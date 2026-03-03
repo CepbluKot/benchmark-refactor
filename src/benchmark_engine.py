@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import logging
 import os
+import re
 from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
@@ -63,7 +64,7 @@ from src.benchmark_runtime.types import (
     VariantJob,
 )
 from src.naming import variant_table_name
-from src.query_generator import generate_queries
+from src.query_generator import QueryGenerator, generate_queries
 from src.resolver import RuleResolver
 from src.scoring_validation import collect_scoring_formula_issues
 
@@ -180,7 +181,88 @@ class QueryPlanBuilder:
     затем этот шаблон подставляется в имя конкретной variant-таблицы.
     """
 
-    def build(self, table_ddl: TableDDL, queries_config: QueriesConfig) -> QueryPlan:
+    @staticmethod
+    def _is_string_like_column(column_type: str) -> bool:
+        """Возвращает True для String/FixedString с Nullable/LowCardinality-обёртками."""
+        normalized = str(column_type or "").strip()
+        while True:
+            matched = re.match(r"^(?:Nullable|LowCardinality)\((.+)\)$", normalized)
+            if matched is None:
+                break
+            normalized = matched.group(1).strip()
+        base_type = normalized.split("(", 1)[0].strip()
+        return base_type in {"String", "FixedString"}
+
+    def _build_data_aware_like_tokens(
+        self,
+        *,
+        table_ddl: TableDDL,
+        queries_config: QueriesConfig,
+        provider: Optional[MetadataProvider],
+        source_database: Optional[str],
+        source_table: Optional[str],
+        measured_columns: Optional[Sequence[str]],
+    ) -> Dict[str, Dict[str, str]]:
+        """Возвращает data-aware LIKE токены по измеряемым колонкам (если включено)."""
+        if not queries_config.auto_like_on_measured_columns:
+            return {}
+        if provider is None or not source_database or not source_table:
+            logger.debug(
+                "QueryPlanBuilder: пропуск data-aware LIKE автогенерации "
+                "(provider/db/table недоступны)"
+            )
+            return {}
+
+        candidate_columns = list(measured_columns or [])
+        if not candidate_columns:
+            candidate_columns = [column.name for column in table_ddl.columns]
+
+        deduplicated_candidates: list[str] = []
+        seen: set[str] = set()
+        for column_name in candidate_columns:
+            normalized = str(column_name).strip()
+            if not normalized or normalized in seen:
+                continue
+            column = table_ddl.column(normalized)
+            if column is None:
+                continue
+            if not self._is_string_like_column(column.type):
+                continue
+            seen.add(normalized)
+            deduplicated_candidates.append(normalized)
+
+        if not deduplicated_candidates:
+            return {}
+
+        try:
+            return provider.fetch_like_tokens(
+                source_database,
+                source_table,
+                deduplicated_candidates,
+                sample_rows_per_column=queries_config.auto_like_sample_rows_per_column,
+                min_token_length=queries_config.auto_like_min_token_length,
+                max_token_length=queries_config.auto_like_max_token_length,
+            )
+        except Exception:
+            logger.exception(
+                "QueryPlanBuilder: data-aware LIKE token collection failed "
+                "(table=%s, source=%s.%s) — fallback to default auto queries",
+                table_ddl.name,
+                source_database,
+                source_table,
+            )
+            return {}
+
+    def build(
+        self,
+        table_ddl: TableDDL,
+        queries_config: QueriesConfig,
+        *,
+        provider: Optional[MetadataProvider] = None,
+        source_database: Optional[str] = None,
+        source_table: Optional[str] = None,
+        measured_columns: Optional[Sequence[str]] = None,
+    ) -> QueryPlan:
         """
         Собирает сырой план запросов (ещё без подстановки имени таблицы).
 
@@ -190,18 +272,11 @@ class QueryPlanBuilder:
         """
         mode = queries_config.mode
 
-        auto_queries = [
-            Query(
-                query_id=f"auto_query_{index}",
-                query=q.query,
-                cache_mode="warm",
-            )
-            for index, q in enumerate(generate_queries(table_ddl))
-        ]
         manual_queries = [
             Query(
                 query_id=q.query_id or f"manual_query_{index}",
                 query=q.query,
+                query_type=q.query_type,
                 cache_mode=q.cache_mode,
                 select_operations_count=q.select_operations_count,
                 warmup_queries=list(q.warmup_queries),
@@ -209,12 +284,50 @@ class QueryPlanBuilder:
             for index, q in enumerate(queries_config.test_queries)
         ]
 
-        if mode == "auto":
-            tests = auto_queries
-        elif mode == "manual":
+        if mode == "manual":
             tests = manual_queries
         else:
-            tests = auto_queries + manual_queries
+            auto_like_tokens = self._build_data_aware_like_tokens(
+                table_ddl=table_ddl,
+                queries_config=queries_config,
+                provider=provider,
+                source_database=source_database,
+                source_table=source_table,
+                measured_columns=measured_columns,
+            )
+            auto_generated_queries = generate_queries(
+                table_ddl,
+                like_tokens_by_column=auto_like_tokens,
+                measured_columns=measured_columns,
+                prefer_measured_columns=True,
+                auto_select_limit=queries_config.auto_select_limit,
+            )
+            if (
+                queries_config.auto_like_replace_default_auto_queries
+                and auto_like_tokens
+            ):
+                # Legacy fallback branch: если явно попросили replacement и measured-plan
+                # почему-то пустой, всё равно оставляем data-aware LIKE набор.
+                if not auto_generated_queries:
+                    auto_generated_queries = QueryGenerator(
+                        table_ddl,
+                        auto_select_limit=queries_config.auto_select_limit,
+                    ).generate_data_aware_like_queries(auto_like_tokens)
+
+            auto_queries = [
+                Query(
+                    query_id=f"auto_query_{index}",
+                    query=q.query,
+                    query_type=q.query_type,
+                    cache_mode="warm",
+                )
+                for index, q in enumerate(auto_generated_queries)
+            ]
+
+            if mode == "auto":
+                tests = auto_queries
+            else:
+                tests = auto_queries + manual_queries
 
         plan = QueryPlan(test_queries=self._ensure_unique_query_ids(tests))
         logger.debug(
@@ -270,6 +383,7 @@ class QueryPlanBuilder:
             Query(
                 query_id=planned.query_id,
                 query=_render_sql(planned.query),
+                query_type=planned.query_type,
                 cache_mode=planned.cache_mode,
                 select_operations_count=planned.select_operations_count,
                 warmup_queries=[_render_sql(warmup_query) for warmup_query in planned.warmup_queries],
@@ -629,7 +743,18 @@ class BenchmarkEngine:
             database=table_plan.database,
             table=table_plan.table,
         )
-        raw_query_plan = self._query_builder.build(source_ddl, table_plan.queries)
+        measured_columns = self._resolve_measured_columns(
+            table_plan=table_plan,
+            source_ddl=source_ddl,
+        )
+        raw_query_plan = self._query_builder.build(
+            source_ddl,
+            table_plan.queries,
+            provider=provider,
+            source_database=table_plan.database,
+            source_table=table_plan.table,
+            measured_columns=measured_columns,
+        )
         logger.debug(
             "BenchmarkEngine: подготовлен table context "
             "(benchmark=%s, table=%s.%s, strategy=%s)",
@@ -639,6 +764,21 @@ class BenchmarkEngine:
             table_plan.strategy,
         )
         return source_ddl, raw_query_plan
+
+    @staticmethod
+    def _resolve_measured_columns(
+        table_plan: TableBenchmarkPlan,
+        source_ddl: TableDDL,
+    ) -> List[str]:
+        """Возвращает колонки, которые реально участвуют в type/codec/index переборе."""
+        measured_columns: list[str] = []
+        for column in source_ddl.columns:
+            if any(rule.matches(column) for rule in table_plan.rules.column_rules):
+                measured_columns.append(column.name)
+                continue
+            if any(rule.matches(column) for rule in table_plan.rules.index_rules):
+                measured_columns.append(column.name)
+        return measured_columns
 
     def build_source_benchmark_job(
         self,
@@ -1295,6 +1435,7 @@ class BenchmarkRunner:
                 Query(
                     query_id=str(payload.get("query_id") or f"query_{idx}"),
                     query=query_text,
+                    query_type=str(payload.get("query_type") or "generic"),
                     cache_mode=str(payload.get("cache_mode") or "warm"),
                     select_operations_count=select_operations_count,
                     warmup_queries=[

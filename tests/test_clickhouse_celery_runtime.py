@@ -325,6 +325,14 @@ class ClickHouseCeleryRuntimeTests(unittest.TestCase):
             fake_app.calls[1]["kwargs"]["payload"]["scoring"]["mode"],
             "expression",
         )
+        self.assertEqual(
+            fake_app.calls[0]["kwargs"]["payload"]["query_plan"]["test_queries"][0]["query_type"],
+            "generic",
+        )
+        self.assertIn(
+            fake_app.calls[1]["kwargs"]["payload"]["query_plan"]["test_queries"][0]["query_type"],
+            {"hit", "miss", "generic", "manual"},
+        )
 
     def test_variant_task_is_configured_to_ignore_backend_results(self) -> None:
         if celery_worker_app is None:

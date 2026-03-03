@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Dict, List, Literal, Optional, Sequence
 
 from src.clickhouse_ddl import ColumnDef, TableDDL
 
@@ -29,11 +29,16 @@ from src.clickhouse_ddl import ColumnDef, TableDDL
 def _base_type(col: ColumnDef) -> str:
     """Возвращает базовый тип без параметров и обёрток."""
     t = col.type
-    # Снимаем LowCardinality(), Nullable()
-    for wrapper in ("LowCardinality", "Nullable"):
-        m = re.match(rf"^{wrapper}\((.+)\)$", t)
-        if m:
-            t = m.group(1)
+    # Снимаем вложенные LowCardinality()/Nullable().
+    while True:
+        unwrapped = t
+        for wrapper in ("LowCardinality", "Nullable"):
+            m = re.match(rf"^{wrapper}\((.+)\)$", unwrapped)
+            if m:
+                unwrapped = m.group(1)
+        if unwrapped == t:
+            break
+        t = unwrapped
     # Убираем параметры: Decimal(18,4) → Decimal
     return t.split("(")[0]
 
@@ -77,6 +82,17 @@ def _is_nullable(col: ColumnDef) -> bool:
     return col.type.startswith("Nullable(")
 
 
+def _quote_ident(value: str) -> str:
+    """Квотирует имя колонки в ClickHouse SQL."""
+    return f"`{str(value).replace('`', '``')}`"
+
+
+def _sql_literal(value: object) -> str:
+    """Преобразует Python-значение в SQL-литерал."""
+    escaped = str(value).replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
 # ─── датакласс результата ─────────────────────────────────────────────────────
 
 class GeneratedQuery(BaseModel):
@@ -84,6 +100,7 @@ class GeneratedQuery(BaseModel):
 
     query: str
     description: str = ""
+    query_type: Literal["hit", "miss", "generic"] = "generic"
 
 
 # ─── генератор ───────────────────────────────────────────────────────────────
@@ -99,10 +116,60 @@ class QueryGenerator:
             print(q.query)
     """
 
-    def __init__(self, table: TableDDL) -> None:
+    def __init__(self, table: TableDDL, *, auto_select_limit: int = 10) -> None:
         """Инициализирует генератор для конкретной схемы таблицы."""
         self.table = table
         self._placeholder = "{table}"   # подставляется в runner
+        self._auto_select_limit = max(1, int(auto_select_limit))
+
+    @staticmethod
+    def _is_select_query(sql: str) -> bool:
+        """Проверяет, что SQL — SELECT-запрос."""
+        return re.match(r"^\s*SELECT\b", sql, flags=re.IGNORECASE) is not None
+
+    def _enforce_select_limit(self, sql: str) -> str:
+        """
+        Принудительно выставляет LIMIT для автосгенерированных SELECT.
+
+        Правило:
+          - если LIMIT уже есть, заменяем его значение;
+          - если LIMIT нет, добавляем в конец (перед SETTINGS, если есть).
+        """
+        if not self._is_select_query(sql):
+            return sql
+
+        cleaned_sql = sql.rstrip().rstrip(";")
+        limit_pattern = re.compile(
+            r"(?is)\bLIMIT\s+\d+(?:\s*,\s*\d+)?(?:\s+OFFSET\s+\d+)?"
+        )
+        if limit_pattern.search(cleaned_sql):
+            return limit_pattern.sub(
+                f"LIMIT {self._auto_select_limit}",
+                cleaned_sql,
+                count=1,
+            )
+
+        settings_match = re.search(r"(?is)\bSETTINGS\b", cleaned_sql)
+        if settings_match is not None:
+            start = settings_match.start()
+            prefix = cleaned_sql[:start].rstrip()
+            suffix = cleaned_sql[start:].lstrip()
+            return f"{prefix} LIMIT {self._auto_select_limit} {suffix}"
+
+        return f"{cleaned_sql} LIMIT {self._auto_select_limit}"
+
+    def _enforce_limit_for_generated(self, queries: List[GeneratedQuery]) -> List[GeneratedQuery]:
+        """Применяет жесткий LIMIT к списку автосгенерированных SELECT запросов."""
+        normalized: list[GeneratedQuery] = []
+        for item in queries:
+            normalized.append(
+                GeneratedQuery(
+                    query=self._enforce_select_limit(item.query),
+                    description=item.description,
+                    query_type=item.query_type,
+                )
+            )
+        return normalized
 
     def generate(self) -> List[GeneratedQuery]:
         """Возвращает список запросов, покрывающих основные паттерны."""
@@ -116,7 +183,162 @@ class QueryGenerator:
 
         # Возвращаем запросы как есть: scoring больше не использует query-level weights.
 
-        return queries
+        return self._enforce_limit_for_generated(queries)
+
+    def generate_data_aware_like_queries(
+        self,
+        like_tokens_by_column: Dict[str, Dict[str, str]],
+    ) -> List[GeneratedQuery]:
+        """
+        Генерирует data-aware LIKE запросы по колонкам.
+
+        Для каждой колонки строится пара:
+          - hit query: токен гарантированно возвращает строки;
+          - miss query: токен гарантированно не возвращает строки.
+        """
+        if not like_tokens_by_column:
+            return []
+
+        generated: List[GeneratedQuery] = []
+        table_columns = {column.name for column in self.table.columns}
+        t = self._placeholder
+        for column_name, token_payload in like_tokens_by_column.items():
+            if column_name not in table_columns:
+                continue
+            hit_token = str(token_payload.get("hit_token") or "").strip()
+            miss_token = str(token_payload.get("miss_token") or "").strip()
+            if not hit_token:
+                continue
+            column_ident = _quote_ident(column_name)
+            generated.append(
+                GeneratedQuery(
+                    query=(
+                        f"SELECT * FROM {t} "
+                        f"WHERE {column_ident} LIKE concat('%', {_sql_literal(hit_token)}, '%') "
+                        f"LIMIT 10000"
+                    ),
+                    description=f"data-aware like hit on {column_name}",
+                    query_type="hit",
+                )
+            )
+            if miss_token:
+                generated.append(
+                    GeneratedQuery(
+                        query=(
+                            f"SELECT * FROM {t} "
+                            f"WHERE {column_ident} LIKE concat('%', {_sql_literal(miss_token)}, '%') "
+                            f"LIMIT 10000"
+                        ),
+                        description=f"data-aware like miss on {column_name}",
+                        query_type="miss",
+                    )
+                )
+        return self._enforce_limit_for_generated(generated)
+
+    def generate_measured_column_queries(
+        self,
+        measured_columns: Sequence[str],
+        *,
+        like_tokens_by_column: Optional[Dict[str, Dict[str, str]]] = None,
+    ) -> List[GeneratedQuery]:
+        """
+        Генерирует one-column запросы для измеряемых колонок.
+
+        Для строковых колонок всегда используется `LIKE '%...%'`.
+        Для остальных типов строится безопасный one-column фильтр `IS NOT NULL`.
+        """
+        table_columns = {column.name: column for column in self.table.columns}
+        deduplicated: list[str] = []
+        seen: set[str] = set()
+        for raw_column_name in measured_columns:
+            column_name = str(raw_column_name).strip()
+            if not column_name or column_name in seen:
+                continue
+            if column_name not in table_columns:
+                continue
+            seen.add(column_name)
+            deduplicated.append(column_name)
+
+        if not deduplicated:
+            return []
+
+        tokens_by_column = like_tokens_by_column or {}
+        generated: list[GeneratedQuery] = []
+        t = self._placeholder
+
+        for column_name in deduplicated:
+            column = table_columns[column_name]
+            column_ident = _quote_ident(column_name)
+
+            if _is_string(column):
+                token_payload = tokens_by_column.get(column_name, {})
+                hit_token = str(token_payload.get("hit_token") or "").strip()
+                miss_token = str(token_payload.get("miss_token") or "").strip()
+                if hit_token:
+                    hit_query = (
+                        f"SELECT * FROM {t} "
+                        f"WHERE {column_ident} LIKE '%%' "
+                        f"AND {column_ident} LIKE concat('%', {_sql_literal(hit_token)}, '%')"
+                    )
+                else:
+                    # Гарантированный hit при непустой таблице: фильтр опирается только на колонку.
+                    hit_query = (
+                        f"SELECT * FROM {t} "
+                        f"WHERE {column_ident} LIKE '%%' OR {column_ident} IS NULL"
+                    )
+
+                if miss_token:
+                    miss_query = (
+                        f"SELECT * FROM {t} "
+                        f"WHERE {column_ident} LIKE '%%' "
+                        f"AND {column_ident} LIKE concat('%', {_sql_literal(miss_token)}, '%')"
+                    )
+                else:
+                    # Гарантированный miss: взаимоисключающие предикаты по одной колонке.
+                    miss_query = (
+                        f"SELECT * FROM {t} "
+                        f"WHERE {column_ident} LIKE '%%' AND {column_ident} NOT LIKE '%%'"
+                    )
+
+                generated.append(
+                    GeneratedQuery(
+                        query=hit_query,
+                        description=f"measured like hit on {column_name}",
+                        query_type="hit",
+                    )
+                )
+                generated.append(
+                    GeneratedQuery(
+                        query=miss_query,
+                        description=f"measured like miss on {column_name}",
+                        query_type="miss",
+                    )
+                )
+                continue
+
+            # Для non-string колонок делаем пару hit/miss с гарантированным outcome.
+            generated.append(
+                GeneratedQuery(
+                    query=(
+                        f"SELECT * FROM {t} "
+                        f"WHERE {column_ident} IS NULL OR {column_ident} IS NOT NULL"
+                    ),
+                    description=f"measured hit on {column_name}",
+                    query_type="hit",
+                )
+            )
+            generated.append(
+                GeneratedQuery(
+                    query=(
+                        f"SELECT * FROM {t} "
+                        f"WHERE {column_ident} IS NULL AND {column_ident} IS NOT NULL"
+                    ),
+                    description=f"measured miss on {column_name}",
+                    query_type="miss",
+                )
+            )
+
+        return self._enforce_limit_for_generated(generated)
 
     # ── генераторы по паттернам ──────────────────────────────────────────────
 
@@ -316,6 +538,25 @@ class QueryGenerator:
 
 # ─── публичный API ────────────────────────────────────────────────────────────
 
-def generate_queries(table: TableDDL) -> List[GeneratedQuery]:
+def generate_queries(
+    table: TableDDL,
+    *,
+    like_tokens_by_column: Optional[Dict[str, Dict[str, str]]] = None,
+    measured_columns: Optional[Sequence[str]] = None,
+    prefer_measured_columns: bool = False,
+    auto_select_limit: int = 10,
+) -> List[GeneratedQuery]:
     """Удобная функция-обёртка над QueryGenerator."""
-    return QueryGenerator(table).generate()
+    generator = QueryGenerator(table, auto_select_limit=auto_select_limit)
+    if prefer_measured_columns and measured_columns:
+        queries = generator.generate_measured_column_queries(
+            measured_columns,
+            like_tokens_by_column=like_tokens_by_column,
+        )
+        if queries:
+            return queries
+
+    queries = generator.generate()
+    if like_tokens_by_column:
+        queries.extend(generator.generate_data_aware_like_queries(like_tokens_by_column))
+    return queries

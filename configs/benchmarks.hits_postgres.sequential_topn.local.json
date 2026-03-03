@@ -17,7 +17,13 @@
       "sequential_types_top_n_for_indexes": 3,
       "scoring": {
         "mode": "expression",
-        "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)"
+        "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+        "variables": {
+          "baseline_median_read_bytes": "medians.source_select_read_bytes",
+          "test_median_read_bytes": "medians.tested_select_read_bytes",
+          "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+          "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+        }
       },
       "insert_rows_per_operation_limit": 300000,
       "source_insert_rows_per_operation_limit": 180000,
@@ -46,48 +52,23 @@
             "indexes": [
               {
                 "type": "bloom_filter(0.01)",
-                "granularity": 2
+                "granularity": [
+                  4,
+                  8,
+                  16
+                ]
               }
             ]
           }
         ]
       },
       "queries": {
-        "mode": "manual",
-        "test_queries": [
-          {
-            "query": "SELECT count() FROM {table} WHERE event_date >= toDate('2014-01-01')",
-            "cache_mode": "warm",
-            "select_operations_count": 3,
-            "warmup_queries": [
-              "SELECT count() FROM {table}"
-            ]
-          },
-          {
-            "query": "SELECT country, count() FROM {table} WHERE event_date >= toDate('2014-01-01') GROUP BY country ORDER BY count() DESC LIMIT 100",
-            "cache_mode": "warm",
-            "select_operations_count": 3,
-            "warmup_queries": [
-              "SELECT count() FROM {table}"
-            ]
-          },
-          {
-            "query": "SELECT sum(revenue) FROM {table} WHERE device_type = 'mobile'",
-            "cache_mode": "warm",
-            "select_operations_count": 3,
-            "warmup_queries": [
-              "SELECT count() FROM {table}"
-            ]
-          },
-          {
-            "query": "SELECT user_id, sum(revenue) FROM {table} WHERE event_date >= toDate('2014-01-01') GROUP BY user_id ORDER BY sum(revenue) DESC LIMIT 100",
-            "cache_mode": "warm",
-            "select_operations_count": 3,
-            "warmup_queries": [
-              "SELECT count() FROM {table}"
-            ]
-          }
-        ]
+        "mode": "auto",
+        "auto_like_on_measured_columns": true,
+        "auto_like_sample_rows_per_column": 20,
+        "auto_like_min_token_length": 3,
+        "auto_like_max_token_length": 24,
+        "auto_select_limit": 10
       }
     }
   ]

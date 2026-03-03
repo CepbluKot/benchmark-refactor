@@ -267,6 +267,7 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
                     QueryPayload(
                         query_id=query.query_id,
                         query=query.query,
+                        query_type=query.query_type,
                         cache_mode=query.cache_mode,
                         select_operations_count=query.select_operations_count,
                         warmup_queries=list(query.warmup_queries),
@@ -310,6 +311,7 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
                     QueryPayload(
                         query_id=query.query_id,
                         query=query.query,
+                        query_type=query.query_type,
                         cache_mode=query.cache_mode,
                         select_operations_count=query.select_operations_count,
                         warmup_queries=list(query.warmup_queries),

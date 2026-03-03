@@ -22,8 +22,14 @@
       ],
       "scoring": {
         "mode": "expression",
-        "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)",
-        "on_error_score": -1.0
+        "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+        "on_error_score": -1.0,
+        "variables": {
+          "baseline_median_read_bytes": "medians.source_select_read_bytes",
+          "test_median_read_bytes": "medians.tested_select_read_bytes",
+          "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+          "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+        }
       },
       "insert_rows_per_operation_limits": {
         "types": 900000,
@@ -35,15 +41,12 @@
         "rule_bank": "clickhouse_universal_baseline"
       },
       "queries": {
-        "mode": "auto_with_manual",
-        "test_queries": [
-          {
-            "query_id": "q_count_last_day",
-            "query": "SELECT count() FROM {table} WHERE event_time >= now() - INTERVAL 1 DAY /* benchmark={benchmark_id} */",
-            "cache_mode": "warm",
-            "select_operations_count": 5
-          }
-        ]
+        "mode": "auto",
+        "auto_like_on_measured_columns": true,
+        "auto_like_sample_rows_per_column": 20,
+        "auto_like_min_token_length": 3,
+        "auto_like_max_token_length": 24,
+        "auto_select_limit": 10
       },
       "table_rules": [
         {
@@ -83,8 +86,9 @@
                   {
                     "type": "bloom_filter(0.01)",
                     "granularity": [
-                      228,
-                      256
+                      4,
+                      8,
+                      16
                     ],
                     "index_granularity_values": [
                       8192
@@ -92,7 +96,11 @@
                   },
                   {
                     "type": "bloom_filter(0.01)",
-                    "granularity": 123,
+                    "granularity": [
+                      4,
+                      8,
+                      16
+                    ],
                     "index_granularity_values": [
                       16384
                     ]
@@ -102,18 +110,12 @@
             ]
           },
           "queries": {
-            "mode": "manual",
-            "test_queries": [
-              {
-                "query_id": "q_revenue_sum",
-                "query": "SELECT sum(revenue) FROM {table} /* benchmark={benchmark_id} */",
-                "cache_mode": "warm",
-                "select_operations_count": 2,
-                "warmup_queries": [
-                  "SELECT count() FROM {table}"
-                ]
-              }
-            ]
+            "mode": "auto",
+            "auto_like_on_measured_columns": true,
+            "auto_like_sample_rows_per_column": 20,
+            "auto_like_min_token_length": 3,
+            "auto_like_max_token_length": 24,
+            "auto_select_limit": 10
           }
         }
       ]
@@ -132,7 +134,13 @@
       "source_insert_rows_per_operation_limit": 220000,
       "scoring": {
         "mode": "expression",
-        "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)"
+        "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+        "variables": {
+          "baseline_median_read_bytes": "medians.source_select_read_bytes",
+          "test_median_read_bytes": "medians.tested_select_read_bytes",
+          "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+          "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+        }
       },
       "insert_rows_per_operation_limits": {
         "types": 250000
@@ -141,7 +149,12 @@
         "rule_bank": "clickhouse_universal_baseline"
       },
       "queries": {
-        "mode": "auto"
+        "mode": "auto",
+        "auto_like_on_measured_columns": true,
+        "auto_like_sample_rows_per_column": 20,
+        "auto_like_min_token_length": 3,
+        "auto_like_max_token_length": 24,
+        "auto_select_limit": 10
       }
     },
     {
@@ -158,7 +171,13 @@
       "source_insert_rows_per_operation_limit": 150000,
       "scoring": {
         "mode": "expression",
-        "expression": "pow(safe_div(medians.source_insert_time_ms, medians.tested_insert_time_ms, 1.0) * safe_div(medians.source_select_time_ms, medians.tested_select_time_ms, 1.0) * safe_div(source_size_bytes, tested_size_bytes, 1.0), 1 / 3)"
+        "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+        "variables": {
+          "baseline_median_read_bytes": "medians.source_select_read_bytes",
+          "test_median_read_bytes": "medians.tested_select_read_bytes",
+          "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+          "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+        }
       },
       "insert_rows_per_operation_limits": {
         "indexes": 120000
@@ -167,7 +186,12 @@
         "rule_bank": "clickhouse_universal_baseline"
       },
       "queries": {
-        "mode": "auto"
+        "mode": "auto",
+        "auto_like_on_measured_columns": true,
+        "auto_like_sample_rows_per_column": 20,
+        "auto_like_min_token_length": 3,
+        "auto_like_max_token_length": 24,
+        "auto_select_limit": 10
       }
     }
   ]

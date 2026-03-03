@@ -949,6 +949,24 @@ print(run_id)
 - `queries.test_queries[].query_id`: стабильный ID запроса (если не задан, будет авто-ID).
 - SQL-шаблоны поддерживают плейсхолдеры `{table}` и `{benchmark_id}`.
 - Глобальный `queries.warmup_queries` не поддерживается.
+- `queries.auto_like_on_measured_columns`: включает data-aware авто-генерацию
+  `LIKE`-запросов по колонкам, которые реально участвуют в type/codec/index правилах.
+- В `mode=auto` генератор теперь строит one-column запросы по измеряемым колонкам
+  (по тем, что реально участвуют в type/codec/index фазах).
+  Для строковых колонок в автогенерации всегда используется `LIKE '%...%'`.
+  Для каждой измеряемой колонки генерируются 2 сценария:
+  - `hit` (ожидаем, что запрос вернёт строки);
+  - `miss` (ожидаем, что запрос не вернёт строк).
+- `queries.auto_like_replace_default_auto_queries`: если `true`, оставляет
+  только data-aware `LIKE` авто-запросы (без базовых auto-запросов).
+- `queries.auto_like_sample_rows_per_column`: сколько строк читать для подбора hit-token.
+- `queries.auto_like_min_token_length` / `queries.auto_like_max_token_length`:
+  диапазон длины автогенерируемого `LIKE` токена.
+- `queries.auto_select_limit` (default: `10`): жёсткий `LIMIT` для **всех**
+  автосгенерированных `SELECT` запросов (включая one-column/data-aware).
+- `queries.auto_like_max_columns` удалён и больше не поддерживается.
+  Авто-генератор не строит перестановки по N колонкам:
+  в one-column фазах стратегия сама отбирает запросы строго для stage-колонки.
 - `insert_rows_per_operation_limit`: лимит строк на одну insert-операцию.
 - `insert_rows_per_operation_limits`: такие же лимиты, но отдельно по mode (`types/indexes/...`).
 - `source_insert_rows_per_operation_limits`: baseline-лимит строк по mode (например, `sequential`).
@@ -1243,6 +1261,9 @@ print(run_id)
 - есть `index_rules` для колонок;
 - в `queries.test_queries` есть `WHERE`-фильтры по этим колонкам
   (index-фаза тестирует только такие колонки/запросы);
+- в one-column фазах (`types`, `codecs`, `indexes`) запросы фильтруются
+  строго по одной stage-колонке: multi-column запросы там не используются;
+  в merge-фазах (`index_granularity`, `final_validation`) используется полный query-plan;
 - лимиты > 0 (`sequential_top_n_limits.indexes` или fallback `sequential`);
 - адаптер возвращает `score` для index-вариантов.
 
