@@ -867,7 +867,16 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
         try:
             forget_fn = getattr(async_result, "forget", None)
             if callable(forget_fn):
-                forget_fn()
+                try:
+                    forget_fn()
+                except NotImplementedError:
+                    # Нормальный кейс для backend-ов без explicit forget support.
+                    logger.debug(
+                        "CeleryClickHouseExecutionAdapter: backend не поддерживает forget "
+                        "(task_id=%s)",
+                        task_id,
+                    )
+                    return
         except Exception:
             logger.warning(
                 "CeleryClickHouseExecutionAdapter: не удалось forget source result "

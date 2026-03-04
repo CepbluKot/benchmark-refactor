@@ -734,6 +734,35 @@ class ClickHouseCeleryRuntimeTests(unittest.TestCase):
         self.assertEqual(celery_worker_app.conf.task_compression, settings.celery_task_compression)
         self.assertEqual(celery_worker_app.conf.result_compression, settings.celery_result_compression)
 
+    def test_forget_async_result_ignores_not_implemented_backend(self) -> None:
+        class _ForgetNotImplementedResult:
+            def forget(self) -> None:
+                raise NotImplementedError("backend does not implement forget")
+
+        # Не должен выбрасывать исключение при backend без forget support.
+        CeleryClickHouseExecutionAdapter._forget_async_result(
+            _ForgetNotImplementedResult(),
+            "source-task-id-1",
+        )
+
+    def test_forget_async_result_logs_warning_on_generic_error(self) -> None:
+        class _ForgetErrorResult:
+            def forget(self) -> None:
+                raise RuntimeError("forget failed")
+
+        with self.assertLogs(execution_module.logger, level="WARNING") as captured:
+            CeleryClickHouseExecutionAdapter._forget_async_result(
+                _ForgetErrorResult(),
+                "source-task-id-2",
+            )
+
+        self.assertTrue(
+            any(
+                "не удалось forget source result" in message
+                for message in captured.output
+            )
+        )
+
     def test_sequential_strategy_calls_progress_wait_hooks(self) -> None:
         benchmark = BenchmarkConfig(
             id="bench_seq",
