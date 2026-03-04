@@ -89,7 +89,24 @@ _STREAM_INSERT_STRICT_FILL_ENABLED = str(
     "yes",
     "on",
 }
+_INSERT_SELECT_ENABLE_OFFSET_PAGINATION = str(
+    os.getenv("BENCH_INSERT_SELECT_ENABLE_OFFSET_PAGINATION", "0")
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+_INSERT_SELECT_ENABLE_DETERMINISTIC_ORDER_BY = str(
+    os.getenv("BENCH_INSERT_SELECT_ENABLE_DETERMINISTIC_ORDER_BY", "0")
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 _OPTIMIZE_FINAL_PERMISSION_DENIED = False
+_RATIO_EPSILON = 1e-9
 
 
 def _is_optimize_access_denied(exc: Exception) -> bool:
@@ -903,6 +920,25 @@ def _median_positive_finite(values: Sequence[Any]) -> Optional[float]:
     return float((valid[mid - 1] + valid[mid]) / 2.0)
 
 
+def _median_non_negative_finite(values: Sequence[Any]) -> Optional[float]:
+    """Считает медиану по валидным значениям (>=0, finite)."""
+    valid: list[float] = []
+    for value in values:
+        try:
+            numeric = float(value)
+        except Exception:
+            continue
+        if math.isfinite(numeric) and numeric >= 0:
+            valid.append(numeric)
+    if not valid:
+        return None
+    valid.sort()
+    mid = len(valid) // 2
+    if len(valid) % 2 == 1:
+        return float(valid[mid])
+    return float((valid[mid - 1] + valid[mid]) / 2.0)
+
+
 def _median_from_measurements_or_percentiles(
     measurements: Sequence[Any],
     percentiles: Sequence[Any],
@@ -912,6 +948,84 @@ def _median_from_measurements_or_percentiles(
     if direct is not None:
         return direct
     return _median_positive_finite(percentiles)
+
+
+def _median_from_measurements_or_percentiles_non_negative(
+    measurements: Sequence[Any],
+    percentiles: Sequence[Any],
+) -> Optional[float]:
+    """Берёт медиану из measurements, при их отсутствии fallback на percentiles (>=0)."""
+    direct = _median_non_negative_finite(measurements)
+    if direct is not None:
+        return direct
+    return _median_non_negative_finite(percentiles)
+
+
+def _geometric_mean_positive_finite(values: Sequence[Any]) -> Optional[float]:
+    """Геометрическое среднее по значениям > 0."""
+    valid: list[float] = []
+    for value in values:
+        try:
+            numeric = float(value)
+        except Exception:
+            continue
+        if math.isfinite(numeric) and numeric > 0:
+            valid.append(numeric)
+    if not valid:
+        return None
+    return float(math.exp(sum(math.log(value) for value in valid) / len(valid)))
+
+
+def _safe_ratio_with_zero_policy(
+    source_value: Any,
+    tested_value: Any,
+    *,
+    time_fallback_ratio: Optional[float] = None,
+    epsilon: float = _RATIO_EPSILON,
+) -> tuple[float, str]:
+    """
+    Возвращает устойчивый ratio `source/tested` с политикой для нулевых read_bytes.
+
+    Modes:
+      - `normal`: оба значения > epsilon, обычное деление.
+      - `zero_both`: оба значения ~0, считаем ratio=1.
+      - `fallback_time`: один из операндов ~0, берём ratio из time speedup.
+      - `fallback_neutral`: один из операндов ~0 и time-fallback недоступен, ratio=1.
+    """
+
+    def _norm(value: Any) -> Optional[float]:
+        try:
+            numeric = float(value)
+        except Exception:
+            return None
+        if not math.isfinite(numeric):
+            return None
+        if numeric < 0:
+            return None
+        return numeric
+
+    source = _norm(source_value)
+    tested = _norm(tested_value)
+
+    source_is_zero = source is None or source <= epsilon
+    tested_is_zero = tested is None or tested <= epsilon
+
+    if not source_is_zero and not tested_is_zero:
+        ratio = float(source) / float(tested)
+        if math.isfinite(ratio) and ratio > 0:
+            return ratio, "normal"
+        return 1.0, "fallback_neutral"
+
+    if source_is_zero and tested_is_zero:
+        return 1.0, "zero_both"
+
+    if (
+        time_fallback_ratio is not None
+        and math.isfinite(float(time_fallback_ratio))
+        and float(time_fallback_ratio) > 0
+    ):
+        return float(time_fallback_ratio), "fallback_time"
+    return 1.0, "fallback_neutral"
 
 
 def _build_score_context_medians(
@@ -970,31 +1084,19 @@ def _build_score_context_medians(
     tested_by_query_id = _entry_map(tested_per_query)
     speedup_by_query_id = _entry_map(speedup_per_query)
 
-    source_select_read_bytes = _median_from_measurements_or_percentiles(
+    source_select_read_bytes_raw = _median_from_measurements_or_percentiles_non_negative(
         _collect_values(source_per_query, "read_bytes_measurements"),
         _collect_values(source_per_query, "read_bytes_percentiles"),
     )
-    tested_select_read_bytes = _median_from_measurements_or_percentiles(
+    tested_select_read_bytes_raw = _median_from_measurements_or_percentiles_non_negative(
         _collect_values(tested_per_query, "read_bytes_measurements"),
         _collect_values(tested_per_query, "read_bytes_percentiles"),
     )
-    select_read_bytes_speedup: Optional[float] = None
-    try:
-        source_rb = float(source_select_read_bytes) if source_select_read_bytes is not None else None
-        tested_rb = float(tested_select_read_bytes) if tested_select_read_bytes is not None else None
-        if (
-            source_rb is not None
-            and tested_rb is not None
-            and math.isfinite(source_rb)
-            and math.isfinite(tested_rb)
-            and source_rb > 0
-            and tested_rb > 0
-        ):
-            select_read_bytes_speedup = source_rb / tested_rb
-            if not math.isfinite(select_read_bytes_speedup) or select_read_bytes_speedup <= 0:
-                select_read_bytes_speedup = None
-    except Exception:
-        select_read_bytes_speedup = None
+
+    def _dominant_mode(mode_counts: Dict[str, int]) -> Optional[str]:
+        if not mode_counts:
+            return None
+        return max(mode_counts.items(), key=lambda item: (item[1], str(item[0])))[0]
 
     ordered_query_ids: list[str] = []
     seen_query_ids: set[str] = set()
@@ -1009,6 +1111,8 @@ def _build_score_context_medians(
             ordered_query_ids.append(query_id)
 
     per_query_medians: Dict[str, Dict[str, Any]] = {}
+    per_query_read_bytes_speedups: list[float] = []
+    per_query_elapsed_speedups: list[float] = []
     for query_id in ordered_query_ids:
         source_entry = source_by_query_id.get(query_id, {})
         tested_entry = tested_by_query_id.get(query_id, {})
@@ -1042,14 +1146,37 @@ def _build_score_context_medians(
             tested_entry.get("bytes_per_second_measurements", []) or [],
             tested_entry.get("bytes_per_second_percentiles", []) or [],
         )
-        source_read_bytes = _median_from_measurements_or_percentiles(
+        source_read_bytes = _median_from_measurements_or_percentiles_non_negative(
             source_entry.get("read_bytes_measurements", []) or [],
             source_entry.get("read_bytes_percentiles", []) or [],
         )
-        tested_read_bytes = _median_from_measurements_or_percentiles(
+        tested_read_bytes = _median_from_measurements_or_percentiles_non_negative(
             tested_entry.get("read_bytes_measurements", []) or [],
             tested_entry.get("read_bytes_percentiles", []) or [],
         )
+        read_bytes_speedup = _median_from_measurements_or_percentiles_non_negative(
+            speedup_entry.get("read_bytes_measurements_speed_up_coefs", []) or [],
+            speedup_entry.get("read_bytes_percentiles_speed_up_coefs", []) or [],
+        )
+        read_bytes_ratio_mode_counts = (
+            speedup_entry.get("read_bytes_percentiles_speed_up_mode_counts", {})
+            if isinstance(speedup_entry, dict)
+            else {}
+        )
+        if not isinstance(read_bytes_ratio_mode_counts, dict):
+            read_bytes_ratio_mode_counts = {}
+        read_bytes_ratio_mode_counts = {
+            str(key): int(value)
+            for key, value in read_bytes_ratio_mode_counts.items()
+            if isinstance(key, str)
+            and isinstance(value, (int, float))
+            and int(value) >= 0
+        }
+        read_bytes_ratio_mode = _dominant_mode(read_bytes_ratio_mode_counts)
+        if read_bytes_speedup is not None and read_bytes_speedup > 0:
+            per_query_read_bytes_speedups.append(float(read_bytes_speedup))
+        if elapsed_ms_speedup is not None and elapsed_ms_speedup > 0:
+            per_query_elapsed_speedups.append(float(elapsed_ms_speedup))
 
         per_query_medians[query_id] = {
             "source_elapsed_ms": source_elapsed_ms,
@@ -1081,7 +1208,40 @@ def _build_score_context_medians(
                 if tested_read_bytes is not None
                 else None
             ),
+            "read_bytes_speedup": read_bytes_speedup,
+            "read_bytes_ratio_mode": read_bytes_ratio_mode,
+            "read_bytes_ratio_mode_counts": read_bytes_ratio_mode_counts,
         }
+
+    select_time_speedup_by_query_geomean = _geometric_mean_positive_finite(
+        per_query_elapsed_speedups
+    )
+    select_read_bytes_speedup_by_query_geomean = _geometric_mean_positive_finite(
+        per_query_read_bytes_speedups
+    )
+    select_read_bytes_speedup_mode = "raw"
+    select_read_bytes_speedup = select_read_bytes_speedup_by_query_geomean
+    if select_read_bytes_speedup is None:
+        raw_ratio, raw_ratio_mode = _safe_ratio_with_zero_policy(
+            source_select_read_bytes_raw,
+            tested_select_read_bytes_raw,
+            time_fallback_ratio=select_time_speedup_by_query_geomean,
+        )
+        select_read_bytes_speedup = raw_ratio
+        select_read_bytes_speedup_mode = raw_ratio_mode
+    else:
+        select_read_bytes_speedup_mode = "by_query_geomean"
+
+    source_select_read_bytes_effective = source_select_read_bytes_raw
+    tested_select_read_bytes_effective = tested_select_read_bytes_raw
+    if (
+        source_select_read_bytes_effective is None
+        or tested_select_read_bytes_effective is None
+        or source_select_read_bytes_effective <= _RATIO_EPSILON
+        or tested_select_read_bytes_effective <= _RATIO_EPSILON
+    ):
+        source_select_read_bytes_effective = float(select_read_bytes_speedup)
+        tested_select_read_bytes_effective = 1.0
 
     source_insert_bytes_per_second_median = _median_positive_finite(
         source_insert_bytes_per_second
@@ -1131,10 +1291,16 @@ def _build_score_context_medians(
             if source_select_bytes_per_second_median is not None
             else None
         ),
-        "source_select_read_bytes": source_select_read_bytes,
+        "source_select_read_bytes_raw": source_select_read_bytes_raw,
+        "source_select_read_bytes_raw_readable": (
+            make_readable_bytes(source_select_read_bytes_raw)
+            if source_select_read_bytes_raw is not None
+            else None
+        ),
+        "source_select_read_bytes": source_select_read_bytes_effective,
         "source_select_read_bytes_readable": (
-            make_readable_bytes(source_select_read_bytes)
-            if source_select_read_bytes is not None
+            make_readable_bytes(source_select_read_bytes_effective)
+            if source_select_read_bytes_effective is not None
             else None
         ),
         "tested_select_bytes_per_second": tested_select_bytes_per_second_median,
@@ -1143,15 +1309,26 @@ def _build_score_context_medians(
             if tested_select_bytes_per_second_median is not None
             else None
         ),
-        "tested_select_read_bytes": tested_select_read_bytes,
+        "tested_select_read_bytes_raw": tested_select_read_bytes_raw,
+        "tested_select_read_bytes_raw_readable": (
+            make_readable_bytes(tested_select_read_bytes_raw)
+            if tested_select_read_bytes_raw is not None
+            else None
+        ),
+        "tested_select_read_bytes": tested_select_read_bytes_effective,
         "tested_select_read_bytes_readable": (
-            make_readable_bytes(tested_select_read_bytes)
-            if tested_select_read_bytes is not None
+            make_readable_bytes(tested_select_read_bytes_effective)
+            if tested_select_read_bytes_effective is not None
             else None
         ),
         "insert_time_speedup": _median_positive_finite(insert_time_speedup),
         "select_time_speedup": _median_positive_finite(select_time_speedup),
+        "select_time_speedup_by_query_geomean": select_time_speedup_by_query_geomean,
         "select_read_bytes_speedup": select_read_bytes_speedup,
+        "select_read_bytes_speedup_mode": select_read_bytes_speedup_mode,
+        "select_read_bytes_speedup_by_query_geomean": (
+            select_read_bytes_speedup_by_query_geomean
+        ),
         "per_query": per_query_medians,
     }
 
@@ -3093,6 +3270,9 @@ def _measure_insert(
     max_retries, initial_sleep_sec, retry_sleep_increment = client.get_retry_policy()
     effective_rows_limit = int(n_rows) if n_rows is not None else None
     current_offset = 0
+    effective_deterministic_order_by = (
+        deterministic_order_by if _INSERT_SELECT_ENABLE_DETERMINISTIC_ORDER_BY else None
+    )
     can_adapt_rows_limit_on_oom = (
         effective_rows_limit is not None
         and _BASELINE_TABLE_MARKER in str(target_table)
@@ -3103,7 +3283,11 @@ def _measure_insert(
         expected_rows_per_measurement = (
             float(measurement_rows_limit) if measurement_rows_limit is not None else None
         )
-        offset = max(0, current_offset) if measurement_rows_limit is not None else 0
+        use_offset_pagination = bool(
+            _INSERT_SELECT_ENABLE_OFFSET_PAGINATION
+            and measurement_rows_limit is not None
+        )
+        offset = max(0, current_offset) if use_offset_pagination else 0
         attempt_n = 0
         sleep_sec = initial_sleep_sec
         query_metrics: Dict[str, float] = _error_query_metrics()
@@ -3119,7 +3303,7 @@ def _measure_insert(
                     strictly_adhere_n_rows=True,
                     query_tag=f"insert-{uuid.uuid4().hex}",
                     tested_cols=tested_cols,
-                    deterministic_order_by=deterministic_order_by,
+                    deterministic_order_by=effective_deterministic_order_by,
                 )
             except Exception as exc:
                 if (
@@ -3163,7 +3347,7 @@ def _measure_insert(
                         )
                         query_metrics = _error_query_metrics()
                     else:
-                        if measurement_rows_limit is not None:
+                        if use_offset_pagination and measurement_rows_limit is not None:
                             current_offset += int(max(0.0, inserted_rows))
                         break
                 else:
@@ -3659,6 +3843,14 @@ def _compute_select_time_speedup_by_query(
         )
         tested_percentiles = _coerce_float_list(tested_entry.get("elapsed_ms_percentiles", []))
         speed_up_coefs = compute_speedup_coefficients(source_percentiles, tested_percentiles)
+        if not speed_up_coefs and source_percentiles and tested_percentiles:
+            # Защита от несовпадающей длины percentile-массивов.
+            speed_up_coefs = []
+            for source_value, tested_value in zip(source_percentiles, tested_percentiles):
+                if tested_value and tested_value > 0:
+                    speed_up_coefs.append(float(source_value) / float(tested_value))
+                else:
+                    speed_up_coefs.append(1.0)
         source_read_bytes_percentiles = (
             _coerce_float_list(source_entry.get("read_bytes_percentiles", []))
             if source_entry is not None
@@ -3667,10 +3859,25 @@ def _compute_select_time_speedup_by_query(
         tested_read_bytes_percentiles = _coerce_float_list(
             tested_entry.get("read_bytes_percentiles", [])
         )
-        read_bytes_speed_up_coefs = compute_speedup_coefficients(
-            source_read_bytes_percentiles,
-            tested_read_bytes_percentiles,
-        )
+        read_bytes_speed_up_coefs: list[float] = []
+        read_bytes_speed_up_modes: list[str] = []
+        read_bytes_mode_counts: dict[str, int] = {}
+        for percentile_index, (source_value, tested_value) in enumerate(
+            zip(source_read_bytes_percentiles, tested_read_bytes_percentiles)
+        ):
+            time_fallback_ratio = (
+                speed_up_coefs[percentile_index]
+                if percentile_index < len(speed_up_coefs)
+                else None
+            )
+            ratio, ratio_mode = _safe_ratio_with_zero_policy(
+                source_value,
+                tested_value,
+                time_fallback_ratio=time_fallback_ratio,
+            )
+            read_bytes_speed_up_coefs.append(ratio)
+            read_bytes_speed_up_modes.append(ratio_mode)
+            read_bytes_mode_counts[ratio_mode] = read_bytes_mode_counts.get(ratio_mode, 0) + 1
         result.append(
             {
                 "query_index": query_index,
@@ -3684,6 +3891,8 @@ def _compute_select_time_speedup_by_query(
                 "source_query": source_entry.get("query") if source_entry is not None else None,
                 "elapsed_ms_percentiles_speed_up_coefs": speed_up_coefs,
                 "read_bytes_percentiles_speed_up_coefs": read_bytes_speed_up_coefs,
+                "read_bytes_percentiles_speed_up_modes": read_bytes_speed_up_modes,
+                "read_bytes_percentiles_speed_up_mode_counts": read_bytes_mode_counts,
             }
         )
     return result
@@ -3702,6 +3911,12 @@ def _extract_read_bytes_speedup_by_query(
         read_bytes_speedup = entry.get("read_bytes_percentiles_speed_up_coefs", [])
         if not isinstance(read_bytes_speedup, list):
             read_bytes_speedup = []
+        read_bytes_speedup_modes = entry.get("read_bytes_percentiles_speed_up_modes", [])
+        if not isinstance(read_bytes_speedup_modes, list):
+            read_bytes_speedup_modes = []
+        read_bytes_mode_counts = entry.get("read_bytes_percentiles_speed_up_mode_counts", {})
+        if not isinstance(read_bytes_mode_counts, dict):
+            read_bytes_mode_counts = {}
         result.append(
             {
                 "query_index": query_index,
@@ -3710,6 +3925,8 @@ def _extract_read_bytes_speedup_by_query(
                 "query_type": entry.get("query_type") or "generic",
                 "source_query": entry.get("source_query"),
                 "read_bytes_percentiles_speed_up_coefs": read_bytes_speedup,
+                "read_bytes_percentiles_speed_up_modes": read_bytes_speedup_modes,
+                "read_bytes_percentiles_speed_up_mode_counts": read_bytes_mode_counts,
             }
         )
     return result
@@ -4771,7 +4988,7 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
                 ),
                 "ratios": {
                     "insert": baseline_geomean_details.get("inputs", {}).get("insert_ratio"),
-                    "select": baseline_geomean_details.get("inputs", {}).get("select_ratio"),
+                    "select": baseline_context_medians.get("select_read_bytes_speedup"),
                     "compression": baseline_geomean_details.get("inputs", {}).get(
                         "compression_ratio"
                     ),
@@ -5361,7 +5578,7 @@ def run_variant_benchmark(
                 },
                 "ratios": {
                     "insert": geomean_ratio_details.get("inputs", {}).get("insert_ratio"),
-                    "select": geomean_ratio_details.get("inputs", {}).get("select_ratio"),
+                    "select": variant_context_medians.get("select_read_bytes_speedup"),
                     "compression": geomean_ratio_details.get("inputs", {}).get(
                         "compression_ratio"
                     ),

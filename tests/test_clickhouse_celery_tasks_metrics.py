@@ -393,7 +393,47 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             speedup[0]["read_bytes_percentiles_speed_up_coefs"],
             [2.0, 2.0],
         )
+        self.assertEqual(
+            speedup[0]["read_bytes_percentiles_speed_up_modes"],
+            ["normal", "normal"],
+        )
         self.assertEqual(speedup[0]["query_type"], "hit")
+
+    def test_compute_select_time_speedup_by_query_handles_zero_read_bytes(self) -> None:
+        source_per_query = [
+            {
+                "query_index": 0,
+                "query_id": "q_zero",
+                "query_type": "miss",
+                "elapsed_ms_percentiles": [120.0, 240.0],
+                "read_bytes_percentiles": [0.0, 200.0],
+            }
+        ]
+        tested_per_query = [
+            {
+                "query_index": 0,
+                "query_id": "q_zero",
+                "query_type": "miss",
+                "elapsed_ms_percentiles": [60.0, 120.0],
+                "read_bytes_percentiles": [0.0, 0.0],
+            }
+        ]
+
+        speedup = _compute_select_time_speedup_by_query(source_per_query, tested_per_query)
+
+        self.assertEqual(len(speedup), 1)
+        self.assertEqual(speedup[0]["elapsed_ms_percentiles_speed_up_coefs"], [2.0, 2.0])
+        # first percentile: 0/0 -> neutral ratio
+        # second percentile: tested=0, source>0 -> fallback to elapsed ratio
+        self.assertEqual(speedup[0]["read_bytes_percentiles_speed_up_coefs"], [1.0, 2.0])
+        self.assertEqual(
+            speedup[0]["read_bytes_percentiles_speed_up_modes"],
+            ["zero_both", "fallback_time"],
+        )
+        self.assertEqual(
+            speedup[0]["read_bytes_percentiles_speed_up_mode_counts"],
+            {"zero_both": 1, "fallback_time": 1},
+        )
 
     def test_run_source_benchmark_calculates_metrics_and_baseline_score(self) -> None:
         fake_client = _FakeRuntimeClient(
@@ -3819,6 +3859,96 @@ ORDER BY country
 
         self.assertEqual(stats["elapsed_ns"], [150_000_000.0])
         self.assertEqual(len(fake_client.insert_with_metrics_calls), 2)
+
+    def test_measure_insert_uses_safe_defaults_without_offset_and_order_by(self) -> None:
+        fake_client = _FakeRuntimeClient(
+            query_metrics_sequence=[
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 10_000.0,
+                },
+                {
+                    "elapsed_ns": 110_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 11_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 11_000.0,
+                },
+            ],
+            retry_policy=(0, 0.0, 0.0),
+        )
+
+        with patch.object(celery_tasks_module, "_INSERT_SELECT_ENABLE_OFFSET_PAGINATION", False), patch.object(
+            celery_tasks_module, "_INSERT_SELECT_ENABLE_DETERMINISTIC_ORDER_BY", False
+        ):
+            _measure_insert(
+                fake_client,
+                source_database="analytics",
+                source_table="events",
+                target_database="bench_tmp",
+                target_table="events_variant",
+                n_rows=1000,
+                n_measurements=2,
+                deterministic_order_by="`event_time`",
+            )
+
+        self.assertEqual(len(fake_client.insert_with_metrics_calls), 2)
+        self.assertEqual(
+            [call["offset"] for call in fake_client.insert_with_metrics_calls],
+            [0, 0],
+        )
+        self.assertEqual(
+            [call["deterministic_order_by"] for call in fake_client.insert_with_metrics_calls],
+            [None, None],
+        )
+
+    def test_measure_insert_can_enable_offset_and_order_by_via_flags(self) -> None:
+        fake_client = _FakeRuntimeClient(
+            query_metrics_sequence=[
+                {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 10_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 10_000.0,
+                },
+                {
+                    "elapsed_ns": 110_000_000.0,
+                    "read_rows": 1000.0,
+                    "read_bytes": 11_000.0,
+                    "written_rows": 1000.0,
+                    "written_bytes": 11_000.0,
+                },
+            ],
+            retry_policy=(0, 0.0, 0.0),
+        )
+
+        with patch.object(celery_tasks_module, "_INSERT_SELECT_ENABLE_OFFSET_PAGINATION", True), patch.object(
+            celery_tasks_module, "_INSERT_SELECT_ENABLE_DETERMINISTIC_ORDER_BY", True
+        ):
+            _measure_insert(
+                fake_client,
+                source_database="analytics",
+                source_table="events",
+                target_database="bench_tmp",
+                target_table="events_variant",
+                n_rows=1000,
+                n_measurements=2,
+                deterministic_order_by="`event_time`",
+            )
+
+        self.assertEqual(len(fake_client.insert_with_metrics_calls), 2)
+        self.assertEqual(
+            [call["offset"] for call in fake_client.insert_with_metrics_calls],
+            [0, 1000],
+        )
+        self.assertEqual(
+            [call["deterministic_order_by"] for call in fake_client.insert_with_metrics_calls],
+            ["`event_time`", "`event_time`"],
+        )
 
     def test_measure_insert_reduces_source_rows_limit_on_oom(self) -> None:
         class _BaselineOomClient:
