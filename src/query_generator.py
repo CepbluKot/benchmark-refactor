@@ -179,7 +179,6 @@ class QueryGenerator:
         queries += self._datetime_range_queries()
         queries += self._order_by_filter_queries()
         queries += self._aggregate_queries()
-        queries += self._group_by_queries()
 
         # Возвращаем запросы как есть: scoring больше не использует query-level weights.
 
@@ -473,68 +472,6 @@ class QueryGenerator:
             ))
 
         return queries
-
-    def _group_by_queries(self) -> List[GeneratedQuery]:
-        """GROUP BY по низкокардинальным колонкам."""
-        lc_cols = [
-            c for c in self.table.columns
-            if _is_low_cardinality(c) or _is_integer(c)
-        ]
-        numeric_cols = [c for c in self.table.columns if _is_numeric(c)]
-
-        if not lc_cols:
-            return []
-
-        t = self._placeholder
-        queries = []
-
-        group_col = lc_cols[0]
-
-        if numeric_cols:
-            num_col = numeric_cols[0]
-            queries.append(GeneratedQuery(
-                query=(
-                    f"SELECT `{group_col.name}`, count(), sum(`{num_col.name}`) "
-                    f"FROM {t} "
-                    f"GROUP BY `{group_col.name}` "
-                    f"ORDER BY count() DESC "
-                    f"LIMIT 100"
-                ),
-                description=f"group by {group_col.name} with aggregate",
-            ))
-        else:
-            queries.append(GeneratedQuery(
-                query=(
-                    f"SELECT `{group_col.name}`, count() "
-                    f"FROM {t} "
-                    f"GROUP BY `{group_col.name}` "
-                    f"ORDER BY count() DESC "
-                    f"LIMIT 100"
-                ),
-                description=f"group by {group_col.name}",
-            ))
-
-        # Если есть DateTime + низкокардинальная — двойная группировка
-        dt_cols = [c for c in self.table.columns if _is_datetime(c)]
-        if dt_cols and len(lc_cols) >= 1:
-            dt_col = dt_cols[0]
-            queries.append(GeneratedQuery(
-                query=(
-                    f"SELECT "
-                    f"toYYYYMM(`{dt_col.name}`) AS month, "
-                    f"`{group_col.name}`, "
-                    f"count() "
-                    f"FROM {t} "
-                    f"WHERE `{dt_col.name}` >= now() - INTERVAL 90 DAY "
-                    f"GROUP BY month, `{group_col.name}` "
-                    f"ORDER BY month DESC, count() DESC "
-                    f"LIMIT 200"
-                ),
-                description=f"group by month + {group_col.name}",
-            ))
-
-        return queries
-
 
 # ─── публичный API ────────────────────────────────────────────────────────────
 

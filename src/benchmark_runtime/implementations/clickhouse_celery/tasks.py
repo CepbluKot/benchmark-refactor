@@ -63,7 +63,7 @@ _OPTIMIZE_FINAL_WAIT_TIMEOUT_SEC = float(
 _OPTIMIZE_FINAL_WAIT_POLL_SEC = float(
     os.getenv("BENCH_OPTIMIZE_FINAL_WAIT_POLL_SEC", "1.0")
 )
-_ENABLE_OPTIMIZE_FINAL = str(os.getenv("BENCH_ENABLE_OPTIMIZE_FINAL", "1")).strip().lower() in {
+_ENABLE_OPTIMIZE_FINAL = str(os.getenv("BENCH_ENABLE_OPTIMIZE_FINAL", "0")).strip().lower() in {
     "1",
     "true",
     "yes",
@@ -81,6 +81,14 @@ _QUERY_LOG_METRICS_POLL_TOTAL_WAIT_SEC = max(
     0.0,
     float(os.getenv("BENCH_QUERY_LOG_METRICS_POLL_TOTAL_WAIT_SEC", "15.0")),
 )
+_STREAM_INSERT_STRICT_FILL_ENABLED = str(
+    os.getenv("BENCH_STREAM_INSERT_STRICT_FILL_ENABLED", "0")
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 _OPTIMIZE_FINAL_PERMISSION_DENIED = False
 
 
@@ -1526,6 +1534,18 @@ class ConnectionPayload(BaseModel):
         )
 
 
+class TaskPayloadRefPayload(BaseModel):
+    """Ссылка на payload, сохранённый в ClickHouse (offload из broker message)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    payload_id: str
+    payload_kind: Literal["source", "variant"]
+    storage_connection: ConnectionPayload
+    storage_database: str
+    storage_table: str
+
+
 class SourceBenchmarkTaskPayload(BaseModel):
     """Payload baseline benchmark задачи."""
 
@@ -1587,6 +1607,65 @@ class VariantBenchmarkTaskPayload(BaseModel):
 
     source_benchmark: Optional[Dict[str, Any]] = None
     measured_percentiles: List[int] = Field(default_factory=lambda: list(DEFAULT_MEASURED_PERCENTILES))
+
+
+def _escape_identifier(identifier: str) -> str:
+    """Экранирует SQL-идентификатор для использования в backticks."""
+    return str(identifier).replace("`", "``")
+
+
+def _load_task_payload_from_store(
+    payload_ref_raw: Dict[str, Any],
+    *,
+    expected_kind: Literal["source", "variant"],
+) -> Dict[str, Any]:
+    """Загружает task payload из ClickHouse по `payload_ref`."""
+    payload_ref = TaskPayloadRefPayload.model_validate(payload_ref_raw)
+    if payload_ref.payload_kind != expected_kind:
+        raise ValueError(
+            f"payload_kind mismatch: expected={expected_kind}, actual={payload_ref.payload_kind}"
+        )
+
+    storage_database = _escape_identifier(payload_ref.storage_database)
+    storage_table = _escape_identifier(payload_ref.storage_table)
+    client = _ClickHouseRuntimeClient(payload_ref.storage_connection)
+    try:
+        rows = client.execute(
+            (
+                f"SELECT payload_json "
+                f"FROM `{storage_database}`.`{storage_table}` "
+                "WHERE payload_id = %(payload_id)s "
+                "  AND payload_kind = %(payload_kind)s "
+                "ORDER BY created_at DESC "
+                "LIMIT 1"
+            ),
+            params={
+                "payload_id": payload_ref.payload_id,
+                "payload_kind": payload_ref.payload_kind,
+            },
+        )
+    finally:
+        client.close()
+
+    if not rows:
+        raise RuntimeError(
+            "Task payload не найден в ClickHouse payload store "
+            f"(payload_id={payload_ref.payload_id}, kind={payload_ref.payload_kind})"
+        )
+    payload_json = rows[0][0]
+    try:
+        payload = json.loads(str(payload_json))
+    except Exception as exc:
+        raise RuntimeError(
+            "Task payload в ClickHouse payload store содержит невалидный JSON "
+            f"(payload_id={payload_ref.payload_id}, kind={payload_ref.payload_kind})"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            "Task payload в ClickHouse payload store должен быть JSON-объектом "
+            f"(payload_id={payload_ref.payload_id}, kind={payload_ref.payload_kind})"
+        )
+    return payload
 
 
 class _ClickHouseRuntimeClient:
@@ -2597,6 +2676,20 @@ class _ClickHouseRuntimeClient:
         )
 
     @staticmethod
+    def _build_non_empty_filter_where_clause(
+        tested_cols: Optional[Sequence[str]] = None,
+    ) -> str:
+        """Строит WHERE для фильтра по непустым значениям измеряемых колонок."""
+        filter_columns = [str(col).strip() for col in (tested_cols or []) if str(col).strip()]
+        if not filter_columns:
+            return ""
+        conditions = []
+        for column_name in filter_columns:
+            escaped_name = column_name.replace("`", "``")
+            conditions.append(f"toString(`{escaped_name}`) != ''")
+        return f" WHERE {' AND '.join(conditions)}"
+
+    @staticmethod
     def _build_source_select_for_insert(
         *,
         source_database: str,
@@ -2611,14 +2704,9 @@ class _ClickHouseRuntimeClient:
         source_ref = f"`{source_database}`.`{source_table}`"
         source_alias = "src"
         projection = f"{source_alias}.*"
-        filter_columns = [str(col).strip() for col in (tested_cols or []) if str(col).strip()]
-        where_clause = ""
-        if filter_columns:
-            conditions = []
-            for column_name in filter_columns:
-                escaped_name = column_name.replace("`", "``")
-                conditions.append(f"toString(`{escaped_name}`) != ''")
-            where_clause = f" WHERE {' AND '.join(conditions)}"
+        where_clause = _ClickHouseRuntimeClient._build_non_empty_filter_where_clause(
+            tested_cols=tested_cols
+        )
         order_by_clause = ""
         if deterministic_order_by:
             order_by_clause = f" ORDER BY {deterministic_order_by}"
@@ -2631,19 +2719,11 @@ class _ClickHouseRuntimeClient:
             )
 
         if strictly_adhere_n_rows:
-            required_rows = offset + n_rows
+            # В strict-fill сам добор строк выполняется в insert_from_source_with_metrics
+            # безопасными чанками без CROSS JOIN numbers(...), чтобы не ловить OOM.
             return (
-                "WITH\n"
-                # Важно: считаем cnt на том же фильтре, что и в INSERT SELECT.
-                # Иначе при OFFSET можно недооценить repeats и вставить меньше n_rows.
-                f"    ifNull((SELECT count() FROM {source_ref}{where_clause}), 0) AS cnt,\n"
-                f"    if(cnt = 0, 0, intDiv({required_rows} + cnt - 1, cnt)) AS repeats,\n"
-                "    if(repeats = 0, 1, repeats) AS repeats_not_equal_zero\n"
-                f"SELECT {projection}\n"
-                f"FROM {source_ref} AS {source_alias}\n"
-                "CROSS JOIN numbers(repeats_not_equal_zero) AS n\n"
-                f"{where_clause}\n"
-                f"{order_by_clause}\n"
+                f"SELECT {projection} FROM {source_ref} AS {source_alias}"
+                f"{where_clause}{order_by_clause} "
                 f"LIMIT {n_rows} OFFSET {offset}"
             )
 
@@ -2740,7 +2820,22 @@ class _ClickHouseRuntimeClient:
                 deterministic_order_by=deterministic_order_by,
             )
 
-        source_select_query = _build_source_select_query(fallback_strict_fill)
+        def _aggregate_query_metrics(metrics_list: Sequence[Dict[str, float]]) -> Dict[str, float]:
+            keys = ("elapsed_ns", "read_rows", "read_bytes", "written_rows", "written_bytes")
+            if not metrics_list:
+                return _error_query_metrics()
+            aggregated: Dict[str, float] = {}
+            for key in keys:
+                values = [float(metric.get(key, -1.0)) for metric in metrics_list]
+                if any(value < 0 for value in values):
+                    aggregated[key] = -1.0
+                else:
+                    aggregated[key] = float(sum(values))
+            return aggregated
+
+        stream_select_query = _build_source_select_query(
+            fallback_strict_fill and _STREAM_INSERT_STRICT_FILL_ENABLED
+        )
         stream_copy_disabled = bool(getattr(self, "_stream_copy_disabled", False))
         stream_client = None if stream_copy_disabled else self._get_stream_client()
         if stream_client is not None:
@@ -2758,7 +2853,7 @@ class _ClickHouseRuntimeClient:
                         self._stream_connection.port,
                     )
                     return _error_query_metrics()
-                source_stream = stream_client.raw_stream(source_select_query, fmt="Native")
+                source_stream = stream_client.raw_stream(stream_select_query, fmt="Native")
                 if self._is_stream_empty(source_stream):
                     return _error_query_metrics()
                 insert_query_id = self._build_query_id(
@@ -2826,8 +2921,23 @@ class _ClickHouseRuntimeClient:
                 if stream_slot_acquired:
                     self._release_stream_slot()
 
-        def _run_fallback_insert(strict_fill: bool) -> Dict[str, float]:
+        def _run_fallback_insert_once(
+            *,
+            strict_fill: bool,
+            limit_rows: Optional[int],
+            offset_rows: int,
+        ) -> Dict[str, float]:
             fallback_select = _build_source_select_query(strict_fill)
+            if limit_rows != n_rows or offset_rows != safe_offset:
+                fallback_select = self._build_source_select_for_insert(
+                    source_database=source_database,
+                    source_table=source_table,
+                    n_rows=limit_rows,
+                    offset=offset_rows,
+                    strictly_adhere_n_rows=bool(strict_fill),
+                    tested_cols=tested_cols,
+                    deterministic_order_by=deterministic_order_by,
+                )
             insert_query = (
                 f"INSERT INTO `{target_database}`.`{target_table}`\n"
                 f"{fallback_select}"
@@ -2838,8 +2948,73 @@ class _ClickHouseRuntimeClient:
                 raise_on_execute_error=True,
             )
 
+        def _run_fallback_insert_strict_fill() -> Dict[str, float]:
+            if n_rows is None:
+                return _run_fallback_insert_once(
+                    strict_fill=False,
+                    limit_rows=None,
+                    offset_rows=safe_offset,
+                )
+            source_ref = f"`{source_database}`.`{source_table}`"
+            where_clause = self._build_non_empty_filter_where_clause(tested_cols=tested_cols)
+            source_count_rows = self.execute(
+                f"SELECT count() FROM {source_ref}{where_clause}",
+            )
+            source_count = 0
+            if source_count_rows and isinstance(source_count_rows[0], (list, tuple)):
+                source_count = int(source_count_rows[0][0] or 0)
+            if source_count <= 0:
+                return _error_query_metrics()
+
+            remaining = int(max(0, n_rows))
+            cursor = int(safe_offset % source_count)
+            per_chunk_metrics: list[Dict[str, float]] = []
+            while remaining > 0:
+                available_until_wrap = source_count - cursor
+                chunk_limit = int(min(remaining, max(1, available_until_wrap)))
+                chunk_metrics = _run_fallback_insert_once(
+                    strict_fill=False,
+                    limit_rows=chunk_limit,
+                    offset_rows=cursor,
+                )
+                if _is_error_query_metrics(chunk_metrics):
+                    return chunk_metrics
+                inserted_rows = int(float(chunk_metrics.get("written_rows", -1.0)))
+                if inserted_rows <= 0:
+                    logger.warning(
+                        "Strict-fill fallback INSERT вставил 0 строк "
+                        "(table=%s.%s, requested_chunk=%d, offset=%d)",
+                        target_database,
+                        target_table,
+                        chunk_limit,
+                        cursor,
+                    )
+                    return _error_query_metrics()
+                if inserted_rows < chunk_limit:
+                    logger.warning(
+                        "Strict-fill fallback INSERT вставил меньше, чем запрошено "
+                        "(table=%s.%s, requested_chunk=%d, inserted_rows=%d, offset=%d)",
+                        target_database,
+                        target_table,
+                        chunk_limit,
+                        inserted_rows,
+                        cursor,
+                    )
+                    return _error_query_metrics()
+
+                per_chunk_metrics.append(chunk_metrics)
+                remaining = max(0, remaining - inserted_rows)
+                cursor = (cursor + inserted_rows) % source_count
+            return _aggregate_query_metrics(per_chunk_metrics)
+
         try:
-            return _run_fallback_insert(fallback_strict_fill)
+            if fallback_strict_fill:
+                return _run_fallback_insert_strict_fill()
+            return _run_fallback_insert_once(
+                strict_fill=False,
+                limit_rows=n_rows,
+                offset_rows=safe_offset,
+            )
         except Exception as fallback_exc:
             if (
                 fallback_strict_fill
@@ -2854,7 +3029,11 @@ class _ClickHouseRuntimeClient:
                     target_table,
                 )
                 try:
-                    return _run_fallback_insert(False)
+                    return _run_fallback_insert_once(
+                        strict_fill=False,
+                        limit_rows=n_rows,
+                        offset_rows=safe_offset,
+                    )
                 except Exception as retry_exc:
                     if _is_memory_limit_exceeded_error(retry_exc):
                         raise RuntimeError(
@@ -2912,26 +3091,61 @@ def _measure_insert(
     read_bytes_per_second_entries: list[float] = []
     written_rows_entries: list[float] = []
     max_retries, initial_sleep_sec, retry_sleep_increment = client.get_retry_policy()
-    expected_rows_per_measurement = float(n_rows) if n_rows is not None else None
+    effective_rows_limit = int(n_rows) if n_rows is not None else None
+    current_offset = 0
+    can_adapt_rows_limit_on_oom = (
+        effective_rows_limit is not None
+        and _BASELINE_TABLE_MARKER in str(target_table)
+    )
 
     for measurement_id in range(max(1, n_measurements)):
-        offset = max(0, measurement_id * n_rows) if n_rows is not None else 0
+        measurement_rows_limit = effective_rows_limit
+        expected_rows_per_measurement = (
+            float(measurement_rows_limit) if measurement_rows_limit is not None else None
+        )
+        offset = max(0, current_offset) if measurement_rows_limit is not None else 0
         attempt_n = 0
         sleep_sec = initial_sleep_sec
         query_metrics: Dict[str, float] = _error_query_metrics()
         while True:
-            query_metrics = client.insert_from_source_with_metrics(
-                source_database=source_database,
-                source_table=source_table,
-                target_database=target_database,
-                target_table=target_table,
-                n_rows=n_rows,
-                offset=offset,
-                strictly_adhere_n_rows=True,
-                query_tag=f"insert-{uuid.uuid4().hex}",
-                tested_cols=tested_cols,
-                deterministic_order_by=deterministic_order_by,
-            )
+            try:
+                query_metrics = client.insert_from_source_with_metrics(
+                    source_database=source_database,
+                    source_table=source_table,
+                    target_database=target_database,
+                    target_table=target_table,
+                    n_rows=measurement_rows_limit,
+                    offset=offset,
+                    strictly_adhere_n_rows=True,
+                    query_tag=f"insert-{uuid.uuid4().hex}",
+                    tested_cols=tested_cols,
+                    deterministic_order_by=deterministic_order_by,
+                )
+            except Exception as exc:
+                if (
+                    can_adapt_rows_limit_on_oom
+                    and measurement_rows_limit is not None
+                    and measurement_rows_limit > 1
+                    and _is_memory_limit_exceeded_error(exc)
+                ):
+                    reduced_rows_limit = max(1, measurement_rows_limit // 2)
+                    if reduced_rows_limit < measurement_rows_limit:
+                        logger.warning(
+                            "INSERT baseline поймал MEMORY_LIMIT_EXCEEDED; уменьшаем "
+                            "source_insert_rows_per_operation_limit "
+                            "(table=%s.%s, measurement=%d, from=%d, to=%d, offset=%d)",
+                            target_database,
+                            target_table,
+                            measurement_id,
+                            measurement_rows_limit,
+                            reduced_rows_limit,
+                            offset,
+                        )
+                        measurement_rows_limit = reduced_rows_limit
+                        expected_rows_per_measurement = float(measurement_rows_limit)
+                        effective_rows_limit = min(effective_rows_limit or reduced_rows_limit, reduced_rows_limit)
+                        continue
+                raise
             if not _is_error_query_metrics(query_metrics):
                 # Гарантируем "ровно n_rows" на каждой insert-итерации, если лимит задан.
                 if expected_rows_per_measurement is not None:
@@ -2949,6 +3163,8 @@ def _measure_insert(
                         )
                         query_metrics = _error_query_metrics()
                     else:
+                        if measurement_rows_limit is not None:
+                            current_offset += int(max(0.0, inserted_rows))
                         break
                 else:
                     break
@@ -5661,9 +5877,19 @@ def _build_default_celery_app():
     )
     app.conf.update(
         worker_concurrency=settings.celery_worker_concurrency,
+        worker_prefetch_multiplier=settings.celery_worker_prefetch_multiplier,
+        task_acks_late=settings.celery_task_acks_late,
+        task_reject_on_worker_lost=settings.celery_task_reject_on_worker_lost,
         # Важный guard: для ignore_result задач ошибки тоже не должны
         # накапливаться в backend (иначе снова растет потребление памяти).
         task_store_errors_even_if_ignored=False,
+        broker_pool_limit=settings.celery_broker_pool_limit,
+        broker_heartbeat=settings.celery_broker_heartbeat_sec,
+        task_compression=settings.celery_task_compression,
+        result_compression=settings.celery_result_compression,
+        task_serializer="json",
+        result_serializer="json",
+        accept_content=["json"],
         # Сообщения задач должны быть persistent, чтобы не теряться при рестартах broker.
         task_default_delivery_mode="persistent",
         # Используем выделенную durable queue для benchmark-задач.
@@ -5694,7 +5920,9 @@ def _build_default_celery_app():
         "Celery app инициализирован "
         "(broker=%s, concurrency=%d, task_default_expires=%s, result_expires=%s, "
         "task_soft_time_limit=%s, task_time_limit=%s, queue_ttl=%s, "
-        "queue_expires=%s, delivery_mode=%s, queue_name=%s, visibility_timeout=%s)",
+        "queue_expires=%s, delivery_mode=%s, queue_name=%s, visibility_timeout=%s, "
+        "prefetch=%s, acks_late=%s, reject_on_worker_lost=%s, broker_pool_limit=%s, "
+        "broker_heartbeat=%s, task_compression=%s, result_compression=%s)",
         settings.broker_url,
         settings.celery_worker_concurrency,
         settings.celery_task_default_expires_sec,
@@ -5706,6 +5934,13 @@ def _build_default_celery_app():
         app.conf.task_default_delivery_mode,
         queue_name,
         broker_transport_options.get("visibility_timeout"),
+        app.conf.worker_prefetch_multiplier,
+        app.conf.task_acks_late,
+        app.conf.task_reject_on_worker_lost,
+        app.conf.broker_pool_limit,
+        app.conf.broker_heartbeat,
+        app.conf.task_compression,
+        app.conf.result_compression,
     )
     return app
 
@@ -5728,8 +5963,18 @@ if app is not None:
             _log_worker_build_metadata()
 
     @app.task(name=SOURCE_BENCHMARK_TASK_NAME, ignore_result=False)
-    def source_benchmark_task(payload: Dict[str, Any]) -> Dict[str, Any]:
+    def source_benchmark_task(
+        payload: Optional[Dict[str, Any]] = None,
+        payload_ref: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Celery task: baseline benchmark исходной таблицы."""
+        if payload is None:
+            if payload_ref is None:
+                raise ValueError("source_benchmark_task: требуется payload или payload_ref")
+            payload = _load_task_payload_from_store(
+                payload_ref,
+                expected_kind="source",
+            )
         typed_payload = SourceBenchmarkTaskPayload.model_validate(payload)
         logger.info(
             "Celery worker: старт source task (benchmark_run_id=%d, benchmark_id=%s, table=%s.%s)",
@@ -5743,18 +5988,40 @@ if app is not None:
 
 
     @app.task(name=VARIANT_BENCHMARK_TASK_NAME, ignore_result=True)
-    def variant_benchmark_task(payload: Dict[str, Any]) -> Dict[str, Any]:
+    def variant_benchmark_task(
+        payload: Optional[Dict[str, Any]] = None,
+        payload_ref: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Celery task: benchmark варианта таблицы + сохранение результата."""
+        resolved_payload: Optional[Dict[str, Any]] = payload
+        if resolved_payload is None and payload_ref is not None:
+            try:
+                resolved_payload = _load_task_payload_from_store(
+                    payload_ref,
+                    expected_kind="variant",
+                )
+            except Exception as exc:
+                logger.exception("Celery worker: не удалось загрузить variant payload из store")
+                return {
+                    "status": "skipped_invalid_variant_payload",
+                    "error": str(exc),
+                }
+        if resolved_payload is None:
+            return {
+                "status": "skipped_invalid_variant_payload",
+                "error": "variant_benchmark_task: требуется payload или payload_ref",
+            }
+
         raw_context = {
-            "benchmark_run_id": payload.get("benchmark_run_id"),
-            "benchmark_id": payload.get("benchmark_id"),
-            "variant_mode": payload.get("variant_mode"),
-            "variant_database": payload.get("variant_database"),
-            "variant_table": payload.get("variant_table"),
+            "benchmark_run_id": resolved_payload.get("benchmark_run_id"),
+            "benchmark_id": resolved_payload.get("benchmark_id"),
+            "variant_mode": resolved_payload.get("variant_mode"),
+            "variant_database": resolved_payload.get("variant_database"),
+            "variant_table": resolved_payload.get("variant_table"),
         }
 
         try:
-            typed_payload = VariantBenchmarkTaskPayload.model_validate(payload)
+            typed_payload = VariantBenchmarkTaskPayload.model_validate(resolved_payload)
         except Exception as exc:
             # Важный guard: невалидный payload не должен валить pipeline.
             logger.exception(

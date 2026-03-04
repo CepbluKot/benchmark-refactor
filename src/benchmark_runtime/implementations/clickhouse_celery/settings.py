@@ -17,6 +17,37 @@ class ClickHouseCeleryWorkerSettings(BaseSettings):
         validation_alias="CELERY_WORKER_CONCURRENCY",
         gt=0,
     )
+    celery_worker_prefetch_multiplier: int = Field(
+        default=1,
+        validation_alias="BENCH_CELERY_WORKER_PREFETCH_MULTIPLIER",
+        gt=0,
+    )
+    celery_task_acks_late: bool = Field(
+        default=True,
+        validation_alias="BENCH_CELERY_TASK_ACKS_LATE",
+    )
+    celery_task_reject_on_worker_lost: bool = Field(
+        default=True,
+        validation_alias="BENCH_CELERY_TASK_REJECT_ON_WORKER_LOST",
+    )
+    celery_broker_pool_limit: int = Field(
+        default=10,
+        validation_alias="BENCH_CELERY_BROKER_POOL_LIMIT",
+        ge=0,
+    )
+    celery_broker_heartbeat_sec: int = Field(
+        default=30,
+        validation_alias="BENCH_CELERY_BROKER_HEARTBEAT_SEC",
+        ge=0,
+    )
+    celery_task_compression: str | None = Field(
+        default="gzip",
+        validation_alias="BENCH_CELERY_TASK_COMPRESSION",
+    )
+    celery_result_compression: str | None = Field(
+        default="gzip",
+        validation_alias="BENCH_CELERY_RESULT_COMPRESSION",
+    )
     clickhouse_manager_max_concurrent_streams_per_process: int = Field(
         default=1,
         validation_alias="CLICKHOUSE_MANAGER_MAX_CONCURRENT_STREAMS_PER_PROCESS",
@@ -141,6 +172,23 @@ class ClickHouseCeleryWorkerSettings(BaseSettings):
         if parsed <= 0:
             return None
         return parsed
+
+    @field_validator(
+        "celery_task_compression",
+        "celery_result_compression",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_compression(cls, value: object) -> str | None:
+        """Нормализует optional compression codec (`''`/`none` -> `None`)."""
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.lower() in {"none", "null", "off", "false", "0"}:
+            return None
+        return text
 
     @property
     def broker_url(self) -> str:

@@ -131,7 +131,7 @@
       "source_insert_rows_per_operation_limits": {
         "sequential": 100000
       },
-      "insert_rows_per_operation_limit": 100000,
+      "insert_rows_per_operation_limit":  20000,
       "insert_rows_per_operation_limits": {
         "order_by": 100000,
         "types": 100000,

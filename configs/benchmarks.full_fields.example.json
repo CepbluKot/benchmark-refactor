@@ -76,7 +76,7 @@
       },
       "insert_operations_count": 25,
       "sequential_types_top_n_for_indexes": 5,
-      "insert_rows_per_operation_limit": 1000000,
+      "insert_rows_per_operation_limit":  20000,
       "source_insert_rows_per_operation_limit": 700000,
       "index_granularity_values": [
         8192,
@@ -178,7 +178,7 @@
           },
           "insert_operations_count": 12,
           "sequential_types_top_n_for_indexes": 3,
-          "insert_rows_per_operation_limit": 250000,
+          "insert_rows_per_operation_limit":  20000,
           "source_insert_rows_per_operation_limit": 180000,
           "index_granularity_values": [
             4096,

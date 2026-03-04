@@ -635,7 +635,7 @@ config = load_config("configs/benchmark.project.local.json")
 #### 1) Запусти RabbitMQ
 
 Рекомендуемый вариант (через compose с выделенным `vhost=bench`
-и пустым списком `policies`):
+и lazy-policy для benchmark очередей):
 
 ```bash
 docker compose -f configs/rabbitmq/docker-compose.rabbitmq.yml up -d
@@ -649,13 +649,16 @@ nc -zv 127.0.0.1 5672
 
 Management UI: `http://127.0.0.1:15672` (`bench` / `bench`).
 
-Проверка, что в `bench`-vhost нет policy с `message-ttl`:
+Проверка policy в `bench`-vhost:
 
 ```bash
 docker exec bench-rabbitmq rabbitmqctl list_policies -p bench
 ```
 
-Должно быть пусто.
+Должна быть policy `bench-lazy-queues` (`queue-mode = lazy`) и не должно быть
+TTL policy (`message-ttl`) для benchmark очереди.
+Также в policy есть ограничение `max-length-bytes` и `overflow=reject-publish`
+(backpressure без silent drop).
 
 Если контейнер уже был создан:
 
@@ -676,10 +679,34 @@ export BENCH_CELERY_BROKER_URL='pyamqp://bench:bench@localhost:5672/bench'
 export BENCH_CELERY_BACKEND_URL='rpc://bench:bench@localhost:5672/bench'
 export BENCH_CELERY_QUEUE_NAME='bench.benchmark'
 export CELERY_WORKER_CONCURRENCY='4'
+export BENCH_CELERY_WORKER_PREFETCH_MULTIPLIER='1'
+export BENCH_CELERY_TASK_ACKS_LATE='true'
+export BENCH_CELERY_TASK_REJECT_ON_WORKER_LOST='true'
+export BENCH_CELERY_BROKER_POOL_LIMIT='10'
+export BENCH_CELERY_BROKER_HEARTBEAT_SEC='30'
+export BENCH_CELERY_TASK_COMPRESSION='gzip'
+export BENCH_CELERY_RESULT_COMPRESSION='gzip'
+export BENCH_CELERY_MAX_IN_FLIGHT_TASKS='4'
+export BENCH_CELERY_IN_FLIGHT_WAIT_POLL_SEC='0.2'
+# export BENCH_CELERY_IN_FLIGHT_WAIT_TIMEOUT_SEC='600'
+export BENCH_CELERY_PAYLOAD_STORE_ENABLED='1'
+export BENCH_CELERY_PAYLOAD_STORE_STRICT='0'
+export BENCH_CELERY_PAYLOAD_STORE_TABLE='benchmark_task_payloads'
+export BENCH_CELERY_PAYLOAD_STORE_TTL_HOURS='168'
 export CLICKHOUSE_MANAGER_MAX_CONCURRENT_STREAMS_PER_PROCESS='1'
 export MAX_COPY_N_RETRIES='100'
 export MAX_COPY_RETRY_SLEEP_SEC='10'
 export MAX_COPY_RETRY_SLEEP_SEC_INCREMENT='2'
+# Reconnect launcher/adaper к RabbitMQ при временном падении брокера
+export BENCH_CELERY_RECONNECT_MAX_ATTEMPTS='-1'        # -1 = unlimited
+export BENCH_CELERY_RECONNECT_INITIAL_SLEEP_SEC='1.0'
+export BENCH_CELERY_RECONNECT_MAX_SLEEP_SEC='15.0'
+export BENCH_CELERY_REJECT_PUBLISH_MAX_ATTEMPTS='-1'   # -1 = unlimited
+export BENCH_CELERY_REJECT_PUBLISH_RETRY_SLEEP_SEC='1.0'
+export BENCH_SOURCE_RESULT_POLL_SEC='15.0'
+export BENCH_ENABLE_OPTIMIZE_FINAL='0'                 # default=0 (OPTIMIZE FINAL disabled)
+# Reconnect listener Celery events (progress) при падении брокера
+export BENCH_CELERY_EVENTS_MAX_RETRIES='-1'            # -1 = unlimited
 # export CLICKHOUSE_STREAM_SLOT_ACQUIRE_TIMEOUT_SEC='5'
 # По умолчанию задачи не протухают: task_default_expires/time limits отключены (None).
 # При необходимости можно явно включить:
@@ -693,6 +720,16 @@ export MAX_COPY_RETRY_SLEEP_SEC_INCREMENT='2'
 # (`task_queue_ttl=None`, `task_queue_expires=None`), delivery mode — persistent.
 # Для RabbitMQ используется выделенная durable очередь `BENCH_CELERY_QUEUE_NAME`
 # c direct routing для source/variant задач.
+# Для снижения потребления памяти у RabbitMQ включены:
+# - prefetch=1 + late ack (меньше in-flight сообщений у worker),
+# - compression сообщений задач/результатов,
+# - launch-side throttle dispatch по in-flight лимиту
+#   (`BENCH_CELERY_MAX_IN_FLIGHT_TASKS`),
+# - offload payload задач в ClickHouse (`BENCH_CELERY_PAYLOAD_STORE_ENABLED=1`),
+# - queue cap (`max-length-bytes`) + `reject-publish` и retry publish
+#   на стороне launcher (без потери задач),
+# - lazy queue policy (`configs/rabbitmq/definitions.json`),
+# - memory/disk guardrails (`configs/rabbitmq/rabbitmq.conf`).
 # Если на кластере админ навесил operator policy глобально, приложение это не
 # переопределит; тогда нужен отдельный vhost/кластер без этой policy.
 
@@ -987,12 +1024,23 @@ print(run_id)
 - `queries.test_queries[].cache_mode = warm`: перед **каждым** замером выполняются
   query-level `warmup_queries` (если не заданы — прогревом считается сам query),
   затем выполняется измеряемый запрос.
-- Перед select-замерами worker стабилизирует таблицу:
+- Перед select-замерами worker **может** стабилизировать таблицу:
   `OPTIMIZE TABLE ... FINAL` + ожидание `system.merges=0`.
+  По умолчанию это выключено (`BENCH_ENABLE_OPTIMIZE_FINAL=0`).
+  Чтобы включить, задай `BENCH_ENABLE_OPTIMIZE_FINAL=1`.
   Таймаут/интервал ожидания настраиваются:
   `BENCH_OPTIMIZE_FINAL_WAIT_TIMEOUT_SEC`, `BENCH_OPTIMIZE_FINAL_WAIT_POLL_SEC`.
 - Для INSERT benchmark используется детерминированный порядок чтения source-данных:
   `INSERT ... SELECT ... ORDER BY <source_ddl.order_by>` (если в исходном DDL есть ORDER BY).
+- Strict-fill вставки больше не используют `CROSS JOIN numbers(...)`:
+  добор строк выполняется безопасными чанками через `LIMIT/OFFSET`, чтобы не
+  раздувать план и не ловить `JoiningTransform` OOM.
+- Для baseline-вставки (`source_baseline`) при `MEMORY_LIMIT_EXCEEDED` включён
+  авто-fallback по лимиту строк: `source_insert_rows_per_operation_limit`
+  автоматически уменьшается в 2 раза до успешной вставки (минимум 1).
+- В общем auto-наборе QueryGenerator больше нет `GROUP BY`-паттернов
+  (`_group_by_queries` удалён); остаются `full_scan`, `datetime_range`,
+  `order_by_filter`, `aggregate`, плюс data-aware/measured one-column LIKE.
 - Per-query select метрики теперь включают:
   - `read_bytes_measurements` / `read_bytes_percentiles`;
   - `elapsed_ms_median`.

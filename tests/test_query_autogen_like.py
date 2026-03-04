@@ -267,6 +267,13 @@ class QueryAutoLikeTests(unittest.TestCase):
         self.assertTrue(sqls)
         self.assertTrue(all("LIMIT 7" in sql for sql in sqls))
 
+    def test_generate_queries_auto_base_has_no_group_by_queries(self) -> None:
+        table = TableDDL.from_ddl(_DDL)
+        generated = generate_queries(table)
+        sqls = [item.query.lower() for item in generated]
+        self.assertTrue(sqls)
+        self.assertTrue(all("group by" not in sql for sql in sqls))
+
 
 class FetcherLikeTokensTests(unittest.TestCase):
     def test_fetch_like_tokens_returns_hit_and_miss(self) -> None:

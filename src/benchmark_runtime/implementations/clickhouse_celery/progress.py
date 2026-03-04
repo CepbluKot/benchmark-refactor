@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import sys
 import time
@@ -12,6 +13,17 @@ from threading import Condition, Lock, Thread
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _read_events_max_retries() -> Optional[int]:
+    raw = str(os.getenv("BENCH_CELERY_EVENTS_MAX_RETRIES", "-1")).strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = -1
+    if value < 0:
+        return None
+    return value
 
 
 class _NoopProgressBar:
@@ -92,7 +104,7 @@ class TaskMonitorCelery:
         self.all_sent = False
 
         self.event_receiver_thr = Thread(target=self._event_receiver_loop, daemon=True)
-        self.max_retries: Optional[int] = 30
+        self.max_retries: Optional[int] = _read_events_max_retries()
         self.base_delay = 2.0
         self.max_delay = 10.0
 
@@ -129,6 +141,12 @@ class TaskMonitorCelery:
         """Блокируется до завершения всех зарегистрированных задач."""
         with self._cond:
             return self._cond.wait_for(self._all_done_pred, timeout=timeout)
+
+    def in_flight_tasks(self) -> int:
+        """Возвращает число отправленных, но ещё не завершённых задач."""
+        with self._cond:
+            completed = self.succeeded + self.failed
+            return max(0, self.sent_n_tests - completed)
 
     def _inc_n_tests_sent(self, n_tests: int = 1) -> None:
         with self._cond:

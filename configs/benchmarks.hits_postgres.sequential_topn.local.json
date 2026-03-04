@@ -25,7 +25,7 @@
           "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
         }
       },
-      "insert_rows_per_operation_limit": 300000,
+      "insert_rows_per_operation_limit":  20000,
       "source_insert_rows_per_operation_limit": 180000,
       "insert_rows_per_operation_limits": {
         "types": 300000,

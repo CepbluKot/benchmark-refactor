@@ -15,7 +15,7 @@
       "databases": "*",
       "tables": "*",
       "insert_operations_count": 3,
-      "insert_rows_per_operation_limit": 1000000,
+      "insert_rows_per_operation_limit":  20000,
       "source_insert_rows_per_operation_limit": 700000,
       "insert_rows_per_operation_limits": {
         "types": 1500000
@@ -52,7 +52,7 @@
         "marketing": "*"
       },
       "insert_operations_count": 5,
-      "insert_rows_per_operation_limit": 5000000,
+      "insert_rows_per_operation_limit":  20000,
       "source_insert_rows_per_operation_limit": 1200000,
       "insert_rows_per_operation_limits": {
         "combined": 5500000,
@@ -74,7 +74,7 @@
           "database": "analytics",
           "table": "user_events",
           "insert_operations_count": 2,
-          "insert_rows_per_operation_limit": 250000,
+          "insert_rows_per_operation_limit":  20000,
           "source_insert_rows_per_operation_limit": 180000,
           "insert_rows_per_operation_limits": {
             "types": 300000,

@@ -20,5 +20,18 @@
       "read": ".*"
     }
   ],
-  "policies": []
+  "policies": [
+    {
+      "vhost": "bench",
+      "name": "bench-lazy-queues",
+      "pattern": "^bench\\.",
+      "apply-to": "queues",
+      "definition": {
+        "queue-mode": "lazy",
+        "max-length-bytes": 268435456,
+        "overflow": "reject-publish"
+      },
+      "priority": 0
+    }
+  ]
 }

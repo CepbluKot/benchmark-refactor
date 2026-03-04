@@ -1,8 +1,10 @@
 import json
+import pathlib
+import re
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 from unittest.mock import patch
 
 from src.benchmark_runtime.implementations.clickhouse_celery import tasks as celery_tasks_module
@@ -324,6 +326,40 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
             "query_plan": {
                 "test_queries": ["SELECT count() FROM `bench_tmp`.`events__bench__bench_var__0001`"],
             },
+        }
+
+    def _source_task_payload_dict(self) -> Dict[str, Any]:
+        """Возвращает минимальный валидный payload для source Celery task."""
+        started_at = datetime(2026, 2, 24, 12, 0, tzinfo=timezone.utc).isoformat()
+        return {
+            "connection": {
+                "host": "localhost",
+                "port": 9000,
+                "login": "default",
+                "password": "secret",
+            },
+            "result_connection": {
+                "host": "localhost",
+                "port": 9000,
+                "login": "default",
+                "password": "secret",
+            },
+            "result_database": "benchmark_results",
+            "result_table": "combined_benchmark_results",
+            "benchmark_run_id": 101,
+            "benchmark_started_at": started_at,
+            "benchmark_id": "bench_source_task",
+            "benchmark_strategy": "types_strategy",
+            "source_database": "analytics",
+            "test_database": "bench_tmp",
+            "source_table": "events",
+            "source_table_ddl": VALID_SOURCE_DDL,
+            "query_plan": {
+                "test_queries": ["SELECT count() FROM `bench_tmp`.`events__source_baseline__001`"],
+            },
+            "insert_operations_count": 1,
+            "insert_rows_limit": 1000,
+            "measured_percentiles": [50, 95],
         }
 
     def test_compute_select_time_speedup_by_query_includes_read_bytes_coeffs(self) -> None:
@@ -3146,7 +3182,7 @@ ORDER BY country
             make_readable_bytes(555),
         )
 
-    def test_strict_insert_query_uses_numbers_and_respects_measurement_offset(self) -> None:
+    def test_strict_insert_query_avoids_numbers_and_respects_measurement_offset(self) -> None:
         query = _ClickHouseRuntimeClient._build_source_select_for_insert(
             source_database="analytics",
             source_table="events",
@@ -3154,8 +3190,7 @@ ORDER BY country
             offset=2000,
             strictly_adhere_n_rows=True,
         )
-        self.assertIn("numbers(repeats_not_equal_zero)", query)
-        self.assertIn("intDiv(3000 + cnt - 1, cnt)", query)
+        self.assertNotIn("numbers(", query)
         self.assertIn("LIMIT 1000 OFFSET 2000", query)
 
     def test_error_metrics_use_minus_one_sentinel(self) -> None:
@@ -3268,15 +3303,19 @@ ORDER BY country
         class _DummyClient:
             def __init__(self) -> None:
                 self.command_calls: List[str] = []
+                self._failed_once = False
 
             def command(self, query: str, settings: Optional[Dict[str, Any]] = None):
                 del settings
                 self.command_calls.append(query)
-                if "CROSS JOIN numbers" in query:
+                if not self._failed_once:
+                    self._failed_once = True
                     raise _MemoryLimitError("Code: 241. MEMORY_LIMIT_EXCEEDED")
                 return None
 
             def query(self, query: str):
+                if "SELECT count() FROM `analytics`.`events`" in query:
+                    return SimpleNamespace(result_rows=[(1000,)])
                 if "FROM system.query_log" in query:
                     return SimpleNamespace(
                         result_rows=[(100.0, 1000.0, 10_000.0, 1000.0, 10_000.0)]
@@ -3307,8 +3346,59 @@ ORDER BY country
         self.assertEqual(metrics["elapsed_ns"], 100_000_000.0)
         self.assertEqual(metrics["written_rows"], 1000.0)
         self.assertGreaterEqual(len(client._client.command_calls), 2)
-        self.assertTrue(any("CROSS JOIN numbers" in q for q in client._client.command_calls))
-        self.assertTrue(any("CROSS JOIN numbers" not in q for q in client._client.command_calls))
+        self.assertTrue(all("CROSS JOIN numbers" not in q for q in client._client.command_calls))
+
+    def test_insert_strict_fill_uses_chunked_batches_without_cross_join(self) -> None:
+        class _DummyClient:
+            def __init__(self) -> None:
+                self.command_calls: List[str] = []
+                self.last_insert_query: str = ""
+
+            def command(self, query: str, settings: Optional[Dict[str, Any]] = None):
+                del settings
+                self.command_calls.append(query)
+                self.last_insert_query = query
+                return None
+
+            def query(self, query: str):
+                if "SELECT count() FROM `analytics`.`events`" in query:
+                    return SimpleNamespace(result_rows=[(3,)])
+                if "FROM system.query_log" in query:
+                    limit_match = re.search(r"LIMIT\s+(\d+)\s+OFFSET\s+(\d+)", self.last_insert_query)
+                    if limit_match is None:
+                        return SimpleNamespace(result_rows=[(50.0, 0.0, 0.0, 0.0, 0.0)])
+                    limit_rows = float(limit_match.group(1))
+                    return SimpleNamespace(
+                        result_rows=[(50.0, limit_rows, limit_rows * 10.0, limit_rows, limit_rows * 10.0)]
+                    )
+                return SimpleNamespace(result_rows=[])
+
+        client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
+        client._client = _DummyClient()
+        client._stream_client = None
+        client._stream_client_checked = True
+        client._stream_connection = SimpleNamespace(
+            host="localhost",
+            port=9000,
+            login="default",
+        )
+
+        metrics = client.insert_from_source_with_metrics(
+            source_database="analytics",
+            source_table="events",
+            target_database="bench_tmp",
+            target_table="events_variant",
+            n_rows=8,
+            offset=1,
+            strictly_adhere_n_rows=True,
+            query_tag="insert-strict-fill-chunked",
+        )
+
+        self.assertEqual(metrics["written_rows"], 8.0)
+        self.assertEqual(metrics["read_rows"], 8.0)
+        self.assertEqual(metrics["read_bytes"], 80.0)
+        self.assertGreaterEqual(len(client._client.command_calls), 3)
+        self.assertTrue(all("CROSS JOIN numbers" not in q for q in client._client.command_calls))
 
     def test_insert_fallback_raises_runtime_error_on_memory_limit(self) -> None:
         class _MemoryLimitError(RuntimeError):
@@ -3320,7 +3410,8 @@ ORDER BY country
                 raise _MemoryLimitError("Code: 241. MEMORY_LIMIT_EXCEEDED")
 
             def query(self, query: str):
-                del query
+                if "SELECT count() FROM `analytics`.`events`" in query:
+                    return SimpleNamespace(result_rows=[(1000,)])
                 return SimpleNamespace(result_rows=[])
 
         client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
@@ -3435,6 +3526,73 @@ ORDER BY country
         self.assertEqual(metrics["elapsed_ns"], 111_000_000.0)
         self.assertEqual(metrics["read_rows"], 777.0)
         self.assertEqual(metrics["written_rows"], 777.0)
+
+    def test_stream_insert_uses_non_strict_fill_query_by_default(self) -> None:
+        class _DummySourceStream:
+            headers = None
+
+            def close(self) -> None:
+                return None
+
+        class _DummyReadClient:
+            def __init__(self) -> None:
+                self.raw_stream_calls: List[tuple[str, str]] = []
+
+            def raw_stream(self, query: str, fmt: str = "Native"):
+                self.raw_stream_calls.append((query, fmt))
+                return _DummySourceStream()
+
+        class _DummyWriteClient:
+            def raw_insert(
+                self,
+                *,
+                table: str,
+                insert_block: Any,
+                fmt: str = "Native",
+                settings: Optional[Dict[str, Any]] = None,
+            ):
+                del table, insert_block, fmt, settings
+                return SimpleNamespace(
+                    summary={
+                        "elapsed_ns": 10_000_000.0,
+                        "read_rows": 10.0,
+                        "read_bytes": 100.0,
+                        "written_rows": 10.0,
+                        "written_bytes": 100.0,
+                    }
+                )
+
+        client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
+        client._client = SimpleNamespace()
+        client._stream_connection = SimpleNamespace(
+            host="localhost",
+            port=9000,
+            login="default",
+            password="secret",
+        )
+        read_client = _DummyReadClient()
+        write_client = _DummyWriteClient()
+
+        with patch.object(client, "_get_stream_client", return_value=read_client), patch.object(
+            client, "_get_stream_insert_client", return_value=write_client
+        ), patch.object(client, "_acquire_stream_slot", return_value=True), patch.object(
+            client, "_release_stream_slot", return_value=None
+        ):
+            metrics = client.insert_from_source_with_metrics(
+                source_database="analytics",
+                source_table="events",
+                target_database="bench_tmp",
+                target_table="events_variant",
+                n_rows=100,
+                offset=0,
+                strictly_adhere_n_rows=True,
+                query_tag="insert-stream-nonstrict",
+            )
+
+        self.assertEqual(metrics["written_rows"], 10.0)
+        self.assertEqual(len(read_client.raw_stream_calls), 1)
+        stream_query, _ = read_client.raw_stream_calls[0]
+        self.assertNotIn("CROSS JOIN numbers", stream_query)
 
     def test_select_metrics_use_summary_stream_first(self) -> None:
         class _DummyStreamClient:
@@ -3661,6 +3819,122 @@ ORDER BY country
 
         self.assertEqual(stats["elapsed_ns"], [150_000_000.0])
         self.assertEqual(len(fake_client.insert_with_metrics_calls), 2)
+
+    def test_measure_insert_reduces_source_rows_limit_on_oom(self) -> None:
+        class _BaselineOomClient:
+            def __init__(self) -> None:
+                self.calls: List[Dict[str, Any]] = []
+                self.failed_once = False
+
+            def get_retry_policy(self) -> tuple[int, float, float]:
+                return (0, 0.0, 0.0)
+
+            def insert_from_source_with_metrics(
+                self,
+                *,
+                source_database: str,
+                source_table: str,
+                target_database: str,
+                target_table: str,
+                n_rows: Optional[int],
+                offset: int,
+                strictly_adhere_n_rows: bool,
+                query_tag: str,
+                tested_cols: Optional[Sequence[str]] = None,
+                deterministic_order_by: Optional[str] = None,
+            ) -> Dict[str, float]:
+                del source_database, source_table, query_tag, tested_cols, deterministic_order_by
+                self.calls.append(
+                    {
+                        "target_database": target_database,
+                        "target_table": target_table,
+                        "n_rows": n_rows,
+                        "offset": offset,
+                        "strictly_adhere_n_rows": strictly_adhere_n_rows,
+                    }
+                )
+                if not self.failed_once:
+                    self.failed_once = True
+                    raise RuntimeError("Code: 241. MEMORY_LIMIT_EXCEEDED")
+                rows = float(n_rows or 0)
+                return {
+                    "elapsed_ns": 100_000_000.0,
+                    "read_rows": rows,
+                    "read_bytes": rows * 10.0,
+                    "written_rows": rows,
+                    "written_bytes": rows * 10.0,
+                }
+
+        client = _BaselineOomClient()
+        stats = _measure_insert(
+            client,  # type: ignore[arg-type]
+            source_database="analytics",
+            source_table="events",
+            target_database="bench_tmp",
+            target_table="events__source_baseline__abc123",
+            n_rows=1000,
+            n_measurements=1,
+        )
+
+        self.assertEqual([call["n_rows"] for call in client.calls], [1000, 500])
+        self.assertEqual(stats["written_rows"], [500.0])
+        self.assertEqual(stats["elapsed_ns"], [100_000_000.0])
+
+    def test_measure_insert_does_not_reduce_rows_limit_on_oom_for_non_baseline(self) -> None:
+        class _VariantOomClient:
+            def __init__(self) -> None:
+                self.calls: List[Dict[str, Any]] = []
+
+            def get_retry_policy(self) -> tuple[int, float, float]:
+                return (0, 0.0, 0.0)
+
+            def insert_from_source_with_metrics(
+                self,
+                *,
+                source_database: str,
+                source_table: str,
+                target_database: str,
+                target_table: str,
+                n_rows: Optional[int],
+                offset: int,
+                strictly_adhere_n_rows: bool,
+                query_tag: str,
+                tested_cols: Optional[Sequence[str]] = None,
+                deterministic_order_by: Optional[str] = None,
+            ) -> Dict[str, float]:
+                del source_database, source_table, query_tag, tested_cols, deterministic_order_by
+                self.calls.append(
+                    {
+                        "target_database": target_database,
+                        "target_table": target_table,
+                        "n_rows": n_rows,
+                        "offset": offset,
+                        "strictly_adhere_n_rows": strictly_adhere_n_rows,
+                    }
+                )
+                raise RuntimeError("Code: 241. MEMORY_LIMIT_EXCEEDED")
+
+        client = _VariantOomClient()
+        with self.assertRaisesRegex(RuntimeError, "MEMORY_LIMIT_EXCEEDED"):
+            _measure_insert(
+                client,  # type: ignore[arg-type]
+                source_database="analytics",
+                source_table="events",
+                target_database="bench_tmp",
+                target_table="events__bench__variant__x1",
+                n_rows=1000,
+                n_measurements=1,
+            )
+
+        self.assertEqual([call["n_rows"] for call in client.calls], [1000])
+
+    def test_optimize_final_default_is_disabled(self) -> None:
+        source_text = pathlib.Path(celery_tasks_module.__file__).read_text(encoding="utf-8")
+        self.assertIn('os.getenv("BENCH_ENABLE_OPTIMIZE_FINAL", "0")', source_text)
+        with patch.object(celery_tasks_module, "_ENABLE_OPTIMIZE_FINAL", False), patch.object(
+            celery_tasks_module, "_OPTIMIZE_FINAL_PERMISSION_DENIED", False
+        ):
+            self.assertFalse(celery_tasks_module._should_run_optimize_final())
 
     def test_measure_insert_filters_zero_rows_per_second_from_measurements(self) -> None:
         fake_client = _FakeRuntimeClient(
@@ -3944,6 +4218,82 @@ ORDER BY country
 
         self.assertEqual(result["status"], "skipped_invalid_variant_payload")
         self.assertEqual(result.get("benchmark_id"), "bench_invalid_payload")
+
+    def test_source_task_loads_payload_from_payload_ref(self) -> None:
+        source_task = getattr(celery_tasks_module, "source_benchmark_task", None)
+        if source_task is None:
+            self.skipTest("Celery app/task недоступны в текущем окружении")
+
+        loaded_payload = self._source_task_payload_dict()
+        payload_ref = {
+            "payload_id": "payload-source-1",
+            "payload_kind": "source",
+            "storage_connection": {
+                "host": "localhost",
+                "port": 9000,
+                "login": "default",
+                "password": "secret",
+            },
+            "storage_database": "benchmark_results",
+            "storage_table": "benchmark_task_payloads",
+        }
+        fake_result_payload = {"status": "ok", "baseline_id": "baseline-source-1"}
+        fake_result = SimpleNamespace(
+            model_dump=lambda mode="json": dict(fake_result_payload)
+        )
+        with (
+            patch(
+                "src.benchmark_runtime.implementations.clickhouse_celery.tasks._load_task_payload_from_store",
+                return_value=loaded_payload,
+            ) as load_payload_mock,
+            patch(
+                "src.benchmark_runtime.implementations.clickhouse_celery.tasks.run_source_benchmark",
+                return_value=fake_result,
+            ) as run_source_mock,
+        ):
+            result = source_task(payload=None, payload_ref=payload_ref)
+
+        self.assertEqual(result, fake_result_payload)
+        load_payload_mock.assert_called_once_with(payload_ref, expected_kind="source")
+        run_source_mock.assert_called_once()
+
+    def test_variant_task_loads_payload_from_payload_ref(self) -> None:
+        variant_task = getattr(celery_tasks_module, "variant_benchmark_task", None)
+        if variant_task is None:
+            self.skipTest("Celery app/task недоступны в текущем окружении")
+
+        loaded_payload = self._variant_task_payload_dict()
+        payload_ref = {
+            "payload_id": "payload-variant-1",
+            "payload_kind": "variant",
+            "storage_connection": {
+                "host": "localhost",
+                "port": 9000,
+                "login": "default",
+                "password": "secret",
+            },
+            "storage_database": "benchmark_results",
+            "storage_table": "benchmark_task_payloads",
+        }
+        fake_variant_payload = {"status": "ok", "variant_table": "events__bench__bench_var__0001"}
+        fake_variant_result = SimpleNamespace(
+            model_dump=lambda mode="json": dict(fake_variant_payload)
+        )
+        with (
+            patch(
+                "src.benchmark_runtime.implementations.clickhouse_celery.tasks._load_task_payload_from_store",
+                return_value=loaded_payload,
+            ) as load_payload_mock,
+            patch(
+                "src.benchmark_runtime.implementations.clickhouse_celery.tasks.run_variant_benchmark",
+                return_value=fake_variant_result,
+            ) as run_variant_mock,
+        ):
+            result = variant_task(payload=None, payload_ref=payload_ref)
+
+        self.assertEqual(result, fake_variant_payload)
+        load_payload_mock.assert_called_once_with(payload_ref, expected_kind="variant")
+        run_variant_mock.assert_called_once()
 
     def test_variant_task_skips_failed_variant_without_crash(self) -> None:
         variant_task = getattr(celery_tasks_module, "variant_benchmark_task", None)

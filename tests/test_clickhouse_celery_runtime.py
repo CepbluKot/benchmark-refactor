@@ -2,6 +2,7 @@ import json
 import unittest
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+from unittest.mock import patch
 
 from src.benchmark_engine import (
     BenchmarkEngine,
@@ -17,10 +18,15 @@ from src.benchmark_engine import (
 from src.benchmark_runtime.implementations.clickhouse_celery.execution import (
     CeleryClickHouseExecutionAdapter,
 )
+import src.benchmark_runtime.implementations.clickhouse_celery.execution as execution_module
 from src.benchmark_runtime.implementations.clickhouse_celery.tasks import (
     SOURCE_BENCHMARK_TASK_NAME,
+    TaskPayloadRefPayload,
     VARIANT_BENCHMARK_TASK_NAME,
     app as celery_worker_app,
+)
+from src.benchmark_runtime.implementations.clickhouse_celery.settings import (
+    get_clickhouse_celery_worker_settings,
 )
 from src.benchmark_runtime.implementations.clickhouse_celery.result_store import (
     ClickHouseBenchmarkResultStore,
@@ -86,6 +92,50 @@ class _FakeCeleryApp:
         if task_name == "bench.source_benchmark":
             return _FakeAsyncResult(self.source_payload)
         return _FakeAsyncResult({"status": "dispatched"})
+
+
+class _FlakySendTaskCeleryApp(_FakeCeleryApp):
+    def __init__(self, source_payload: Dict[str, Any], *, fail_variant_times: int = 1) -> None:
+        super().__init__(source_payload=source_payload)
+        self._fail_variant_times = max(0, int(fail_variant_times))
+
+    def send_task(self, task_name: str, **kwargs: Any) -> _FakeAsyncResult:
+        if task_name == VARIANT_BENCHMARK_TASK_NAME and self._fail_variant_times > 0:
+            self._fail_variant_times -= 1
+            raise OSError("connection refused")
+        return super().send_task(task_name, **kwargs)
+
+
+class _RejectPublishFlakyCeleryApp(_FakeCeleryApp):
+    def __init__(self, source_payload: Dict[str, Any], *, fail_variant_times: int = 1) -> None:
+        super().__init__(source_payload=source_payload)
+        self._fail_variant_times = max(0, int(fail_variant_times))
+
+    def send_task(self, task_name: str, **kwargs: Any) -> _FakeAsyncResult:
+        if task_name == VARIANT_BENCHMARK_TASK_NAME and self._fail_variant_times > 0:
+            self._fail_variant_times -= 1
+            raise RuntimeError("Queue overflow: reject-publish")
+        return super().send_task(task_name, **kwargs)
+
+
+class _ThrottleFakeMonitor:
+    """Минимальный monitor-двойник для проверки in-flight throttling."""
+
+    def __init__(self, in_flight_sequence: list[int]) -> None:
+        self._in_flight_sequence = list(in_flight_sequence) or [0]
+        self.in_flight_calls = 0
+        self.registered_task_ids: list[str] = []
+
+    def new_task_id(self) -> str:
+        return "variant-test-task-id"
+
+    def register_task(self, task_id: str) -> None:
+        self.registered_task_ids.append(task_id)
+
+    def in_flight_tasks(self) -> int:
+        idx = min(self.in_flight_calls, len(self._in_flight_sequence) - 1)
+        self.in_flight_calls += 1
+        return max(0, int(self._in_flight_sequence[idx]))
 
 
 class _SequentialAdapterWithProgressHooks:
@@ -334,9 +384,330 @@ class ClickHouseCeleryRuntimeTests(unittest.TestCase):
             {"hit", "miss", "generic", "manual"},
         )
 
+    def test_execute_variant_retries_dispatch_after_transient_broker_error(self) -> None:
+        source_result_payload = {
+            "baseline_id": "baseline-1",
+            "benchmark_run_id": 11,
+            "benchmark_started_at": datetime(2026, 2, 24, 12, 0, tzinfo=timezone.utc).isoformat(),
+            "benchmark_id": "bench_a",
+            "source_database": "analytics",
+            "source_table": "events",
+            "source_table_ddl": EVENTS_DDL,
+            "score": 1.0,
+            "metrics": {"status": "ok"},
+        }
+        fake_app = _FlakySendTaskCeleryApp(
+            source_payload=source_result_payload,
+            fail_variant_times=1,
+        )
+        adapter = CeleryClickHouseExecutionAdapter(
+            connections_by_id={"prod_ch": self.connection},
+            celery_app=fake_app,
+            progress_monitor_enabled=False,
+        )
+
+        planner = BenchmarkPlanner(
+            config=BenchmarkRootConfig(
+                connections=[self.connection],
+                benchmarks=[
+                    BenchmarkConfig(
+                        id="bench_a",
+                        connection_id="prod_ch",
+                        strategy="types_strategy",
+                        databases=["analytics"],
+                        tables=["events"],
+                        insert_operations_count=1,
+                        global_rules=RulesConfig(
+                            column_rules=[
+                                ColumnRuleConfig(
+                                    by_type="UInt64",
+                                    types=["UInt64", "UInt32"],
+                                )
+                            ]
+                        ),
+                    )
+                ],
+                rule_banks={},
+                default_rule_banks={},
+                celery=CeleryConfig(workers=2, threads_per_worker=1),
+            ),
+            providers_by_connection_id={"prod_ch": _StaticMetadataProvider()},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        job = next(
+            engine.iter_variant_jobs(
+                benchmark_ids=["bench_a"],
+                benchmark_run_id=11,
+                benchmark_started_at=datetime(2026, 2, 24, 12, 0, tzinfo=timezone.utc),
+            )
+        )
+
+        original_attempts = execution_module._CELERY_RECONNECT_MAX_ATTEMPTS
+        original_initial_sleep = execution_module._CELERY_RECONNECT_INITIAL_SLEEP_SEC
+        original_max_sleep = execution_module._CELERY_RECONNECT_MAX_SLEEP_SEC
+        execution_module._CELERY_RECONNECT_MAX_ATTEMPTS = 3
+        execution_module._CELERY_RECONNECT_INITIAL_SLEEP_SEC = 0.0
+        execution_module._CELERY_RECONNECT_MAX_SLEEP_SEC = 0.0
+        try:
+            dispatch_ack = adapter.execute_variant(job)
+        finally:
+            execution_module._CELERY_RECONNECT_MAX_ATTEMPTS = original_attempts
+            execution_module._CELERY_RECONNECT_INITIAL_SLEEP_SEC = original_initial_sleep
+            execution_module._CELERY_RECONNECT_MAX_SLEEP_SEC = original_max_sleep
+
+        self.assertEqual(dispatch_ack.variant_table, job.variant_table)
+        variant_calls = [
+            call for call in fake_app.calls if call.get("task_name") == VARIANT_BENCHMARK_TASK_NAME
+        ]
+        self.assertEqual(len(variant_calls), 1)
+
+    def test_execute_variant_respects_in_flight_limit(self) -> None:
+        source_result_payload = {
+            "baseline_id": "baseline-1",
+            "benchmark_run_id": 11,
+            "benchmark_started_at": datetime(2026, 2, 24, 12, 0, tzinfo=timezone.utc).isoformat(),
+            "benchmark_id": "bench_a",
+            "source_database": "analytics",
+            "source_table": "events",
+            "source_table_ddl": EVENTS_DDL,
+            "score": 1.0,
+            "metrics": {"status": "ok"},
+        }
+        fake_app = _FakeCeleryApp(source_payload=source_result_payload)
+        adapter = CeleryClickHouseExecutionAdapter(
+            connections_by_id={"prod_ch": self.connection},
+            celery_app=fake_app,
+            progress_monitor_enabled=False,
+        )
+        adapter._global_progress_monitor = _ThrottleFakeMonitor([2, 2, 1])  # type: ignore[assignment]
+
+        planner = BenchmarkPlanner(
+            config=BenchmarkRootConfig(
+                connections=[self.connection],
+                benchmarks=[
+                    BenchmarkConfig(
+                        id="bench_a",
+                        connection_id="prod_ch",
+                        strategy="types_strategy",
+                        databases=["analytics"],
+                        tables=["events"],
+                        insert_operations_count=1,
+                        global_rules=RulesConfig(
+                            column_rules=[
+                                ColumnRuleConfig(
+                                    by_type="UInt64",
+                                    types=["UInt64", "UInt32"],
+                                )
+                            ]
+                        ),
+                    )
+                ],
+                rule_banks={},
+                default_rule_banks={},
+                celery=CeleryConfig(workers=2, threads_per_worker=1),
+            ),
+            providers_by_connection_id={"prod_ch": _StaticMetadataProvider()},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        job = next(
+            engine.iter_variant_jobs(
+                benchmark_ids=["bench_a"],
+                benchmark_run_id=11,
+                benchmark_started_at=datetime(2026, 2, 24, 12, 0, tzinfo=timezone.utc),
+            )
+        )
+
+        original_limit = execution_module._CELERY_MAX_IN_FLIGHT_TASKS
+        original_poll = execution_module._CELERY_IN_FLIGHT_WAIT_POLL_SEC
+        original_timeout = execution_module._CELERY_IN_FLIGHT_WAIT_TIMEOUT_SEC
+        execution_module._CELERY_MAX_IN_FLIGHT_TASKS = 2
+        execution_module._CELERY_IN_FLIGHT_WAIT_POLL_SEC = 0.0
+        execution_module._CELERY_IN_FLIGHT_WAIT_TIMEOUT_SEC = 1.0
+        try:
+            dispatch_ack = adapter.execute_variant(job)
+        finally:
+            execution_module._CELERY_MAX_IN_FLIGHT_TASKS = original_limit
+            execution_module._CELERY_IN_FLIGHT_WAIT_POLL_SEC = original_poll
+            execution_module._CELERY_IN_FLIGHT_WAIT_TIMEOUT_SEC = original_timeout
+
+        self.assertEqual(dispatch_ack.variant_table, job.variant_table)
+        variant_calls = [
+            call for call in fake_app.calls if call.get("task_name") == VARIANT_BENCHMARK_TASK_NAME
+        ]
+        self.assertEqual(len(variant_calls), 1)
+        monitor = adapter._global_progress_monitor
+        self.assertIsNotNone(monitor)
+        assert monitor is not None
+        self.assertGreaterEqual(monitor.in_flight_calls, 3)
+
+    def test_execute_variant_retries_on_reject_publish_when_queue_is_full(self) -> None:
+        source_result_payload = {
+            "baseline_id": "baseline-1",
+            "benchmark_run_id": 11,
+            "benchmark_started_at": datetime(2026, 2, 24, 12, 0, tzinfo=timezone.utc).isoformat(),
+            "benchmark_id": "bench_a",
+            "source_database": "analytics",
+            "source_table": "events",
+            "source_table_ddl": EVENTS_DDL,
+            "score": 1.0,
+            "metrics": {"status": "ok"},
+        }
+        fake_app = _RejectPublishFlakyCeleryApp(
+            source_payload=source_result_payload,
+            fail_variant_times=2,
+        )
+        adapter = CeleryClickHouseExecutionAdapter(
+            connections_by_id={"prod_ch": self.connection},
+            celery_app=fake_app,
+            progress_monitor_enabled=False,
+        )
+
+        planner = BenchmarkPlanner(
+            config=BenchmarkRootConfig(
+                connections=[self.connection],
+                benchmarks=[
+                    BenchmarkConfig(
+                        id="bench_a",
+                        connection_id="prod_ch",
+                        strategy="types_strategy",
+                        databases=["analytics"],
+                        tables=["events"],
+                        insert_operations_count=1,
+                        global_rules=RulesConfig(
+                            column_rules=[
+                                ColumnRuleConfig(
+                                    by_type="UInt64",
+                                    types=["UInt64", "UInt32"],
+                                )
+                            ]
+                        ),
+                    )
+                ],
+                rule_banks={},
+                default_rule_banks={},
+                celery=CeleryConfig(workers=2, threads_per_worker=1),
+            ),
+            providers_by_connection_id={"prod_ch": _StaticMetadataProvider()},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        job = next(
+            engine.iter_variant_jobs(
+                benchmark_ids=["bench_a"],
+                benchmark_run_id=11,
+                benchmark_started_at=datetime(2026, 2, 24, 12, 0, tzinfo=timezone.utc),
+            )
+        )
+
+        original_reconnect_attempts = execution_module._CELERY_RECONNECT_MAX_ATTEMPTS
+        original_reject_attempts = execution_module._CELERY_REJECT_PUBLISH_MAX_ATTEMPTS
+        original_reject_sleep = execution_module._CELERY_REJECT_PUBLISH_RETRY_SLEEP_SEC
+        execution_module._CELERY_RECONNECT_MAX_ATTEMPTS = 0
+        execution_module._CELERY_REJECT_PUBLISH_MAX_ATTEMPTS = 3
+        execution_module._CELERY_REJECT_PUBLISH_RETRY_SLEEP_SEC = 0.0
+        try:
+            dispatch_ack = adapter.execute_variant(job)
+        finally:
+            execution_module._CELERY_RECONNECT_MAX_ATTEMPTS = original_reconnect_attempts
+            execution_module._CELERY_REJECT_PUBLISH_MAX_ATTEMPTS = original_reject_attempts
+            execution_module._CELERY_REJECT_PUBLISH_RETRY_SLEEP_SEC = original_reject_sleep
+
+        self.assertEqual(dispatch_ack.variant_table, job.variant_table)
+        variant_calls = [
+            call for call in fake_app.calls if call.get("task_name") == VARIANT_BENCHMARK_TASK_NAME
+        ]
+        self.assertEqual(len(variant_calls), 1)
+
+    def test_execute_variant_sends_payload_ref_when_payload_store_enabled(self) -> None:
+        source_result_payload = {
+            "baseline_id": "baseline-1",
+            "benchmark_run_id": 11,
+            "benchmark_started_at": datetime(2026, 2, 24, 12, 0, tzinfo=timezone.utc).isoformat(),
+            "benchmark_id": "bench_a",
+            "source_database": "analytics",
+            "source_table": "events",
+            "source_table_ddl": EVENTS_DDL,
+            "score": 1.0,
+            "metrics": {"status": "ok"},
+        }
+        fake_app = _FakeCeleryApp(source_payload=source_result_payload)
+        adapter = CeleryClickHouseExecutionAdapter(
+            connections_by_id={"prod_ch": self.connection},
+            celery_app=fake_app,
+            progress_monitor_enabled=False,
+        )
+        fake_ref = TaskPayloadRefPayload(
+            payload_id="payload-id-1",
+            payload_kind="variant",
+            storage_connection=adapter._to_connection_payload(self.connection),
+            storage_database="benchmark_results",
+            storage_table="benchmark_task_payloads",
+        )
+
+        planner = BenchmarkPlanner(
+            config=BenchmarkRootConfig(
+                connections=[self.connection],
+                benchmarks=[
+                    BenchmarkConfig(
+                        id="bench_a",
+                        connection_id="prod_ch",
+                        strategy="types_strategy",
+                        databases=["analytics"],
+                        tables=["events"],
+                        insert_operations_count=1,
+                        global_rules=RulesConfig(
+                            column_rules=[
+                                ColumnRuleConfig(
+                                    by_type="UInt64",
+                                    types=["UInt64", "UInt32"],
+                                )
+                            ]
+                        ),
+                    )
+                ],
+                rule_banks={},
+                default_rule_banks={},
+                celery=CeleryConfig(workers=2, threads_per_worker=1),
+            ),
+            providers_by_connection_id={"prod_ch": _StaticMetadataProvider()},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        job = next(
+            engine.iter_variant_jobs(
+                benchmark_ids=["bench_a"],
+                benchmark_run_id=11,
+                benchmark_started_at=datetime(2026, 2, 24, 12, 0, tzinfo=timezone.utc),
+            )
+        )
+
+        original_payload_store_enabled = execution_module._CELERY_PAYLOAD_STORE_ENABLED
+        execution_module._CELERY_PAYLOAD_STORE_ENABLED = True
+        adapter._payload_store_enabled = True
+        with patch.object(
+            adapter,
+            "_store_payload_in_db",
+            return_value=fake_ref,
+        ) as store_payload_mock:
+            dispatch_ack = adapter.execute_variant(job)
+        execution_module._CELERY_PAYLOAD_STORE_ENABLED = original_payload_store_enabled
+
+        self.assertEqual(dispatch_ack.variant_table, job.variant_table)
+        store_payload_mock.assert_called_once()
+        variant_calls = [
+            call for call in fake_app.calls if call.get("task_name") == VARIANT_BENCHMARK_TASK_NAME
+        ]
+        self.assertEqual(len(variant_calls), 1)
+        variant_call_kwargs = variant_calls[0]["kwargs"]
+        self.assertIn("payload_ref", variant_call_kwargs)
+        self.assertNotIn("payload", variant_call_kwargs)
+        self.assertEqual(
+            variant_call_kwargs["payload_ref"]["payload_id"],
+            "payload-id-1",
+        )
+
     def test_variant_task_is_configured_to_ignore_backend_results(self) -> None:
         if celery_worker_app is None:
             self.skipTest("Celery app недоступен в тестовом окружении")
+        settings = get_clickhouse_celery_worker_settings()
 
         source_task = celery_worker_app.tasks[SOURCE_BENCHMARK_TASK_NAME]
         variant_task = celery_worker_app.tasks[VARIANT_BENCHMARK_TASK_NAME]
@@ -349,6 +720,19 @@ class ClickHouseCeleryRuntimeTests(unittest.TestCase):
         self.assertIsNone(celery_worker_app.conf.task_queue_expires)
         self.assertEqual(celery_worker_app.conf.task_default_delivery_mode, "persistent")
         self.assertEqual(celery_worker_app.conf.task_default_queue, "bench.benchmark")
+        self.assertEqual(
+            celery_worker_app.conf.worker_prefetch_multiplier,
+            settings.celery_worker_prefetch_multiplier,
+        )
+        self.assertEqual(celery_worker_app.conf.task_acks_late, settings.celery_task_acks_late)
+        self.assertEqual(
+            celery_worker_app.conf.task_reject_on_worker_lost,
+            settings.celery_task_reject_on_worker_lost,
+        )
+        self.assertEqual(celery_worker_app.conf.broker_pool_limit, settings.celery_broker_pool_limit)
+        self.assertEqual(celery_worker_app.conf.broker_heartbeat, settings.celery_broker_heartbeat_sec)
+        self.assertEqual(celery_worker_app.conf.task_compression, settings.celery_task_compression)
+        self.assertEqual(celery_worker_app.conf.result_compression, settings.celery_result_compression)
 
     def test_sequential_strategy_calls_progress_wait_hooks(self) -> None:
         benchmark = BenchmarkConfig(

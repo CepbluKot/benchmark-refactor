@@ -19,7 +19,7 @@
       ],
       "insert_operations_count": 20,
       "sequential_types_top_n_for_indexes": 2,
-      "insert_rows_per_operation_limit": 2000000,
+      "insert_rows_per_operation_limit":  20000,
       "source_insert_rows_per_operation_limit": 900000,
       "insert_rows_per_operation_limits": {
         "types": 2500000,
@@ -129,7 +129,7 @@
           "table": "user_events",
           "sequential_types_top_n_for_indexes": 1,
           "insert_operations_count": 12,
-          "insert_rows_per_operation_limit": 500000,
+          "insert_rows_per_operation_limit":  20000,
           "source_insert_rows_per_operation_limit": 250000,
           "insert_rows_per_operation_limits": {
             "types": 700000,
