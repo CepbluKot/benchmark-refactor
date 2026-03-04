@@ -1293,20 +1293,33 @@ class BenchmarkRunner:
                             self._active_source_benchmark.metrics.get("skip_reason", "unknown"),
                         )
                         continue
-                    strategy.execute_table(
-                        runner=self,
-                        table_plan=table_plan,
-                        benchmark_run_id=run_id,
-                        benchmark_started_at=run_started_at,
-                    )
-                    logger.info(
-                        "BenchmarkRunner: завершён table plan "
-                        "(run_id=%d, benchmark=%s, table=%s.%s)",
-                        run_id,
-                        table_plan.benchmark_id,
-                        table_plan.database,
-                        table_plan.table,
-                    )
+                    try:
+                        strategy.execute_table(
+                            runner=self,
+                            table_plan=table_plan,
+                            benchmark_run_id=run_id,
+                            benchmark_started_at=run_started_at,
+                        )
+                        logger.info(
+                            "BenchmarkRunner: завершён table plan "
+                            "(run_id=%d, benchmark=%s, table=%s.%s)",
+                            run_id,
+                            table_plan.benchmark_id,
+                            table_plan.database,
+                            table_plan.table,
+                        )
+                    except Exception:
+                        if strategy_key != "sequential_phased_topn_strategy":
+                            raise
+                        logger.exception(
+                            "BenchmarkRunner: phased table plan завершился с ошибкой и будет пропущен "
+                            "(run_id=%d, benchmark=%s, table=%s.%s, strategy=%s)",
+                            run_id,
+                            table_plan.benchmark_id,
+                            table_plan.database,
+                            table_plan.table,
+                            strategy_key,
+                        )
                 finally:
                     self._register_benchmark_run_finish_if_supported(
                         table_plan=table_plan,

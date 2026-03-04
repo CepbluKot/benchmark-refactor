@@ -23,18 +23,18 @@
         ]
       },
       "test_database": "benchmark_tmp",
-      "insert_operations_count": 10,
+      "insert_operations_count": 5,
       "sequential_top_n_limits": {
-        "order_by": 5,
-        "types": 5,
-        "codecs": 5,
-        "indexes": 5,
-        "final_validation": 5
+        "order_by": 3,
+        "types": 3,
+        "codecs": 3,
+        "indexes": 3,
+        "final_validation": 3
       },
       "max_winners_per_parent_limits": {
-        "types": 5,
-        "codecs": 5,
-        "indexes": 5
+        "types": 3,
+        "codecs": 3,
+        "indexes": 3
       },
       "scoring": {
         "mode": "expression",
@@ -120,25 +120,27 @@
         }
       },
       "max_benchmarks_limits": {
-        "order_by": 1000,
-        "types": 1000,
-        "codecs": 1000,
-        "indexes": 1000,
-        "final_validation": 1000,
-        "sequential": 1000
+        "order_by": 100,
+        "types": 100,
+        "codecs": 100,
+        "indexes": 100,
+        "final_validation": 100,
+        "sequential": 100,
+        "index_granularity": 100
       },
-      "source_insert_rows_per_operation_limit": 50000,
+      "source_insert_rows_per_operation_limit": 20000,
       "source_insert_rows_per_operation_limits": {
-        "sequential": 50000
+        "sequential": 20000
       },
-      "insert_rows_per_operation_limit": 50000,
+      "insert_rows_per_operation_limit": 20000,
       "insert_rows_per_operation_limits": {
-        "order_by": 50000,
-        "types": 50000,
-        "codecs": 50000,
-        "indexes": 50000,
-        "final_validation": 50000,
-        "sequential": 50000
+        "order_by": 20000,
+        "types": 20000,
+        "codecs": 20000,
+        "indexes": 20000,
+        "final_validation": 20000,
+        "sequential": 20000,
+        "index_granularity": 20000
       },
       "global_rules": {
         "order_by_rules": {
@@ -152,16 +154,10 @@
               {
                 "type": "ngrambf_v1(3, 32768, 2, 0)",
                 "granularity": [
-                  4,
-                  8,
-                  16
+                  4
                 ],
                 "index_granularity_values": [
-                  8192,
-                  16384,
-                  32768,
-                  65536,
-                  131072
+                  8192
                 ]
               }
             ]
@@ -172,16 +168,10 @@
               {
                 "type": "ngrambf_v1(3, 32768, 2, 0)",
                 "granularity": [
-                  4,
-                  8,
-                  16
+                  4
                 ],
                 "index_granularity_values": [
-                  8192,
-                  16384,
-                  32768,
-                  65536,
-                  131072
+                  8192
                 ]
               }
             ]
@@ -198,16 +188,17 @@
             "logger"
           ],
           "max_benchmarks_limits": {
-            "order_by": 1000,
-            "types": 1000,
-            "codecs": 1000,
-            "indexes": 1000,
-            "final_validation": 1000
+            "order_by": 100,
+            "types": 100,
+            "codecs": 100,
+            "indexes": 100,
+            "final_validation": 100,
+            "index_granularity": 100
           },
           "queries": {
             "mode": "auto",
             "auto_like_on_measured_columns": true,
-            "auto_like_sample_rows_per_column": 20,
+            "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
             "auto_select_limit": 10
@@ -216,138 +207,26 @@
             "column_rules": [],
             "codec_rules": [
               {
-                "by_name": "timestamp",
-                "by_type": "DateTime64(6, 'Europe/Moscow')",
-                "codecs": [
-                  "CODEC(Delta(8), ZSTD(1))"
-                ]
-              },
-              {
                 "by_name": "message",
                 "by_type": "String",
                 "codecs": [
                   "CODEC(LZ4)",
                   "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "log_file_path",
-                "by_type": "String",
-                "codecs": [
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "pid",
-                "by_type": "UInt32",
-                "codecs": [
-                  "CODEC(LZ4)",
-                  "CODEC(Delta(4), ZSTD(1))"
                 ]
               }
             ],
             "index_rules": [
               {
-                "by_name": "log_level",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(8)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "logger",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(200)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "host_name",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "bloom_filter(0.01)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "object",
-                "by_type": "Nullable(String)",
-                "indexes": [
-                  {
-                    "type": "bloom_filter(0.01)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
                 "by_name": "message",
                 "by_type": "String",
                 "indexes": [
                   {
-                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "type": "ngrambf_v1(3, 32768, 2, 0)",
                     "granularity": [
-                      4,
-                      8,
-                      16
+                      4
                     ],
                     "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
+                      8192
                     ]
                   }
                 ]
@@ -366,16 +245,17 @@
             "attempt"
           ],
           "max_benchmarks_limits": {
-            "order_by": 1000,
-            "types": 1000,
-            "codecs": 1000,
-            "indexes": 1000,
-            "final_validation": 1000
+            "order_by": 100,
+            "types": 100,
+            "codecs": 100,
+            "indexes": 100,
+            "final_validation": 100,
+            "index_granularity": 100
           },
           "queries": {
             "mode": "auto",
             "auto_like_on_measured_columns": true,
-            "auto_like_sample_rows_per_column": 20,
+            "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
             "auto_select_limit": 10
@@ -384,145 +264,26 @@
             "column_rules": [],
             "codec_rules": [
               {
-                "by_name": "timestamp",
-                "by_type": "DateTime64(6)",
-                "codecs": [
-                  "CODEC(Delta(8), ZSTD(1))"
-                ]
-              },
-              {
                 "by_name": "airflow_message",
                 "by_type": "String",
                 "codecs": [
                   "CODEC(LZ4)",
                   "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "run",
-                "by_type": "String",
-                "codecs": [
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "airflow_datetime",
-                "by_type": "String",
-                "codecs": [
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "attempt",
-                "by_type": "UInt16",
-                "codecs": [
-                  "CODEC(LZ4)",
-                  "CODEC(Delta(2), ZSTD(1))"
                 ]
               }
             ],
             "index_rules": [
               {
-                "by_name": "airflow_log_level",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(8)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "task",
-                "by_type": "String",
-                "indexes": [
-                  {
-                    "type": "bloom_filter(0.01)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "airflow_python_logger_module",
-                "by_type": "String",
-                "indexes": [
-                  {
-                    "type": "set(200)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "run",
-                "by_type": "String",
-                "indexes": [
-                  {
-                    "type": "bloom_filter(0.01)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
                 "by_name": "airflow_message",
                 "by_type": "String",
                 "indexes": [
                   {
-                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "type": "ngrambf_v1(3, 32768, 2, 0)",
                     "granularity": [
-                      4,
-                      8,
-                      16
+                      4
                     ],
                     "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
+                      8192
                     ]
                   }
                 ]
@@ -540,16 +301,17 @@
             "run"
           ],
           "max_benchmarks_limits": {
-            "order_by": 1000,
-            "types": 1000,
-            "codecs": 1000,
-            "indexes": 1000,
-            "final_validation": 1000
+            "order_by": 100,
+            "types": 100,
+            "codecs": 100,
+            "indexes": 100,
+            "final_validation": 100,
+            "index_granularity": 100
           },
           "queries": {
             "mode": "auto",
             "auto_like_on_measured_columns": true,
-            "auto_like_sample_rows_per_column": 20,
+            "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
             "auto_select_limit": 10
@@ -558,215 +320,26 @@
             "column_rules": [],
             "codec_rules": [
               {
-                "by_name": "timestamp",
-                "by_type": "DateTime64(6, 'UTC')",
-                "codecs": [
-                  "CODEC(Delta(8), ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "_fluentbit_timestamp",
-                "by_type": "DateTime64(6)",
-                "codecs": [
-                  "CODEC(Delta(8), ZSTD(1))"
-                ]
-              },
-              {
                 "by_name": "msg",
                 "by_type": "String",
                 "codecs": [
                   "CODEC(LZ4)",
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "dbt_msg",
-                "by_type": "Nullable(String)",
-                "codecs": [
-                  "CODEC(LZ4)",
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "run",
-                "by_type": "String",
-                "codecs": [
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "job_id",
-                "by_type": "String",
-                "codecs": [
                   "CODEC(ZSTD(1))"
                 ]
               }
             ],
             "index_rules": [
               {
-                "by_name": "log_level",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(8)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "log_class",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(50)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "log_code",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(100)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "task",
-                "by_type": "String",
-                "indexes": [
-                  {
-                    "type": "bloom_filter(0.01)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "dbt_target_user",
-                "by_type": "LowCardinality(Nullable(String))",
-                "indexes": [
-                  {
-                    "type": "bloom_filter(0.01)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "dbt_target_host",
-                "by_type": "LowCardinality(Nullable(String))",
-                "indexes": [
-                  {
-                    "type": "set(50)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "job_id",
-                "by_type": "String",
-                "indexes": [
-                  {
-                    "type": "bloom_filter(0.01)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
                 "by_name": "msg",
                 "by_type": "String",
                 "indexes": [
                   {
-                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "type": "ngrambf_v1(3, 32768, 2, 0)",
                     "granularity": [
-                      4,
-                      8,
-                      16
+                      4
                     ],
                     "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
+                      8192
                     ]
                   }
                 ]
@@ -784,16 +357,17 @@
             "host_name"
           ],
           "max_benchmarks_limits": {
-            "order_by": 1000,
-            "types": 1000,
-            "codecs": 1000,
-            "indexes": 1000,
-            "final_validation": 1000
+            "order_by": 100,
+            "types": 100,
+            "codecs": 100,
+            "indexes": 100,
+            "final_validation": 100,
+            "index_granularity": 100
           },
           "queries": {
             "mode": "auto",
             "auto_like_on_measured_columns": true,
-            "auto_like_sample_rows_per_column": 20,
+            "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
             "auto_select_limit": 10
@@ -801,31 +375,7 @@
           "rules": {
             "codec_rules": [
               {
-                "by_name": "timestamp",
-                "by_type": "DateTime64(6)",
-                "codecs": [
-                  "CODEC(LZ4)",
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
                 "by_name": "flex_msg",
-                "by_type": "String",
-                "codecs": [
-                  "CODEC(LZ4)",
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "flex_logger",
-                "by_type": "String",
-                "codecs": [
-                  "CODEC(LZ4)",
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "log_file_path",
                 "by_type": "String",
                 "codecs": [
                   "CODEC(LZ4)",
@@ -839,60 +389,12 @@
                 "by_type": "String",
                 "indexes": [
                   {
-                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "type": "ngrambf_v1(3, 32768, 2, 0)",
                     "granularity": [
-                      4,
-                      8,
-                      16
+                      4
                     ],
                     "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "flex_log_level",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(8)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "host_name",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "bloom_filter(0.01)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
+                      8192
                     ]
                   }
                 ]
@@ -910,77 +412,27 @@
             "table_name"
           ],
           "max_benchmarks_limits": {
-            "order_by": 1000,
-            "types": 1000,
-            "codecs": 1000,
-            "indexes": 1000,
-            "final_validation": 1000
+            "order_by": 100,
+            "types": 100,
+            "codecs": 100,
+            "indexes": 100,
+            "final_validation": 100,
+            "index_granularity": 100
           },
           "queries": {
             "mode": "auto",
             "auto_like_on_measured_columns": true,
-            "auto_like_sample_rows_per_column": 20,
+            "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
             "auto_select_limit": 10
           },
           "rules": {
-            "column_rules": [
-              {
-                "by_name": "flex_logger",
-                "by_type": "String",
-                "auto_generate_alternatives": false,
-                "types": [
-                  "String",
-                  "LowCardinality(String)"
-                ]
-              },
-              {
-                "by_name": "log_file_path",
-                "by_type": "String",
-                "auto_generate_alternatives": false,
-                "types": [
-                  "String",
-                  "LowCardinality(String)"
-                ]
-              }
-            ],
+            "column_rules": [],
             "codec_rules": [
-              {
-                "by_name": "timestamp",
-                "by_type": "DateTime64(6)",
-                "codecs": [
-                  "CODEC(LZ4)",
-                  "CODEC(ZSTD(1))"
-                ]
-              },
               {
                 "by_name": "flex_msg",
                 "by_type": "String",
-                "codecs": [
-                  "CODEC(LZ4)",
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "log_file_path",
-                "by_type": "String",
-                "codecs": [
-                  "CODEC(LZ4)",
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "log_file_path",
-                "by_type": "LowCardinality(String)",
-                "codecs": [
-                  "CODEC(LZ4)",
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "journal_id",
-                "by_type": "Nullable(UInt32)",
                 "codecs": [
                   "CODEC(LZ4)",
                   "CODEC(ZSTD(1))"
@@ -993,60 +445,12 @@
                 "by_type": "String",
                 "indexes": [
                   {
-                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "type": "ngrambf_v1(3, 32768, 2, 0)",
                     "granularity": [
-                      4,
-                      8,
-                      16
+                      4
                     ],
                     "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "flex_log_level",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(8)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "host_name",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "bloom_filter(0.01)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
+                      8192
                     ]
                   }
                 ]
@@ -1063,16 +467,17 @@
             "table_name"
           ],
           "max_benchmarks_limits": {
-            "order_by": 1000,
-            "types": 1000,
-            "codecs": 1000,
-            "indexes": 1000,
-            "final_validation": 1000
+            "order_by": 100,
+            "types": 100,
+            "codecs": 100,
+            "indexes": 100,
+            "final_validation": 100,
+            "index_granularity": 100
           },
           "queries": {
             "mode": "auto",
             "auto_like_on_measured_columns": true,
-            "auto_like_sample_rows_per_column": 20,
+            "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
             "auto_select_limit": 10
@@ -1080,24 +485,10 @@
           "rules": {
             "codec_rules": [
               {
-                "by_name": "timestamp",
-                "by_type": "DateTime64(6)",
-                "codecs": [
-                  "CODEC(Delta(8), ZSTD(1))"
-                ]
-              },
-              {
                 "by_name": "flex_msg",
                 "by_type": "String",
                 "codecs": [
                   "CODEC(LZ4)",
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "log_file_path",
-                "by_type": "String",
-                "codecs": [
                   "CODEC(ZSTD(1))"
                 ]
               }
@@ -1108,39 +499,12 @@
                 "by_type": "String",
                 "indexes": [
                   {
-                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "type": "ngrambf_v1(3, 32768, 2, 0)",
                     "granularity": [
-                      4,
-                      8,
-                      16
+                      4
                     ],
                     "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "host_name",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "bloom_filter(0.01)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
+                      8192
                     ]
                   }
                 ]
@@ -1159,58 +523,24 @@
             "level"
           ],
           "max_benchmarks_limits": {
-            "order_by": 1000,
-            "types": 1000,
-            "codecs": 1000,
-            "indexes": 1000,
-            "final_validation": 1000
+            "order_by": 100,
+            "types": 100,
+            "codecs": 100,
+            "indexes": 100,
+            "final_validation": 100,
+            "index_granularity": 100
           },
           "queries": {
             "mode": "auto",
             "auto_like_on_measured_columns": true,
-            "auto_like_sample_rows_per_column": 20,
+            "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
             "auto_select_limit": 10
           },
           "rules": {
-            "column_rules": [
-              {
-                "by_name": "apiVersion",
-                "by_type": "String",
-                "auto_generate_alternatives": false,
-                "types": [
-                  "String",
-                  "LowCardinality(String)"
-                ]
-              },
-              {
-                "by_name": "kind",
-                "by_type": "String",
-                "auto_generate_alternatives": false,
-                "types": [
-                  "String",
-                  "LowCardinality(String)"
-                ]
-              },
-              {
-                "by_name": "level",
-                "by_type": "String",
-                "auto_generate_alternatives": false,
-                "types": [
-                  "String",
-                  "LowCardinality(String)"
-                ]
-              }
-            ],
+            "column_rules": [],
             "codec_rules": [
-              {
-                "by_name": "timestamp",
-                "by_type": "DateTime64(6)",
-                "codecs": [
-                  "CODEC(Delta(8), ZSTD(1))"
-                ]
-              },
               {
                 "by_name": "responseStatus_message",
                 "by_type": "String",
@@ -1218,146 +548,20 @@
                   "CODEC(LZ4)",
                   "CODEC(ZSTD(1))"
                 ]
-              },
-              {
-                "by_name": "annotations_authorization_reason",
-                "by_type": "String",
-                "codecs": [
-                  "CODEC(ZSTD(3))"
-                ]
-              },
-              {
-                "by_name": "requestURI",
-                "by_type": "String",
-                "codecs": [
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "userAgent",
-                "by_type": "String",
-                "codecs": [
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "responseStatus_code",
-                "by_type": "Int32",
-                "codecs": [
-                  "CODEC(LZ4)",
-                  "CODEC(Delta(4), ZSTD(1))"
-                ]
               }
             ],
             "index_rules": [
               {
-                "by_name": "verb",
+                "by_name": "responseStatus_message",
                 "by_type": "String",
                 "indexes": [
                   {
-                    "type": "set(20)",
+                    "type": "ngrambf_v1(3, 32768, 2, 0)",
                     "granularity": [
-                      4,
-                      8,
-                      16
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "verb",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(20)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "kind",
-                "by_type": "String",
-                "indexes": [
-                  {
-                    "type": "set(100)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "kind",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(100)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "level",
-                "by_type": "String",
-                "indexes": [
-                  {
-                    "type": "set(8)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "level",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(8)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "stage",
-                "by_type": "String",
-                "indexes": [
-                  {
-                    "type": "set(8)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "stage",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(8)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
+                      4
+                    ],
+                    "index_granularity_values": [
+                      8192
                     ]
                   }
                 ]
@@ -1376,91 +580,29 @@
             "ext_ClusterEventType"
           ],
           "max_benchmarks_limits": {
-            "order_by": 1000,
-            "types": 1000,
-            "codecs": 1000,
-            "indexes": 1000,
-            "final_validation": 1000
+            "order_by": 100,
+            "types": 100,
+            "codecs": 100,
+            "indexes": 100,
+            "final_validation": 100,
+            "index_granularity": 100
           },
           "queries": {
             "mode": "auto",
             "auto_like_on_measured_columns": true,
-            "auto_like_sample_rows_per_column": 20,
+            "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
             "auto_select_limit": 10
           },
           "rules": {
-            "column_rules": [
-              {
-                "by_name": "source_type",
-                "by_type": "String",
-                "auto_generate_alternatives": false,
-                "types": [
-                  "String",
-                  "LowCardinality(String)"
-                ]
-              },
-              {
-                "by_name": "ext_ClusterEnv",
-                "by_type": "String",
-                "auto_generate_alternatives": false,
-                "types": [
-                  "String",
-                  "LowCardinality(String)"
-                ]
-              },
-              {
-                "by_name": "ext_ClusterName",
-                "by_type": "String",
-                "auto_generate_alternatives": false,
-                "types": [
-                  "String",
-                  "LowCardinality(String)"
-                ]
-              }
-            ],
+            "column_rules": [],
             "codec_rules": [
-              {
-                "by_name": "timestamp",
-                "by_type": "DateTime64(6)",
-                "codecs": [
-                  "CODEC(Delta(8), ZSTD(1))"
-                ]
-              },
               {
                 "by_name": "message",
                 "by_type": "String",
                 "codecs": [
                   "CODEC(LZ4)",
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "reason",
-                "by_type": "String",
-                "codecs": [
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "source_type",
-                "by_type": "String",
-                "codecs": [
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "ext_ClusterEnv",
-                "by_type": "String",
-                "codecs": [
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "ext_ClusterName",
-                "by_type": "String",
-                "codecs": [
                   "CODEC(ZSTD(1))"
                 ]
               }
@@ -1471,165 +613,12 @@
                 "by_type": "String",
                 "indexes": [
                   {
-                    "type": "ngrambf_v1(3, 1024, 3, 0)",
+                    "type": "ngrambf_v1(3, 32768, 2, 0)",
                     "granularity": [
-                      4,
-                      8,
-                      16
+                      4
                     ],
                     "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "ext_ClusterEventType",
-                "by_type": "String",
-                "indexes": [
-                  {
-                    "type": "set(8)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "ext_ClusterEventType",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(8)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "ext_ClusterName",
-                "by_type": "String",
-                "indexes": [
-                  {
-                    "type": "set(50)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "ext_ClusterName",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(50)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "ext_ClusterEnv",
-                "by_type": "String",
-                "indexes": [
-                  {
-                    "type": "set(20)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "ext_ClusterEnv",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(20)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "source_type",
-                "by_type": "String",
-                "indexes": [
-                  {
-                    "type": "set(50)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
+                      8192
                     ]
                   }
                 ]
@@ -1647,49 +636,24 @@
             "container_name"
           ],
           "max_benchmarks_limits": {
-            "order_by": 1000,
-            "types": 1000,
-            "codecs": 1000,
-            "indexes": 1000,
-            "final_validation": 1000
+            "order_by": 100,
+            "types": 100,
+            "codecs": 100,
+            "indexes": 100,
+            "final_validation": 100,
+            "index_granularity": 100
           },
           "queries": {
             "mode": "auto",
             "auto_like_on_measured_columns": true,
-            "auto_like_sample_rows_per_column": 20,
+            "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
             "auto_select_limit": 10
           },
           "rules": {
-            "column_rules": [
-              {
-                "by_name": "container_image",
-                "by_type": "String",
-                "auto_generate_alternatives": false,
-                "types": [
-                  "String",
-                  "LowCardinality(String)"
-                ]
-              },
-              {
-                "by_name": "pod_name",
-                "by_type": "String",
-                "auto_generate_alternatives": false,
-                "types": [
-                  "String",
-                  "LowCardinality(String)"
-                ]
-              }
-            ],
+            "column_rules": [],
             "codec_rules": [
-              {
-                "by_name": "timestamp",
-                "by_type": "DateTime64(6)",
-                "codecs": [
-                  "CODEC(Delta(8), ZSTD(1))"
-                ]
-              },
               {
                 "by_name": "message",
                 "by_type": "String",
@@ -1697,201 +661,20 @@
                   "CODEC(LZ4)",
                   "CODEC(ZSTD(1))"
                 ]
-              },
-              {
-                "by_name": "log_file_path",
-                "by_type": "String",
-                "codecs": [
-                  "CODEC(ZSTD(1))"
-                ]
-              },
-              {
-                "by_name": "_raw_message",
-                "by_type": "String",
-                "codecs": [
-                  "CODEC(ZSTD(3))"
-                ]
-              },
-              {
-                "by_name": "_raw_message",
-                "by_type": "Nullable(String)",
-                "codecs": [
-                  "CODEC(ZSTD(3))"
-                ]
-              },
-              {
-                "by_name": "_error",
-                "by_type": "String",
-                "codecs": [
-                  "CODEC(ZSTD(3))"
-                ]
               }
             ],
             "index_rules": [
               {
-                "by_name": "namespace",
+                "by_name": "message",
                 "by_type": "String",
                 "indexes": [
                   {
-                    "type": "set(100)",
+                    "type": "ngrambf_v1(3, 32768, 2, 0)",
                     "granularity": [
-                      4,
-                      8,
-                      16
+                      4
                     ],
                     "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "namespace",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(100)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "workspace",
-                "by_type": "String",
-                "indexes": [
-                  {
-                    "type": "set(50)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "workspace",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(50)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "container_name",
-                "by_type": "String",
-                "indexes": [
-                  {
-                    "type": "set(200)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "container_name",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "set(200)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "container_image",
-                "by_type": "String",
-                "indexes": [
-                  {
-                    "type": "bloom_filter(0.01)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
-                    ]
-                  }
-                ]
-              },
-              {
-                "by_name": "container_image",
-                "by_type": "LowCardinality(String)",
-                "indexes": [
-                  {
-                    "type": "bloom_filter(0.01)",
-                    "granularity": [
-                      4,
-                      8,
-                      16
-                    ],
-                    "index_granularity_values": [
-                      8192,
-                      16384,
-                      32768,
-                      65536,
-                      131072
+                      8192
                     ]
                   }
                 ]
@@ -1907,7 +690,10 @@
         "auto_like_min_token_length": 3,
         "auto_like_max_token_length": 24,
         "auto_select_limit": 10
-      }
+      },
+      "index_granularity_values": [
+        8192
+      ]
     }
   ]
 }

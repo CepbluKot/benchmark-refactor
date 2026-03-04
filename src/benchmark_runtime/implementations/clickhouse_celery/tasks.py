@@ -98,6 +98,14 @@ def _is_nullable_sorting_key_error(exc: Exception) -> bool:
     return ("code: 44" in message) or ("illegal_column" in message)
 
 
+def _is_memory_limit_exceeded_error(exc: Exception) -> bool:
+    """Определяет ошибку ClickHouse `MEMORY_LIMIT_EXCEEDED`."""
+    message = str(exc or "").lower()
+    if "memory limit" not in message and "memory_limit_exceeded" not in message:
+        return False
+    return ("code: 241" in message) or ("memory_limit_exceeded" in message)
+
+
 def _ensure_allow_nullable_key_in_ddl(ddl_sql: str) -> str:
     """
     Гарантирует `allow_nullable_key = 1` в SETTINGS CREATE TABLE DDL.
@@ -2259,6 +2267,7 @@ class _ClickHouseRuntimeClient:
         query: str,
         *,
         query_tag: Optional[str] = None,
+        raise_on_execute_error: bool = False,
     ) -> Dict[str, float]:
         """
         Выполняет SQL через `command` и достаёт метрики из `system.query_log`.
@@ -2272,6 +2281,8 @@ class _ClickHouseRuntimeClient:
             )
         except Exception:
             logger.exception("Не удалось выполнить command SQL для query_log-метрик")
+            if raise_on_execute_error:
+                raise
             return _error_query_metrics()
 
         query_log_metrics = self._query_log_metrics_by_query_id(query_id=query_id)
@@ -2716,16 +2727,20 @@ class _ClickHouseRuntimeClient:
         if n_rows is not None and n_rows <= 0:
             return _error_query_metrics()
         safe_offset = max(0, offset)
+        fallback_strict_fill = bool(strictly_adhere_n_rows)
 
-        source_select_query = self._build_source_select_for_insert(
-            source_database=source_database,
-            source_table=source_table,
-            n_rows=n_rows,
-            offset=safe_offset,
-            strictly_adhere_n_rows=strictly_adhere_n_rows,
-            tested_cols=tested_cols,
-            deterministic_order_by=deterministic_order_by,
-        )
+        def _build_source_select_query(strict_fill: bool) -> str:
+            return self._build_source_select_for_insert(
+                source_database=source_database,
+                source_table=source_table,
+                n_rows=n_rows,
+                offset=safe_offset,
+                strictly_adhere_n_rows=bool(strict_fill),
+                tested_cols=tested_cols,
+                deterministic_order_by=deterministic_order_by,
+            )
+
+        source_select_query = _build_source_select_query(fallback_strict_fill)
         stream_copy_disabled = bool(getattr(self, "_stream_copy_disabled", False))
         stream_client = None if stream_copy_disabled else self._get_stream_client()
         if stream_client is not None:
@@ -2766,13 +2781,25 @@ class _ClickHouseRuntimeClient:
                     insert_query_id,
                 )
                 return _error_query_metrics()
-            except Exception:
+            except Exception as stream_exc:
+                if _is_memory_limit_exceeded_error(stream_exc):
+                    # При OOM в stream-copy сразу отключаем stream path и смягчаем fallback INSERT.
+                    self._stream_copy_disabled = True
+                    fallback_strict_fill = False
+                    logger.exception(
+                        "Streaming insert не удался из-за MEMORY_LIMIT_EXCEEDED: "
+                        "переключаемся на fallback INSERT ... SELECT (strict_fill=0) "
+                        "и отключаем stream copy до конца текущей worker-задачи",
+                    )
+                    continue_after_stream_error = False
+                else:
+                    continue_after_stream_error = True
                 failure_count = int(getattr(self, "_stream_copy_failure_count", 0)) + 1
                 self._stream_copy_failure_count = failure_count
                 disable_after_failures = int(
                     getattr(self, "_stream_copy_disable_after_failures", 1)
                 )
-                if failure_count >= disable_after_failures:
+                if self._stream_copy_disabled or failure_count >= disable_after_failures:
                     self._stream_copy_disabled = True
                     logger.exception(
                         "Streaming insert не удался (failures=%d/%d): переключаемся на "
@@ -2781,7 +2808,7 @@ class _ClickHouseRuntimeClient:
                         failure_count,
                         disable_after_failures,
                     )
-                else:
+                elif continue_after_stream_error:
                     logger.exception(
                         "Streaming insert не удался (failures=%d/%d): переключаемся на "
                         "fallback INSERT ... SELECT, stream copy остаётся включён",
@@ -2799,14 +2826,48 @@ class _ClickHouseRuntimeClient:
                 if stream_slot_acquired:
                     self._release_stream_slot()
 
-        insert_query = (
-            f"INSERT INTO `{target_database}`.`{target_table}`\n"
-            f"{source_select_query}"
-        )
-        return self._execute_command_with_summary_metrics(
-            insert_query,
-            query_tag=query_tag,
-        )
+        def _run_fallback_insert(strict_fill: bool) -> Dict[str, float]:
+            fallback_select = _build_source_select_query(strict_fill)
+            insert_query = (
+                f"INSERT INTO `{target_database}`.`{target_table}`\n"
+                f"{fallback_select}"
+            )
+            return self._execute_command_with_summary_metrics(
+                insert_query,
+                query_tag=query_tag,
+                raise_on_execute_error=True,
+            )
+
+        try:
+            return _run_fallback_insert(fallback_strict_fill)
+        except Exception as fallback_exc:
+            if (
+                fallback_strict_fill
+                and _is_memory_limit_exceeded_error(fallback_exc)
+                and n_rows is not None
+            ):
+                logger.warning(
+                    "Fallback INSERT ... SELECT упал с MEMORY_LIMIT_EXCEEDED "
+                    "(strict_fill=1). Повторяем один раз с strict_fill=0 "
+                    "(table=%s.%s)",
+                    target_database,
+                    target_table,
+                )
+                try:
+                    return _run_fallback_insert(False)
+                except Exception as retry_exc:
+                    if _is_memory_limit_exceeded_error(retry_exc):
+                        raise RuntimeError(
+                            "Не удалось выполнить INSERT benchmark: MEMORY_LIMIT_EXCEEDED "
+                            f"для {target_database}.{target_table} (strict_fill=0 fallback)"
+                        ) from retry_exc
+                    raise
+            if _is_memory_limit_exceeded_error(fallback_exc):
+                raise RuntimeError(
+                    "Не удалось выполнить INSERT benchmark: MEMORY_LIMIT_EXCEEDED "
+                    f"для {target_database}.{target_table}"
+                ) from fallback_exc
+            raise
 
 
 def _rows_per_second(rows: float, elapsed_ns: float) -> float:

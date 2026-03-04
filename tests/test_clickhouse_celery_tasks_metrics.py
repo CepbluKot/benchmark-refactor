@@ -3261,6 +3261,90 @@ ORDER BY country
         self.assertEqual(metrics["read_rows"], 1000.0)
         self.assertEqual(metrics["written_rows"], 1000.0)
 
+    def test_insert_fallback_retries_non_strict_after_memory_limit(self) -> None:
+        class _MemoryLimitError(RuntimeError):
+            pass
+
+        class _DummyClient:
+            def __init__(self) -> None:
+                self.command_calls: List[str] = []
+
+            def command(self, query: str, settings: Optional[Dict[str, Any]] = None):
+                del settings
+                self.command_calls.append(query)
+                if "CROSS JOIN numbers" in query:
+                    raise _MemoryLimitError("Code: 241. MEMORY_LIMIT_EXCEEDED")
+                return None
+
+            def query(self, query: str):
+                if "FROM system.query_log" in query:
+                    return SimpleNamespace(
+                        result_rows=[(100.0, 1000.0, 10_000.0, 1000.0, 10_000.0)]
+                    )
+                return SimpleNamespace(result_rows=[])
+
+        client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
+        client._client = _DummyClient()
+        client._stream_client = None
+        client._stream_client_checked = True
+        client._stream_connection = SimpleNamespace(
+            host="localhost",
+            port=9000,
+            login="default",
+        )
+
+        metrics = client.insert_from_source_with_metrics(
+            source_database="analytics",
+            source_table="events",
+            target_database="bench_tmp",
+            target_table="events_variant",
+            n_rows=100,
+            offset=0,
+            strictly_adhere_n_rows=True,
+            query_tag="insert-memory-fallback",
+        )
+
+        self.assertEqual(metrics["elapsed_ns"], 100_000_000.0)
+        self.assertEqual(metrics["written_rows"], 1000.0)
+        self.assertGreaterEqual(len(client._client.command_calls), 2)
+        self.assertTrue(any("CROSS JOIN numbers" in q for q in client._client.command_calls))
+        self.assertTrue(any("CROSS JOIN numbers" not in q for q in client._client.command_calls))
+
+    def test_insert_fallback_raises_runtime_error_on_memory_limit(self) -> None:
+        class _MemoryLimitError(RuntimeError):
+            pass
+
+        class _DummyClient:
+            def command(self, query: str, settings: Optional[Dict[str, Any]] = None):
+                del query, settings
+                raise _MemoryLimitError("Code: 241. MEMORY_LIMIT_EXCEEDED")
+
+            def query(self, query: str):
+                del query
+                return SimpleNamespace(result_rows=[])
+
+        client = _ClickHouseRuntimeClient.__new__(_ClickHouseRuntimeClient)
+        client._client = _DummyClient()
+        client._stream_client = None
+        client._stream_client_checked = True
+        client._stream_connection = SimpleNamespace(
+            host="localhost",
+            port=9000,
+            login="default",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "MEMORY_LIMIT_EXCEEDED"):
+            client.insert_from_source_with_metrics(
+                source_database="analytics",
+                source_table="events",
+                target_database="bench_tmp",
+                target_table="events_variant",
+                n_rows=100,
+                offset=0,
+                strictly_adhere_n_rows=True,
+                query_tag="insert-memory-fail",
+            )
+
     def test_stream_insert_uses_dedicated_insert_client(self) -> None:
         class _DummySourceStream:
             headers = None
