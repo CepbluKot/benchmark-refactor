@@ -127,18 +127,18 @@
         "final_validation": 1000,
         "sequential": 1000
       },
-      "source_insert_rows_per_operation_limit": 100000,
+      "source_insert_rows_per_operation_limit": 50000,
       "source_insert_rows_per_operation_limits": {
-        "sequential": 100000
+        "sequential": 50000
       },
-      "insert_rows_per_operation_limit":  20000,
+      "insert_rows_per_operation_limit": 50000,
       "insert_rows_per_operation_limits": {
-        "order_by": 100000,
-        "types": 100000,
-        "codecs": 100000,
-        "indexes": 100000,
-        "final_validation": 100000,
-        "sequential": 100000
+        "order_by": 50000,
+        "types": 50000,
+        "codecs": 50000,
+        "indexes": 50000,
+        "final_validation": 50000,
+        "sequential": 50000
       },
       "global_rules": {
         "order_by_rules": {

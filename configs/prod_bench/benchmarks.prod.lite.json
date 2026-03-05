@@ -9,21 +9,21 @@
       "column_order_mode": "compressed_size_desc",
       "tables": {
         "dm_core_lm": [
-          "logs_adqm",
+          "logs_dbt",
           "logs_airflow",
-          "logs_dbt"
+          "logs_adqm"
         ],
         "raw_lm": [
-          "log_flexloader_core_general",
-          "log_flexloader_core_loaders",
-          "log_flexloader_core_spark",
-          "log_k8s_audit",
+          "log_k8s_nova_via_filebeat",
           "log_k8s_events",
-          "log_k8s_nova_via_filebeat"
+          "log_k8s_audit",
+          "log_flexloader_core_spark",
+          "log_flexloader_core_loaders",
+          "log_flexloader_core_general"
         ]
       },
       "test_database": "benchmark_tmp",
-      "insert_operations_count": 5,
+      "insert_operations_count": 10,
       "sequential_top_n_limits": {
         "order_by": 3,
         "types": 3,
@@ -128,19 +128,19 @@
         "sequential": 100,
         "index_granularity": 100
       },
-      "source_insert_rows_per_operation_limit": 20000,
+      "source_insert_rows_per_operation_limit": 50000,
       "source_insert_rows_per_operation_limits": {
-        "sequential": 20000
+        "sequential": 50000
       },
-      "insert_rows_per_operation_limit":  20000,
+      "insert_rows_per_operation_limit": 50000,
       "insert_rows_per_operation_limits": {
-        "order_by": 20000,
-        "types": 20000,
-        "codecs": 20000,
-        "indexes": 20000,
-        "final_validation": 20000,
-        "sequential": 20000,
-        "index_granularity": 20000
+        "order_by": 50000,
+        "types": 50000,
+        "codecs": 50000,
+        "indexes": 50000,
+        "final_validation": 50000,
+        "sequential": 50000,
+        "index_granularity": 50000
       },
       "global_rules": {
         "order_by_rules": {
