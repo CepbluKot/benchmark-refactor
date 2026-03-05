@@ -9,17 +9,17 @@
       "column_order_mode": "compressed_size_desc",
       "tables": {
         "dm_core_lm": [
-          "logs_adqm",
+          "logs_dbt",
           "logs_airflow",
-          "logs_dbt"
+          "logs_adqm"
         ],
         "raw_lm": [
-          "log_flexloader_core_general",
-          "log_flexloader_core_loaders",
-          "log_flexloader_core_spark",
-          "log_k8s_audit",
+          "log_k8s_nova_via_filebeat",
           "log_k8s_events",
-          "log_k8s_nova_via_filebeat"
+          "log_k8s_audit",
+          "log_flexloader_core_spark",
+          "log_flexloader_core_loaders",
+          "log_flexloader_core_general"
         ]
       },
       "test_database": "benchmark_tmp",
