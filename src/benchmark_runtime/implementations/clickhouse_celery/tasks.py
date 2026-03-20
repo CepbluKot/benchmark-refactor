@@ -57,18 +57,6 @@ _COLD_SELECT_SETTINGS_ASSIGNMENTS = (
     "use_uncompressed_cache = 0",
 )
 _PHASED_STRATEGIES = ("sequential_phased_topn_strategy",)
-_OPTIMIZE_FINAL_WAIT_TIMEOUT_SEC = float(
-    os.getenv("BENCH_OPTIMIZE_FINAL_WAIT_TIMEOUT_SEC", "600.0")
-)
-_OPTIMIZE_FINAL_WAIT_POLL_SEC = float(
-    os.getenv("BENCH_OPTIMIZE_FINAL_WAIT_POLL_SEC", "1.0")
-)
-_ENABLE_OPTIMIZE_FINAL = str(os.getenv("BENCH_ENABLE_OPTIMIZE_FINAL", "0")).strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
 _QUERY_LOG_METRICS_POLL_ATTEMPTS = max(
     1,
     int(os.getenv("BENCH_QUERY_LOG_METRICS_POLL_ATTEMPTS", "5")),
@@ -81,6 +69,24 @@ _QUERY_LOG_METRICS_POLL_TOTAL_WAIT_SEC = max(
     0.0,
     float(os.getenv("BENCH_QUERY_LOG_METRICS_POLL_TOTAL_WAIT_SEC", "15.0")),
 )
+_SELECT_MAX_EXECUTION_TIME_SEC = max(
+    0.0,
+    float(os.getenv("BENCH_SELECT_MAX_EXECUTION_TIME_SEC", "30.0")),
+)
+_SELECT_USE_QUERY_LOG = str(os.getenv("BENCH_SELECT_USE_QUERY_LOG", "0")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+_DISABLE_LIVE_SOURCE_SIZE_RECALC = str(
+    os.getenv("BENCH_DISABLE_LIVE_SOURCE_SIZE_RECALC", "1")
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 _STREAM_INSERT_STRICT_FILL_ENABLED = str(
     os.getenv("BENCH_STREAM_INSERT_STRICT_FILL_ENABLED", "0")
 ).strip().lower() in {
@@ -105,14 +111,7 @@ _INSERT_SELECT_ENABLE_DETERMINISTIC_ORDER_BY = str(
     "yes",
     "on",
 }
-_OPTIMIZE_FINAL_PERMISSION_DENIED = False
 _RATIO_EPSILON = 1e-9
-
-
-def _is_optimize_access_denied(exc: Exception) -> bool:
-    """Определяет ошибку отсутствия прав на OPTIMIZE."""
-    message = str(exc or "").lower()
-    return "access_denied" in message or "not enough privileges" in message
 
 
 def _is_nullable_sorting_key_error(exc: Exception) -> bool:
@@ -175,17 +174,6 @@ def _ensure_allow_nullable_key_in_ddl(ddl_sql: str) -> str:
         "SETTINGS " + ", ".join(normalized_assignments)
     )
     return parsed.to_ddl()
-
-
-def _should_run_optimize_final() -> bool:
-    """
-    Возвращает, нужно ли запускать OPTIMIZE FINAL в текущем worker-процессе.
-
-    OPTIMIZE может быть отключён:
-      - через BENCH_ENABLE_OPTIMIZE_FINAL=0;
-      - автоматически после первой ACCESS_DENIED ошибки.
-    """
-    return _ENABLE_OPTIMIZE_FINAL and not _OPTIMIZE_FINAL_PERMISSION_DENIED
 
 
 def _is_phased_strategy(strategy: str) -> bool:
@@ -505,6 +493,36 @@ def _with_cold_select_settings(
 
     Формирует/обновляет ключ `use_uncompressed_cache = 0`.
     """
+    required_settings: list[str]
+    if settings_assignments is None:
+        required_settings = list(_COLD_SELECT_SETTINGS_ASSIGNMENTS)
+    else:
+        required_settings = [str(item).strip() for item in settings_assignments if str(item).strip()]
+        if not required_settings:
+            required_settings = list(_COLD_SELECT_SETTINGS_ASSIGNMENTS)
+
+    return _with_select_settings(
+        query,
+        settings_assignments=required_settings,
+        strip_keys={
+            "use_uncompressed_cache",
+            "use_index_marks_cache",
+            "use_index_mark_cache",
+        },
+    )
+
+
+def _with_select_settings(
+    query: str,
+    *,
+    settings_assignments: Optional[Sequence[str]] = None,
+    strip_keys: Optional[set[str]] = None,
+) -> str:
+    """
+    Возвращает SELECT query с добавленными SETTINGS (например, max_execution_time).
+
+    Если SETTINGS уже есть, удаляет дубликаты по ключам.
+    """
     normalized = query.rstrip()
     while normalized.endswith(";"):
         normalized = normalized[:-1].rstrip()
@@ -522,23 +540,28 @@ def _with_cold_select_settings(
     if not normalized:
         return trailing_comment
 
-    if settings_assignments is None:
-        required_settings = list(_COLD_SELECT_SETTINGS_ASSIGNMENTS)
-    else:
-        required_settings = [str(item).strip() for item in settings_assignments if str(item).strip()]
-        if not required_settings:
-            required_settings = list(_COLD_SELECT_SETTINGS_ASSIGNMENTS)
+    assignments = [str(item).strip() for item in (settings_assignments or []) if str(item).strip()]
+    if not assignments:
+        return f"{normalized} {trailing_comment}".strip()
+
+    def _assignment_key(value: str) -> Optional[str]:
+        matcher = re.match(r"^\s*`?([A-Za-z_][A-Za-z0-9_]*)`?\s*=", value)
+        if matcher is None:
+            return None
+        return matcher.group(1).lower()
+
+    new_keys = {key for key in (_assignment_key(item) for item in assignments) if key}
+    drop_keys = set(strip_keys or set()) | new_keys
 
     settings_pos = _find_top_level_keyword_pos(normalized, "SETTINGS")
     format_pos = _find_top_level_keyword_pos(normalized, "FORMAT")
-    rewritten = ""
     if settings_pos < 0:
         if format_pos >= 0:
             before = normalized[:format_pos].rstrip()
             after = normalized[format_pos:].lstrip()
-            rewritten = f"{before} SETTINGS {', '.join(required_settings)} {after}"
+            rewritten = f"{before} SETTINGS {', '.join(assignments)} {after}"
         else:
-            rewritten = f"{normalized} SETTINGS {', '.join(required_settings)}"
+            rewritten = f"{normalized} SETTINGS {', '.join(assignments)}"
         if trailing_comment:
             return f"{rewritten} {trailing_comment}"
         return rewritten
@@ -550,14 +573,12 @@ def _with_cold_select_settings(
 
     filtered_assignments: list[str] = []
     for assignment in raw_assignments:
-        matcher = re.match(r"^\s*`?([A-Za-z_][A-Za-z0-9_]*)`?\s*=", assignment)
-        if matcher is not None:
-            key = matcher.group(1).lower()
-            if key in {"use_uncompressed_cache", "use_index_marks_cache", "use_index_mark_cache"}:
-                continue
+        key = _assignment_key(assignment)
+        if key is not None and key in drop_keys:
+            continue
         filtered_assignments.append(assignment.strip())
 
-    filtered_assignments.extend(required_settings)
+    filtered_assignments.extend(assignments)
     rebuilt_settings = ", ".join(item for item in filtered_assignments if item)
 
     before_settings = normalized[:settings_body_start].rstrip()
@@ -1611,6 +1632,7 @@ class QueryPayload(BaseModel):
     query_id: Optional[str] = None
     query: str
     query_type: Literal["hit", "miss", "manual", "generic"] = "generic"
+    query_column: Optional[str] = None
     cache_mode: Literal["warm", "cold"] = "warm"
     select_operations_count: Optional[int] = Field(default=None, gt=0)
     warmup_queries: List[str] = Field(default_factory=list)
@@ -2011,50 +2033,6 @@ class _ClickHouseRuntimeClient:
         if not rows:
             return 0
         return int(rows[0][0] or 0)
-
-    def optimize_table_final(self, database: str, table: str) -> None:
-        """Принудительно схлопывает парты перед SELECT-замерами."""
-        self.execute(f"OPTIMIZE TABLE `{database}`.`{table}` FINAL")
-
-    def wait_for_no_active_merges(
-        self,
-        database: str,
-        table: str,
-        *,
-        timeout_sec: float = _OPTIMIZE_FINAL_WAIT_TIMEOUT_SEC,
-        poll_sec: float = _OPTIMIZE_FINAL_WAIT_POLL_SEC,
-    ) -> bool:
-        """
-        Ждёт завершения merge-процессов по таблице.
-
-        Возвращает:
-          - True: merges завершились;
-          - False: timeout.
-        """
-        deadline = time.monotonic() + max(0.0, float(timeout_sec))
-        sleep_sec = max(0.0, float(poll_sec))
-        while True:
-            rows = self.execute(
-                """
-                SELECT count()
-                FROM system.merges
-                WHERE database = %(database)s
-                  AND table = %(table)s
-                """,
-                {"database": database, "table": table},
-            )
-            active_merges = 0
-            if rows:
-                try:
-                    active_merges = int(rows[0][0] or 0)
-                except Exception:
-                    active_merges = 0
-            if active_merges <= 0:
-                return True
-            if time.monotonic() >= deadline:
-                return False
-            if sleep_sec > 0:
-                time.sleep(sleep_sec)
 
     def get_total_compressed_size_bytes(self, database: str, table: str) -> float:
         """
@@ -2568,6 +2546,26 @@ class _ClickHouseRuntimeClient:
         """
         _validate_user_read_only_sql_input(query)
         tagged_query = self._build_tagged_query(query, query_tag)
+
+        if not _SELECT_USE_QUERY_LOG:
+            stream_client = self._get_stream_client()
+            try:
+                if stream_client is not None:
+                    result = stream_client.query(tagged_query)
+                else:
+                    result = self._client.query(tagged_query)
+            except Exception:
+                logger.exception("Select query не удался (summary mode)")
+                return _error_query_metrics()
+
+            summary_metrics = self._extract_stream_query_summary(result)
+            if summary_metrics is not None:
+                return summary_metrics
+
+            logger.warning(
+                "SELECT выполнен, но summary-метрики не найдены (summary mode)"
+            )
+            return _error_query_metrics()
 
         stream_client = self._get_stream_client()
         if stream_client is not None:
@@ -3476,10 +3474,28 @@ def _measure_select_queries(
         query_rows_per_second_entries: list[float] = []
         query_bytes_per_second_entries: list[float] = []
         query_read_bytes_entries: list[float] = []
-        cold_settings_assignments: Optional[List[str]] = None
-
+        select_settings_assignments: list[str] = []
+        if _SELECT_MAX_EXECUTION_TIME_SEC > 0:
+            select_settings_assignments.append(
+                f"max_execution_time = {_SELECT_MAX_EXECUTION_TIME_SEC}"
+            )
         if query_cache_mode == "cold":
-            cold_settings_assignments = list(_COLD_SELECT_SETTINGS_ASSIGNMENTS)
+            select_settings_assignments.extend(_COLD_SELECT_SETTINGS_ASSIGNMENTS)
+
+        warmup_settings_assignments: list[str] = []
+        if _SELECT_MAX_EXECUTION_TIME_SEC > 0:
+            warmup_settings_assignments.append(
+                f"max_execution_time = {_SELECT_MAX_EXECUTION_TIME_SEC}"
+            )
+
+        logger.info(
+            "Select metrics: query_id=%s, column=%s, type=%s, cache=%s, measurements=%d",
+            query_id,
+            query_payload.query_column or "",
+            query_payload.query_type,
+            query_cache_mode,
+            query_measurements_count,
+        )
 
         for measurement_id in range(max(1, query_measurements_count)):
             if query_cache_mode == "warm":
@@ -3489,14 +3505,26 @@ def _measure_select_queries(
                     else [query]
                 )
                 for warmup_query in effective_warmups:
-                    client.execute_user_read_only_query(warmup_query)
+                    effective_warmup = warmup_query
+                    if warmup_settings_assignments:
+                        effective_warmup = _with_select_settings(
+                            warmup_query,
+                            settings_assignments=warmup_settings_assignments,
+                        )
+                    client.execute_user_read_only_query(effective_warmup)
 
             effective_query = query
-            if query_cache_mode == "cold":
-                effective_query = _with_cold_select_settings(
-                    query,
-                    settings_assignments=cold_settings_assignments,
-                )
+            if select_settings_assignments:
+                if query_cache_mode == "cold":
+                    effective_query = _with_cold_select_settings(
+                        query,
+                        settings_assignments=select_settings_assignments,
+                    )
+                else:
+                    effective_query = _with_select_settings(
+                        query,
+                        settings_assignments=select_settings_assignments,
+                    )
 
             attempt_n = 0
             sleep_sec = initial_sleep_sec
@@ -3574,6 +3602,7 @@ def _measure_select_queries(
                 "query_id": query_id,
                 "query": query,
                 "query_type": query_payload.query_type,
+                "query_column": query_payload.query_column,
                 "cache_mode": query_cache_mode,
                 "select_operations_count": query_measurements_count,
                 "warmup_queries": query_warmup_queries,
@@ -3673,6 +3702,7 @@ def _build_select_per_query_metrics(
                 "query_id": query_id,
                 "query": query,
                 "query_type": str(raw_entry.get("query_type") or "generic"),
+                "query_column": raw_entry.get("query_column"),
                 "cache_mode": str(raw_entry.get("cache_mode", "warm")),
                 "select_operations_count": int(
                     raw_entry.get(
@@ -3721,6 +3751,7 @@ def _extract_source_select_per_query_metrics(
             normalized_entry.setdefault("query_index", query_index)
             normalized_entry.setdefault("query_id", f"query_{query_index}")
             normalized_entry.setdefault("query_type", "generic")
+            normalized_entry.setdefault("query_column", None)
             normalized_entries.append(normalized_entry)
         return normalized_entries
 
@@ -3781,6 +3812,7 @@ def _extract_source_select_per_query_metrics(
             "query_id": "query_0",
             "query": str(legacy_query or ""),
             "query_type": "generic",
+            "query_column": None,
             "cache_mode": "warm",
             "select_operations_count": len(legacy_elapsed_ms_measurements),
             "warmup_queries": [],
@@ -3825,17 +3857,26 @@ def _compute_select_time_speedup_by_query(
 
     source_by_index: dict[int, Dict[str, Any]] = {}
     source_by_id: dict[str, Dict[str, Any]] = {}
+    source_by_column: dict[str, Dict[str, Any]] = {}
     for fallback_index, entry in enumerate(source_per_query):
         query_index = int(entry.get("query_index", fallback_index))
         source_by_index[query_index] = entry
         query_id = str(entry.get("query_id", f"query_{query_index}"))
         source_by_id[query_id] = entry
+        query_column = entry.get("query_column")
+        if isinstance(query_column, str) and query_column:
+            source_by_column[query_column] = entry
 
     result: list[dict[str, Any]] = []
     for fallback_index, tested_entry in enumerate(tested_per_query):
         query_index = int(tested_entry.get("query_index", fallback_index))
         query_id = str(tested_entry.get("query_id", f"query_{query_index}"))
-        source_entry = source_by_id.get(query_id) or source_by_index.get(query_index)
+        query_column = tested_entry.get("query_column")
+        source_entry = None
+        if isinstance(query_column, str) and query_column:
+            source_entry = source_by_column.get(query_column)
+        if source_entry is None:
+            source_entry = source_by_id.get(query_id) or source_by_index.get(query_index)
         source_percentiles = (
             _coerce_float_list(source_entry.get("elapsed_ms_percentiles", []))
             if source_entry is not None
@@ -3888,6 +3929,10 @@ def _compute_select_time_speedup_by_query(
                     or (source_entry.get("query_type") if source_entry is not None else None)
                     or "generic"
                 ),
+                "query_column": (
+                    tested_entry.get("query_column")
+                    or (source_entry.get("query_column") if source_entry is not None else None)
+                ),
                 "source_query": source_entry.get("query") if source_entry is not None else None,
                 "elapsed_ms_percentiles_speed_up_coefs": speed_up_coefs,
                 "read_bytes_percentiles_speed_up_coefs": read_bytes_speed_up_coefs,
@@ -3923,6 +3968,7 @@ def _extract_read_bytes_speedup_by_query(
                 "query_id": query_id,
                 "query": entry.get("query"),
                 "query_type": entry.get("query_type") or "generic",
+                "query_column": entry.get("query_column"),
                 "source_query": entry.get("source_query"),
                 "read_bytes_percentiles_speed_up_coefs": read_bytes_speedup,
                 "read_bytes_percentiles_speed_up_modes": read_bytes_speedup_modes,
@@ -3963,6 +4009,16 @@ def _build_per_query_expression_context(
             result[query_index] = entry
         return result
 
+    def _to_query_column_map(entries: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        result: dict[str, Dict[str, Any]] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            query_column = entry.get("query_column")
+            if isinstance(query_column, str) and query_column:
+                result[query_column] = entry
+        return result
+
     return {
         "source": list(source_per_query),
         "tested": list(tested_per_query),
@@ -3973,6 +4029,9 @@ def _build_per_query_expression_context(
         "source_by_query_index": _to_query_index_map(source_per_query),
         "tested_by_query_index": _to_query_index_map(tested_per_query),
         "speedup_by_query_index": _to_query_index_map(speedup_per_query),
+        "source_by_query_column": _to_query_column_map(source_per_query),
+        "tested_by_query_column": _to_query_column_map(tested_per_query),
+        "speedup_by_query_column": _to_query_column_map(speedup_per_query),
     }
 
 
@@ -4019,6 +4078,7 @@ def _build_query_plan_signature(test_queries: Sequence[QueryPayload]) -> str:
                 "query_id": str(query.query_id or "").strip(),
                 "query": str(query.query or "").strip(),
                 "query_type": str(query.query_type or "").strip(),
+                "query_column": str(query.query_column or "").strip(),
                 "cache_mode": str(query.cache_mode or "").strip(),
                 "select_operations_count": (
                     int(query.select_operations_count)
@@ -4663,34 +4723,6 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             payload.measured_percentiles,
         )
 
-        if _should_run_optimize_final():
-            try:
-                client.optimize_table_final(baseline_database, baseline_table)
-                if not client.wait_for_no_active_merges(baseline_database, baseline_table):
-                    logger.warning(
-                        "run_source_benchmark: timeout ожидания merges=0 после OPTIMIZE FINAL "
-                        "для %s.%s",
-                        baseline_database,
-                        baseline_table,
-                    )
-            except Exception as exc:
-                if _is_optimize_access_denied(exc):
-                    global _OPTIMIZE_FINAL_PERMISSION_DENIED
-                    _OPTIMIZE_FINAL_PERMISSION_DENIED = True
-                    logger.warning(
-                        "run_source_benchmark: OPTIMIZE FINAL отключён для текущего worker "
-                        "после ACCESS_DENIED (%s.%s)",
-                        baseline_database,
-                        baseline_table,
-                    )
-                else:
-                    logger.exception(
-                        "run_source_benchmark: не удалось стабилизировать таблицу после INSERT "
-                        "(%s.%s)",
-                        baseline_database,
-                        baseline_table,
-                    )
-
         select_stats = _measure_select_queries(
             client,
             test_queries=baseline_test_queries,
@@ -5166,37 +5198,6 @@ def run_variant_benchmark(
             measured_percentiles,
         )
 
-        if _should_run_optimize_final():
-            try:
-                client.optimize_table_final(payload.variant_database, payload.variant_table)
-                if not client.wait_for_no_active_merges(
-                    payload.variant_database,
-                    payload.variant_table,
-                ):
-                    logger.warning(
-                        "run_variant_benchmark: timeout ожидания merges=0 после OPTIMIZE FINAL "
-                        "для %s.%s",
-                        payload.variant_database,
-                        payload.variant_table,
-                    )
-            except Exception as exc:
-                if _is_optimize_access_denied(exc):
-                    global _OPTIMIZE_FINAL_PERMISSION_DENIED
-                    _OPTIMIZE_FINAL_PERMISSION_DENIED = True
-                    logger.warning(
-                        "run_variant_benchmark: OPTIMIZE FINAL отключён для текущего worker "
-                        "после ACCESS_DENIED (%s.%s)",
-                        payload.variant_database,
-                        payload.variant_table,
-                    )
-                else:
-                    logger.exception(
-                        "run_variant_benchmark: не удалось стабилизировать таблицу после INSERT "
-                        "(%s.%s)",
-                        payload.variant_database,
-                        payload.variant_table,
-                    )
-
         select_stats = _measure_select_queries(
             client,
             test_queries=payload.query_plan.test_queries,
@@ -5310,7 +5311,10 @@ def run_variant_benchmark(
         if source_bytes_on_disk_sum <= 0 and source_total_size_bytes_with_indexes > 0:
             source_bytes_on_disk_sum = source_total_size_bytes_with_indexes
 
-        if source_total_size_bytes <= 0 or source_total_size_bytes_with_indexes <= 0:
+        if (
+            not _DISABLE_LIVE_SOURCE_SIZE_RECALC
+            and (source_total_size_bytes <= 0 or source_total_size_bytes_with_indexes <= 0)
+        ):
             # Защита от редких baseline-анomalies: читаем live size source-таблицы.
             live_source_columns_sizes = client.get_column_sizes(
                 payload.source_database,
@@ -5373,6 +5377,13 @@ def run_variant_benchmark(
             )
             if live_source_bytes_on_disk_sum > 0:
                 source_bytes_on_disk_sum = live_source_bytes_on_disk_sum
+        elif _DISABLE_LIVE_SOURCE_SIZE_RECALC:
+            logger.debug(
+                "run_variant_benchmark: live source size recalc disabled "
+                "(source=%s.%s)",
+                payload.source_database,
+                payload.source_table,
+            )
         if source_total_size_bytes_with_indexes <= 0 and source_total_size_bytes > 0:
             source_total_size_bytes_with_indexes = source_total_size_bytes
         if source_bytes_on_disk_sum <= 0 and source_total_size_bytes_with_indexes > 0:

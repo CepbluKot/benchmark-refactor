@@ -201,7 +201,9 @@
             "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
-            "auto_select_limit": 10
+            "auto_select_limit": 10,
+        "auto_select_operations_count": 5,
+        "auto_include_miss_queries": true
           },
           "rules": {
             "column_rules": [],
@@ -258,7 +260,9 @@
             "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
-            "auto_select_limit": 10
+            "auto_select_limit": 10,
+        "auto_select_operations_count": 5,
+        "auto_include_miss_queries": true
           },
           "rules": {
             "column_rules": [],
@@ -314,7 +318,9 @@
             "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
-            "auto_select_limit": 10
+            "auto_select_limit": 10,
+        "auto_select_operations_count": 5,
+        "auto_include_miss_queries": true
           },
           "rules": {
             "column_rules": [],
@@ -370,7 +376,9 @@
             "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
-            "auto_select_limit": 10
+            "auto_select_limit": 10,
+        "auto_select_operations_count": 5,
+        "auto_include_miss_queries": true
           },
           "rules": {
             "codec_rules": [
@@ -425,7 +433,9 @@
             "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
-            "auto_select_limit": 10
+            "auto_select_limit": 10,
+        "auto_select_operations_count": 5,
+        "auto_include_miss_queries": true
           },
           "rules": {
             "column_rules": [],
@@ -480,7 +490,9 @@
             "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
-            "auto_select_limit": 10
+            "auto_select_limit": 10,
+        "auto_select_operations_count": 5,
+        "auto_include_miss_queries": true
           },
           "rules": {
             "codec_rules": [
@@ -536,7 +548,9 @@
             "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
-            "auto_select_limit": 10
+            "auto_select_limit": 10,
+        "auto_select_operations_count": 5,
+        "auto_include_miss_queries": true
           },
           "rules": {
             "column_rules": [],
@@ -593,7 +607,9 @@
             "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
-            "auto_select_limit": 10
+            "auto_select_limit": 10,
+        "auto_select_operations_count": 5,
+        "auto_include_miss_queries": true
           },
           "rules": {
             "column_rules": [],
@@ -649,7 +665,9 @@
             "auto_like_sample_rows_per_column": 10,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
-            "auto_select_limit": 10
+            "auto_select_limit": 10,
+        "auto_select_operations_count": 5,
+        "auto_include_miss_queries": true
           },
           "rules": {
             "column_rules": [],
@@ -689,7 +707,9 @@
         "auto_like_sample_rows_per_column": 20,
         "auto_like_min_token_length": 3,
         "auto_like_max_token_length": 24,
-        "auto_select_limit": 10
+        "auto_select_limit": 10,
+        "auto_select_operations_count": 5,
+        "auto_include_miss_queries": true
       },
       "index_granularity_values": [
         8192

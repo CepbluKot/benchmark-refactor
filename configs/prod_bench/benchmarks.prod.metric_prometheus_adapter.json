@@ -1,0 +1,376 @@
+{
+  "benchmarks": [
+    {
+      "id": "bench_prod_raw_lm_metric_prometheus_adapter_sequential_topn",
+      "connection_id": "prod_ch_dm_core_logs_adqm",
+      "strategy": "sequential_phased_topn_strategy",
+      "column_rules_mode": "inline_only",
+      "index_rules_mode": "inline_only",
+      "column_order_mode": "compressed_size_desc",
+      "tables": {
+        "raw_lm": [
+          "metric_prometheus_adapter",
+          "log_fluentbit_minio_s3"
+        ]
+      },
+      "test_database": "benchmark_tmp",
+      "insert_operations_count": 10,
+      "sequential_top_n_limits": {
+        "order_by": 5,
+        "types": 5,
+        "codecs": 5,
+        "indexes": 5,
+        "final_validation": 5
+      },
+      "max_winners_per_parent_limits": {
+        "types": 5,
+        "codecs": 5,
+        "indexes": 5
+      },
+      "scoring": {
+        "mode": "expression",
+        "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+        "on_error_score": -1,
+        "by_stage": {
+          "source_baseline": {
+            "mode": "expression",
+            "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+            "variables": {
+              "baseline_median_read_bytes": "medians.source_select_read_bytes",
+              "test_median_read_bytes": "medians.tested_select_read_bytes",
+              "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+              "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+            }
+          },
+          "order_by": {
+            "mode": "expression",
+            "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+            "variables": {
+              "baseline_median_read_bytes": "medians.source_select_read_bytes",
+              "test_median_read_bytes": "medians.tested_select_read_bytes",
+              "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+              "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+            }
+          },
+          "types": {
+            "mode": "expression",
+            "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+            "variables": {
+              "baseline_median_read_bytes": "medians.source_select_read_bytes",
+              "test_median_read_bytes": "medians.tested_select_read_bytes",
+              "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+              "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+            }
+          },
+          "codecs": {
+            "mode": "expression",
+            "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+            "variables": {
+              "baseline_median_read_bytes": "medians.source_select_read_bytes",
+              "test_median_read_bytes": "medians.tested_select_read_bytes",
+              "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+              "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+            }
+          },
+          "index_granularity": {
+            "mode": "expression",
+            "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+            "variables": {
+              "baseline_median_read_bytes": "medians.source_select_read_bytes",
+              "test_median_read_bytes": "medians.tested_select_read_bytes",
+              "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+              "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+            }
+          },
+          "indexes": {
+            "mode": "expression",
+            "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+            "variables": {
+              "baseline_median_read_bytes": "medians.source_select_read_bytes",
+              "test_median_read_bytes": "medians.tested_select_read_bytes",
+              "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+              "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+            }
+          },
+          "final_validation": {
+            "mode": "expression",
+            "expression": "exp(0.75 * ln(select_ratio) + 0.25 * ln(compression_ratio))",
+            "variables": {
+              "baseline_median_read_bytes": "medians.source_select_read_bytes",
+              "test_median_read_bytes": "medians.tested_select_read_bytes",
+              "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+              "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+            }
+          }
+        },
+        "variables": {
+          "baseline_median_read_bytes": "medians.source_select_read_bytes",
+          "test_median_read_bytes": "medians.tested_select_read_bytes",
+          "select_ratio": "safe_div(baseline_median_read_bytes, test_median_read_bytes, 1.0)",
+          "compression_ratio": "safe_div(source_size_bytes, tested_size_bytes, 1.0)"
+        }
+      },
+      "max_benchmarks_limits": {
+        "order_by": 1000,
+        "types": 1000,
+        "codecs": 1000,
+        "indexes": 1000,
+        "final_validation": 1000,
+        "sequential": 1000
+      },
+      "source_insert_rows_per_operation_limit": 50000,
+      "source_insert_rows_per_operation_limits": {
+        "sequential": 50000
+      },
+      "insert_rows_per_operation_limit": 50000,
+      "insert_rows_per_operation_limits": {
+        "order_by": 50000,
+        "types": 50000,
+        "codecs": 50000,
+        "indexes": 50000,
+        "final_validation": 50000,
+        "sequential": 50000
+      },
+      "global_rules": {
+        "order_by_rules": {
+          "auto_generate_candidates": false
+        },
+        "column_rules": [],
+        "index_rules": [
+          {
+            "by_type": "String",
+            "indexes": [
+              {
+                "type": "ngrambf_v1(3, 32768, 2, 0)",
+                "granularity": [
+                  2,
+                  4,
+                  8,
+                  16
+                ],
+                "index_granularity_values": [
+                  8192,
+                  16384,
+                  32768,
+                  65536,
+                  131072
+                ]
+              }
+            ]
+          },
+          {
+            "by_type": "LowCardinality(String)",
+            "indexes": [
+              {
+                "type": "ngrambf_v1(3, 32768, 2, 0)",
+                "granularity": [
+                  2,
+                  4,
+                  8,
+                  16
+                ],
+                "index_granularity_values": [
+                  8192,
+                  16384,
+                  32768,
+                  65536,
+                  131072
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "table_rules": [
+        {
+          "database": "raw_lm",
+          "table": "metric_prometheus_adapter",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "name",
+            "labels_namespace",
+            "labels_cluster"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 1000,
+            "types": 1000,
+            "codecs": 1000,
+            "indexes": 1000,
+            "final_validation": 1000
+          },
+          "queries": {
+            "mode": "auto",
+            "auto_like_on_measured_columns": true,
+            "auto_like_sample_rows_per_column": 20,
+            "auto_like_min_token_length": 3,
+            "auto_like_max_token_length": 24,
+            "auto_select_limit": 10,
+            "auto_select_operations_count": 5,
+            "auto_include_miss_queries": true
+          },
+          "rules": {
+            "column_rules": [
+              {
+                "by_name": "labels_cluster",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "labels_namespace",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              }
+            ],
+            "codec_rules": [
+              {
+                "by_name": "timestamp",
+                "by_type": "DateTime",
+                "codecs": [
+                  "CODEC(Delta(4), ZSTD(1))"
+                ]
+              },
+              {
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "name",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 32768, 2, 0)",
+                    "granularity": [
+                      2,
+                      4,
+                      8,
+                      16
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384,
+                      32768,
+                      65536,
+                      131072
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+        ,
+        {
+          "database": "raw_lm",
+          "table": "log_fluentbit_minio_s3",
+          "order_by_first": "timestamp",
+          "order_by_candidates": [
+            "event",
+            "trigger",
+            "requestPath",
+            "requestID",
+            "requestHost"
+          ],
+          "max_benchmarks_limits": {
+            "order_by": 1000,
+            "types": 1000,
+            "codecs": 1000,
+            "indexes": 1000,
+            "final_validation": 1000
+          },
+          "queries": {
+            "mode": "auto",
+            "auto_like_on_measured_columns": true,
+            "auto_like_sample_rows_per_column": 20,
+            "auto_like_min_token_length": 3,
+            "auto_like_max_token_length": 24,
+            "auto_select_limit": 10,
+            "auto_select_operations_count": 5,
+            "auto_include_miss_queries": true
+          },
+          "rules": {
+            "column_rules": [],
+            "codec_rules": [
+              {
+                "by_name": "timestamp",
+                "by_type": "DateTime64(9, 'Europe/Moscow')",
+                "codecs": [
+                  "CODEC(Delta(8), ZSTD(1))"
+                ]
+              },
+              {
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
+                "by_type": "LowCardinality(String)",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              }
+            ],
+            "index_rules": [
+              {
+                "by_name": "requestPath",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 32768, 2, 0)",
+                    "granularity": [
+                      2,
+                      4,
+                      8,
+                      16
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384,
+                      32768,
+                      65536,
+                      131072
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "queries": {
+        "mode": "auto",
+        "auto_like_on_measured_columns": true,
+        "auto_like_sample_rows_per_column": 20,
+        "auto_like_min_token_length": 3,
+        "auto_like_max_token_length": 24,
+        "auto_select_limit": 10,
+            "auto_select_operations_count": 5,
+            "auto_include_miss_queries": true
+      }
+    }
+  ]
+}

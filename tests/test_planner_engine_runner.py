@@ -1333,9 +1333,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         )
         self.assertEqual(getattr(provider, "columns_seen", []), ["page_url", "country"])
         sqls = [query.query for query in plan.test_queries]
-        self.assertEqual(len(sqls), 6)
-        self.assertTrue(any("`value` IS NULL OR `value` IS NOT NULL" in sql for sql in sqls))
-        self.assertTrue(any("`value` IS NULL AND `value` IS NOT NULL" in sql for sql in sqls))
+        self.assertEqual(len(sqls), 2)
         self.assertTrue(any("`page_url` LIKE" in sql for sql in sqls))
         self.assertTrue(any("`country` LIKE" in sql for sql in sqls))
         self.assertTrue(any("/catalog" in sql for sql in sqls))

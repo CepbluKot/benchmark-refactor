@@ -686,7 +686,7 @@ export BENCH_CELERY_BROKER_POOL_LIMIT='10'
 export BENCH_CELERY_BROKER_HEARTBEAT_SEC='30'
 export BENCH_CELERY_TASK_COMPRESSION='gzip'
 export BENCH_CELERY_RESULT_COMPRESSION='gzip'
-export BENCH_CELERY_MAX_IN_FLIGHT_TASKS='4'
+export BENCH_CELERY_MAX_IN_FLIGHT_TASKS='2'
 export BENCH_CELERY_IN_FLIGHT_WAIT_POLL_SEC='0.2'
 # export BENCH_CELERY_IN_FLIGHT_WAIT_TIMEOUT_SEC='600'
 export BENCH_CELERY_PAYLOAD_STORE_ENABLED='1'
@@ -703,8 +703,11 @@ export BENCH_CELERY_RECONNECT_INITIAL_SLEEP_SEC='1.0'
 export BENCH_CELERY_RECONNECT_MAX_SLEEP_SEC='15.0'
 export BENCH_CELERY_REJECT_PUBLISH_MAX_ATTEMPTS='-1'   # -1 = unlimited
 export BENCH_CELERY_REJECT_PUBLISH_RETRY_SLEEP_SEC='1.0'
+export BENCH_SOURCE_RESULT_TIMEOUT_SEC='7200'          # max wait for source baseline (seconds)
 export BENCH_SOURCE_RESULT_POLL_SEC='15.0'
-export BENCH_ENABLE_OPTIMIZE_FINAL='0'                 # default=0 (OPTIMIZE FINAL disabled)
+export BENCH_SELECT_MAX_EXECUTION_TIME_SEC='30'        # max execution time for SELECT measurements
+export BENCH_SELECT_USE_QUERY_LOG='0'                  # 1 = system.query_log, 0 = clickhouse summary
+export BENCH_DISABLE_LIVE_SOURCE_SIZE_RECALC='1'        # 1 = use cached baseline sizes only
 # Reconnect listener Celery events (progress) при падении брокера
 export BENCH_CELERY_EVENTS_MAX_RETRIES='-1'            # -1 = unlimited
 # export CLICKHOUSE_STREAM_SLOT_ACQUIRE_TIMEOUT_SEC='5'
@@ -1024,12 +1027,13 @@ print(run_id)
 - `queries.test_queries[].cache_mode = warm`: перед **каждым** замером выполняются
   query-level `warmup_queries` (если не заданы — прогревом считается сам query),
   затем выполняется измеряемый запрос.
-- Перед select-замерами worker **может** стабилизировать таблицу:
-  `OPTIMIZE TABLE ... FINAL` + ожидание `system.merges=0`.
-  По умолчанию это выключено (`BENCH_ENABLE_OPTIMIZE_FINAL=0`).
-  Чтобы включить, задай `BENCH_ENABLE_OPTIMIZE_FINAL=1`.
-  Таймаут/интервал ожидания настраиваются:
-  `BENCH_OPTIMIZE_FINAL_WAIT_TIMEOUT_SEC`, `BENCH_OPTIMIZE_FINAL_WAIT_POLL_SEC`.
+- Таймаут выполнения каждого SELECT-замера задаётся через
+  `BENCH_SELECT_MAX_EXECUTION_TIME_SEC` (по умолчанию 30 секунд).
+- Метрики SELECT по умолчанию берутся из summary clickhouse-connect.
+  При необходимости можно переключиться на `system.query_log`
+  (`BENCH_SELECT_USE_QUERY_LOG=1`).
+- Пересчёт live-size исходной таблицы для каждого варианта отключается
+  через `BENCH_DISABLE_LIVE_SOURCE_SIZE_RECALC=1` (используются baseline-метрики).
 - Для INSERT benchmark используется детерминированный порядок чтения source-данных:
   `INSERT ... SELECT ... ORDER BY <source_ddl.order_by>` (если в исходном DDL есть ORDER BY).
 - Strict-fill вставки больше не используют `CROSS JOIN numbers(...)`:
@@ -1038,9 +1042,8 @@ print(run_id)
 - Для baseline-вставки (`source_baseline`) при `MEMORY_LIMIT_EXCEEDED` включён
   авто-fallback по лимиту строк: `source_insert_rows_per_operation_limit`
   автоматически уменьшается в 2 раза до успешной вставки (минимум 1).
-- В общем auto-наборе QueryGenerator больше нет `GROUP BY`-паттернов
-  (`_group_by_queries` удалён); остаются `full_scan`, `datetime_range`,
-  `order_by_filter`, `aggregate`, плюс data-aware/measured one-column LIKE.
+- В auto-наборе QueryGenerator используются только one-column запросы по
+  измеряемым колонкам: `LIKE '%%'`, `>` и `<` (без full-scan/aggregate/group-by).
 - Per-query select метрики теперь включают:
   - `read_bytes_measurements` / `read_bytes_percentiles`;
   - `elapsed_ms_median`.

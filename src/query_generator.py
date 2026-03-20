@@ -1,12 +1,9 @@
 """
 Автогенерация тестовых запросов по схеме таблицы (mode: "auto").
 
-Цель — покрыть типичные паттерны нагрузки на аналитических таблицах:
-  1. Точечные фильтры по колонкам из ORDER BY / PRIMARY KEY
-  2. Диапазонные фильтры по DateTime-колонкам
-  3. Агрегаты по числовым колонкам
-  4. GROUP BY по низкокардинальным колонкам
-  5. Полный скан с LIMIT (оценка скорости чтения)
+Цель — минимальный набор одно-колоночных запросов:
+  1. String: `LIKE '%%'` + data-aware токены (hit/miss).
+  2. Date/DateTime/числа: диапазоны `>` / `<` по min/max.
 
 Все запросы параметризуются плейсхолдером {table} —
 подстановка реального имени таблицы происходит в runner.
@@ -101,6 +98,7 @@ class GeneratedQuery(BaseModel):
     query: str
     description: str = ""
     query_type: Literal["hit", "miss", "generic"] = "generic"
+    query_column: Optional[str] = None
 
 
 # ─── генератор ───────────────────────────────────────────────────────────────
@@ -167,22 +165,14 @@ class QueryGenerator:
                     query=self._enforce_select_limit(item.query),
                     description=item.description,
                     query_type=item.query_type,
+                    query_column=item.query_column,
                 )
             )
         return normalized
 
     def generate(self) -> List[GeneratedQuery]:
-        """Возвращает список запросов, покрывающих основные паттерны."""
-        queries: List[GeneratedQuery] = []
-
-        queries += self._full_scan_queries()
-        queries += self._datetime_range_queries()
-        queries += self._order_by_filter_queries()
-        queries += self._aggregate_queries()
-
-        # Возвращаем запросы как есть: scoring больше не использует query-level weights.
-
-        return self._enforce_limit_for_generated(queries)
+        """Legacy entrypoint: базовые автозапросы отключены."""
+        return []
 
     def generate_data_aware_like_queries(
         self,
@@ -213,11 +203,13 @@ class QueryGenerator:
                 GeneratedQuery(
                     query=(
                         f"SELECT * FROM {t} "
-                        f"WHERE {column_ident} LIKE concat('%', {_sql_literal(hit_token)}, '%') "
+                        f"WHERE {column_ident} LIKE '%%' "
+                        f"AND {column_ident} LIKE concat('%', {_sql_literal(hit_token)}, '%') "
                         f"LIMIT 10000"
                     ),
                     description=f"data-aware like hit on {column_name}",
                     query_type="hit",
+                    query_column=column_name,
                 )
             )
             if miss_token:
@@ -225,11 +217,13 @@ class QueryGenerator:
                     GeneratedQuery(
                         query=(
                             f"SELECT * FROM {t} "
-                            f"WHERE {column_ident} LIKE concat('%', {_sql_literal(miss_token)}, '%') "
+                            f"WHERE {column_ident} LIKE '%%' "
+                            f"AND {column_ident} LIKE concat('%', {_sql_literal(miss_token)}, '%') "
                             f"LIMIT 10000"
                         ),
                         description=f"data-aware like miss on {column_name}",
                         query_type="miss",
+                        query_column=column_name,
                     )
                 )
         return self._enforce_limit_for_generated(generated)
@@ -239,12 +233,14 @@ class QueryGenerator:
         measured_columns: Sequence[str],
         *,
         like_tokens_by_column: Optional[Dict[str, Dict[str, str]]] = None,
+        range_tokens_by_column: Optional[Dict[str, Dict[str, str]]] = None,
+        include_miss_queries: bool = False,
     ) -> List[GeneratedQuery]:
         """
         Генерирует one-column запросы для измеряемых колонок.
 
         Для строковых колонок всегда используется `LIKE '%...%'`.
-        Для остальных типов строится безопасный one-column фильтр `IS NOT NULL`.
+        Для DateTime/чисел строятся диапазоны `>` / `<` по data-aware min/max.
         """
         table_columns = {column.name: column for column in self.table.columns}
         deduplicated: list[str] = []
@@ -262,6 +258,7 @@ class QueryGenerator:
             return []
 
         tokens_by_column = like_tokens_by_column or {}
+        range_tokens = range_tokens_by_column or {}
         generated: list[GeneratedQuery] = []
         t = self._placeholder
 
@@ -280,23 +277,10 @@ class QueryGenerator:
                         f"AND {column_ident} LIKE concat('%', {_sql_literal(hit_token)}, '%')"
                     )
                 else:
-                    # Гарантированный hit при непустой таблице: фильтр опирается только на колонку.
+                    # Без токена всё равно держим LIKE-предикат, без NULL-веток.
                     hit_query = (
                         f"SELECT * FROM {t} "
-                        f"WHERE {column_ident} LIKE '%%' OR {column_ident} IS NULL"
-                    )
-
-                if miss_token:
-                    miss_query = (
-                        f"SELECT * FROM {t} "
-                        f"WHERE {column_ident} LIKE '%%' "
-                        f"AND {column_ident} LIKE concat('%', {_sql_literal(miss_token)}, '%')"
-                    )
-                else:
-                    # Гарантированный miss: взаимоисключающие предикаты по одной колонке.
-                    miss_query = (
-                        f"SELECT * FROM {t} "
-                        f"WHERE {column_ident} LIKE '%%' AND {column_ident} NOT LIKE '%%'"
+                        f"WHERE {column_ident} LIKE '%%'"
                     )
 
                 generated.append(
@@ -304,38 +288,93 @@ class QueryGenerator:
                         query=hit_query,
                         description=f"measured like hit on {column_name}",
                         query_type="hit",
+                        query_column=column_name,
                     )
                 )
-                generated.append(
-                    GeneratedQuery(
-                        query=miss_query,
-                        description=f"measured like miss on {column_name}",
-                        query_type="miss",
+
+                if include_miss_queries:
+                    if miss_token:
+                        miss_query = (
+                            f"SELECT * FROM {t} "
+                            f"WHERE {column_ident} LIKE '%%' "
+                            f"AND {column_ident} LIKE concat('%', {_sql_literal(miss_token)}, '%')"
+                        )
+                    else:
+                        miss_query = (
+                            f"SELECT * FROM {t} "
+                            f"WHERE {column_ident} LIKE '%%' AND {column_ident} NOT LIKE '%%'"
+                        )
+                    generated.append(
+                        GeneratedQuery(
+                            query=miss_query,
+                            description=f"measured like miss on {column_name}",
+                            query_type="miss",
+                            query_column=column_name,
+                        )
                     )
-                )
                 continue
 
-            # Для non-string колонок делаем пару hit/miss с гарантированным outcome.
-            generated.append(
-                GeneratedQuery(
-                    query=(
+            # DateTime / numeric: range queries only (>, <).
+            if _is_datetime(column) or _is_numeric(column):
+                token_payload = range_tokens.get(column_name, {})
+                min_value = str(token_payload.get("min_value") or token_payload.get("min") or "").strip()
+                max_value = str(token_payload.get("max_value") or token_payload.get("max") or "").strip()
+
+                if min_value:
+                    hit_query = (
                         f"SELECT * FROM {t} "
-                        f"WHERE {column_ident} IS NULL OR {column_ident} IS NOT NULL"
-                    ),
-                    description=f"measured hit on {column_name}",
-                    query_type="hit",
-                )
-            )
-            generated.append(
-                GeneratedQuery(
-                    query=(
+                        f"WHERE {column_ident} > {_sql_literal(min_value)}"
+                    )
+                    generated.append(
+                        GeneratedQuery(
+                            query=hit_query,
+                            description=f"measured range hit on {column_name}",
+                            query_type="hit",
+                            query_column=column_name,
+                        )
+                    )
+                    if include_miss_queries:
+                        miss_query = (
+                            f"SELECT * FROM {t} "
+                            f"WHERE {column_ident} < {_sql_literal(min_value)}"
+                        )
+                        generated.append(
+                            GeneratedQuery(
+                                query=miss_query,
+                                description=f"measured range miss on {column_name}",
+                                query_type="miss",
+                                query_column=column_name,
+                            )
+                        )
+                    continue
+
+                if max_value:
+                    hit_query = (
                         f"SELECT * FROM {t} "
-                        f"WHERE {column_ident} IS NULL AND {column_ident} IS NOT NULL"
-                    ),
-                    description=f"measured miss on {column_name}",
-                    query_type="miss",
-                )
-            )
+                        f"WHERE {column_ident} < {_sql_literal(max_value)}"
+                    )
+                    generated.append(
+                        GeneratedQuery(
+                            query=hit_query,
+                            description=f"measured range hit on {column_name}",
+                            query_type="hit",
+                            query_column=column_name,
+                        )
+                    )
+                    if include_miss_queries:
+                        miss_query = (
+                            f"SELECT * FROM {t} "
+                            f"WHERE {column_ident} > {_sql_literal(max_value)}"
+                        )
+                        generated.append(
+                            GeneratedQuery(
+                                query=miss_query,
+                                description=f"measured range miss on {column_name}",
+                                query_type="miss",
+                                query_column=column_name,
+                            )
+                        )
+                continue
 
         return self._enforce_limit_for_generated(generated)
 
@@ -479,21 +518,21 @@ def generate_queries(
     table: TableDDL,
     *,
     like_tokens_by_column: Optional[Dict[str, Dict[str, str]]] = None,
+    range_tokens_by_column: Optional[Dict[str, Dict[str, str]]] = None,
     measured_columns: Optional[Sequence[str]] = None,
     prefer_measured_columns: bool = False,
     auto_select_limit: int = 10,
+    include_miss_queries: bool = False,
 ) -> List[GeneratedQuery]:
     """Удобная функция-обёртка над QueryGenerator."""
     generator = QueryGenerator(table, auto_select_limit=auto_select_limit)
-    if prefer_measured_columns and measured_columns:
-        queries = generator.generate_measured_column_queries(
-            measured_columns,
+    if prefer_measured_columns:
+        effective_columns = list(measured_columns or [col.name for col in table.columns])
+        return generator.generate_measured_column_queries(
+            effective_columns,
             like_tokens_by_column=like_tokens_by_column,
+            range_tokens_by_column=range_tokens_by_column,
+            include_miss_queries=include_miss_queries,
         )
-        if queries:
-            return queries
 
-    queries = generator.generate()
-    if like_tokens_by_column:
-        queries.extend(generator.generate_data_aware_like_queries(like_tokens_by_column))
-    return queries
+    return generator.generate()

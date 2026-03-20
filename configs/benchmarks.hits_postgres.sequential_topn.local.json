@@ -68,7 +68,9 @@
         "auto_like_sample_rows_per_column": 20,
         "auto_like_min_token_length": 3,
         "auto_like_max_token_length": 24,
-        "auto_select_limit": 10
+        "auto_select_limit": 10,
+        "auto_select_operations_count": 5,
+        "auto_include_miss_queries": true
       }
     }
   ]

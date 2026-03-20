@@ -510,6 +510,17 @@ class QueriesConfig(_Base):
         validation_alias=AliasChoices("auto_select_limit"),
         serialization_alias="auto_select_limit",
     )
+    auto_select_operations_count: int = Field(
+        default=5,
+        gt=0,
+        validation_alias=AliasChoices("auto_select_operations_count"),
+        serialization_alias="auto_select_operations_count",
+    )
+    auto_include_miss_queries: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("auto_include_miss_queries"),
+        serialization_alias="auto_include_miss_queries",
+    )
     auto_like_min_token_length: int = Field(
         default=3,
         gt=0,

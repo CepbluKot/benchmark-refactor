@@ -193,6 +193,32 @@ class QueryPlanBuilder:
         base_type = normalized.split("(", 1)[0].strip()
         return base_type in {"String", "FixedString"}
 
+    @staticmethod
+    def _base_type_name(column_type: str) -> str:
+        """Возвращает базовый тип без Nullable/LowCardinality и параметров."""
+        normalized = str(column_type or "").strip()
+        while True:
+            matched = re.match(r"^(?:Nullable|LowCardinality)\((.+)\)$", normalized)
+            if matched is None:
+                break
+            normalized = matched.group(1).strip()
+        return normalized.split("(", 1)[0].strip()
+
+    @classmethod
+    def _is_datetime_column(cls, column_type: str) -> bool:
+        """True для Date/DateTime семейств."""
+        return cls._base_type_name(column_type) in {"DateTime", "DateTime64", "Date", "Date32"}
+
+    @classmethod
+    def _is_numeric_column(cls, column_type: str) -> bool:
+        """True для числовых типов."""
+        base = cls._base_type_name(column_type)
+        return base in {
+            "UInt8", "UInt16", "UInt32", "UInt64", "UInt128", "UInt256",
+            "Int8", "Int16", "Int32", "Int64", "Int128", "Int256",
+            "Float32", "Float64", "Decimal",
+        }
+
     def _build_data_aware_like_tokens(
         self,
         *,
@@ -235,7 +261,7 @@ class QueryPlanBuilder:
             return {}
 
         try:
-            return provider.fetch_like_tokens(
+            tokens = provider.fetch_like_tokens(
                 source_database,
                 source_table,
                 deduplicated_candidates,
@@ -243,10 +269,79 @@ class QueryPlanBuilder:
                 min_token_length=queries_config.auto_like_min_token_length,
                 max_token_length=queries_config.auto_like_max_token_length,
             )
+            logger.info(
+                "QueryPlanBuilder: data-aware LIKE tokens collected (table=%s, columns=%d, tokens=%d)",
+                table_ddl.name,
+                len(deduplicated_candidates),
+                len(tokens),
+            )
+            return tokens
         except Exception:
             logger.exception(
                 "QueryPlanBuilder: data-aware LIKE token collection failed "
                 "(table=%s, source=%s.%s) — fallback to default auto queries",
+                table_ddl.name,
+                source_database,
+                source_table,
+            )
+            return {}
+
+    def _build_data_aware_range_tokens(
+        self,
+        *,
+        table_ddl: TableDDL,
+        queries_config: QueriesConfig,
+        provider: Optional[MetadataProvider],
+        source_database: Optional[str],
+        source_table: Optional[str],
+        measured_columns: Optional[Sequence[str]],
+    ) -> Dict[str, Dict[str, str]]:
+        """Возвращает data-aware min/max токены для numeric/datetime колонок."""
+        if provider is None or not source_database or not source_table:
+            logger.debug(
+                "QueryPlanBuilder: пропуск data-aware range автогенерации "
+                "(provider/db/table недоступны)"
+            )
+            return {}
+
+        candidate_columns = list(measured_columns or [])
+        if not candidate_columns:
+            candidate_columns = [column.name for column in table_ddl.columns]
+
+        deduplicated_candidates: list[str] = []
+        seen: set[str] = set()
+        for column_name in candidate_columns:
+            normalized = str(column_name).strip()
+            if not normalized or normalized in seen:
+                continue
+            column = table_ddl.column(normalized)
+            if column is None:
+                continue
+            if not (self._is_datetime_column(column.type) or self._is_numeric_column(column.type)):
+                continue
+            seen.add(normalized)
+            deduplicated_candidates.append(normalized)
+
+        if not deduplicated_candidates:
+            return {}
+
+        try:
+            ranges = provider.fetch_column_ranges(
+                source_database,
+                source_table,
+                deduplicated_candidates,
+            )
+            logger.info(
+                "QueryPlanBuilder: data-aware range tokens collected (table=%s, columns=%d, ranges=%d)",
+                table_ddl.name,
+                len(deduplicated_candidates),
+                len(ranges),
+            )
+            return ranges
+        except Exception:
+            logger.exception(
+                "QueryPlanBuilder: data-aware range token collection failed "
+                "(table=%s, source=%s.%s)",
                 table_ddl.name,
                 source_database,
                 source_table,
@@ -295,12 +390,22 @@ class QueryPlanBuilder:
                 source_table=source_table,
                 measured_columns=measured_columns,
             )
+            auto_range_tokens = self._build_data_aware_range_tokens(
+                table_ddl=table_ddl,
+                queries_config=queries_config,
+                provider=provider,
+                source_database=source_database,
+                source_table=source_table,
+                measured_columns=measured_columns,
+            )
             auto_generated_queries = generate_queries(
                 table_ddl,
                 like_tokens_by_column=auto_like_tokens,
+                range_tokens_by_column=auto_range_tokens,
                 measured_columns=measured_columns,
                 prefer_measured_columns=True,
                 auto_select_limit=queries_config.auto_select_limit,
+                include_miss_queries=queries_config.auto_include_miss_queries,
             )
             if (
                 queries_config.auto_like_replace_default_auto_queries
@@ -319,10 +424,21 @@ class QueryPlanBuilder:
                     query_id=f"auto_query_{index}",
                     query=q.query,
                     query_type=q.query_type,
+                    query_column=q.query_column,
                     cache_mode="warm",
+                    select_operations_count=queries_config.auto_select_operations_count,
                 )
                 for index, q in enumerate(auto_generated_queries)
             ]
+            logger.info(
+                "QueryPlanBuilder: auto queries generated (table=%s, measured_columns=%d, queries=%d, include_miss=%s, select_limit=%d, select_ops=%d)",
+                table_ddl.name,
+                len(measured_columns or []),
+                len(auto_queries),
+                queries_config.auto_include_miss_queries,
+                queries_config.auto_select_limit,
+                queries_config.auto_select_operations_count,
+            )
 
             if mode == "auto":
                 tests = auto_queries
@@ -384,6 +500,7 @@ class QueryPlanBuilder:
                 query_id=planned.query_id,
                 query=_render_sql(planned.query),
                 query_type=planned.query_type,
+                query_column=planned.query_column,
                 cache_mode=planned.cache_mode,
                 select_operations_count=planned.select_operations_count,
                 warmup_queries=[_render_sql(warmup_query) for warmup_query in planned.warmup_queries],
@@ -792,7 +909,21 @@ class BenchmarkEngine:
         Этот job выполняется перед генерацией variant jobs и его результат
         прокидывается в каждый `VariantJob` как `source_benchmark`.
         """
-        source_ddl, raw_query_plan = self.prepare_table_context(table_plan)
+        provider = self._planner.provider_for_connection(table_plan.connection_id)
+        source_ddl = provider.fetch_table_ddl(
+            database=table_plan.database,
+            table=table_plan.table,
+        )
+        # Для baseline замеряем все колонки, а не только затронутые правилами.
+        baseline_measured_columns = [column.name for column in source_ddl.columns]
+        raw_query_plan = self._query_builder.build(
+            source_ddl,
+            table_plan.queries,
+            provider=provider,
+            source_database=table_plan.database,
+            source_table=table_plan.table,
+            measured_columns=baseline_measured_columns,
+        )
         prepared_source_ddl = source_ddl.copy()
         prepared_source_ddl.name = f"{table_plan.database}.{table_plan.table}"
         rendered_query_plan = self._query_builder.render_for_table(

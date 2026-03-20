@@ -51,3 +51,18 @@ class FetcherMetadataProvider(MetadataProvider):
             min_token_length=min_token_length,
             max_token_length=max_token_length,
         )
+
+    def fetch_column_ranges(
+        self,
+        database: str,
+        table: str,
+        columns: Sequence[str],
+    ) -> Dict[str, Dict[str, str]]:
+        fetch_method = getattr(self._fetcher, "fetch_column_ranges", None)
+        if fetch_method is None:
+            return {}
+        return fetch_method(
+            database,
+            table,
+            columns,
+        )

@@ -4058,14 +4058,6 @@ ORDER BY country
 
         self.assertEqual([call["n_rows"] for call in client.calls], [1000])
 
-    def test_optimize_final_default_is_disabled(self) -> None:
-        source_text = pathlib.Path(celery_tasks_module.__file__).read_text(encoding="utf-8")
-        self.assertIn('os.getenv("BENCH_ENABLE_OPTIMIZE_FINAL", "0")', source_text)
-        with patch.object(celery_tasks_module, "_ENABLE_OPTIMIZE_FINAL", False), patch.object(
-            celery_tasks_module, "_OPTIMIZE_FINAL_PERMISSION_DENIED", False
-        ):
-            self.assertFalse(celery_tasks_module._should_run_optimize_final())
-
     def test_measure_insert_filters_zero_rows_per_second_from_measurements(self) -> None:
         fake_client = _FakeRuntimeClient(
             query_metrics_sequence=[

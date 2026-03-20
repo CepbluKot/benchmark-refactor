@@ -113,6 +113,7 @@ class AppSettings(BaseSettings):
     phased_result_table: Optional[str] = None
     phased_runs_table: str = "benchmark_runs"
     log_level: str = "INFO"
+    source_result_timeout_sec: float = 3600.0
 
     model_config = SettingsConfigDict(
         env_prefix="BENCH_",
@@ -205,6 +206,23 @@ class AppSettings(BaseSettings):
         if not normalized:
             raise ValueError("phased_runs_table не должно быть пустым")
         return normalized
+
+    @field_validator("source_result_timeout_sec", mode="before")
+    @classmethod
+    def parse_source_result_timeout_sec(cls, value: object) -> float:
+        """Нормализует таймаут ожидания source task."""
+        if value is None:
+            return 3600.0
+        text = str(value).strip()
+        if not text:
+            return 3600.0
+        try:
+            parsed = float(text)
+        except Exception as exc:
+            raise ValueError("source_result_timeout_sec должен быть числом секунд") from exc
+        if parsed <= 0:
+            raise ValueError("source_result_timeout_sec должен быть > 0")
+        return parsed
 
     @property
     def resolved_legacy_result_table(self) -> str:

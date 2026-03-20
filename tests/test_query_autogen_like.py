@@ -71,29 +71,33 @@ class _FailingProvider(_RecordingProvider):
 class QueryAutoLikeTests(unittest.TestCase):
     def test_generate_queries_appends_data_aware_like_pairs(self) -> None:
         table = TableDDL.from_ddl(_DDL)
-        base = generate_queries(table)
         generated = generate_queries(
             table,
+            measured_columns=["page_url"],
+            prefer_measured_columns=True,
             like_tokens_by_column={
                 "page_url": {"hit_token": "/catalog", "miss_token": "nomatch_token"},
                 "unknown_col": {"hit_token": "x", "miss_token": "y"},
             },
+            include_miss_queries=True,
         )
-        self.assertEqual(len(generated), len(base) + 2)
+        self.assertEqual(len(generated), 2)
         sqls = [item.query for item in generated]
         self.assertTrue(any("/catalog" in sql for sql in sqls))
         self.assertTrue(any("nomatch_token" in sql for sql in sqls))
 
     def test_generate_queries_skips_like_when_hit_token_is_empty(self) -> None:
         table = TableDDL.from_ddl(_DDL)
-        base = generate_queries(table)
         generated = generate_queries(
             table,
+            measured_columns=["page_url"],
+            prefer_measured_columns=True,
             like_tokens_by_column={
                 "page_url": {"hit_token": "   ", "miss_token": "nomatch_token"},
             },
         )
-        self.assertEqual(len(generated), len(base))
+        self.assertEqual(len(generated), 1)
+        self.assertTrue(all("nomatch_token" not in item.query for item in generated))
 
     def test_query_plan_builder_manual_mode_does_not_call_provider(self) -> None:
         table = TableDDL.from_ddl(_DDL)
@@ -132,10 +136,10 @@ class QueryAutoLikeTests(unittest.TestCase):
         )
         sqls = [item.query for item in plan.test_queries]
         query_types = [item.query_type for item in plan.test_queries]
-        self.assertEqual(len(sqls), 2)
+        self.assertEqual(len(sqls), 1)
         self.assertTrue(all("`page_url` LIKE '%%'" in sql for sql in sqls))
         self.assertEqual(query_types.count("hit"), 1)
-        self.assertEqual(query_types.count("miss"), 1)
+        self.assertEqual(query_types.count("miss"), 0)
 
     def test_query_plan_builder_passes_only_string_measured_columns(self) -> None:
         table = TableDDL.from_ddl(_DDL)
@@ -164,6 +168,7 @@ class QueryAutoLikeTests(unittest.TestCase):
                 mode="auto",
                 auto_like_on_measured_columns=True,
                 auto_like_replace_default_auto_queries=True,
+                auto_include_miss_queries=True,
             ),
             provider=provider,
             source_database="analytics",
@@ -186,6 +191,7 @@ class QueryAutoLikeTests(unittest.TestCase):
                 mode="auto_with_manual",
                 auto_like_on_measured_columns=True,
                 auto_like_replace_default_auto_queries=True,
+                auto_include_miss_queries=True,
                 test_queries=[QueryConfigItem(query=manual_sql)],
             ),
             provider=provider,
@@ -207,9 +213,12 @@ class QueryAutoLikeTests(unittest.TestCase):
                 "page_url": {"hit_token": "/catalog", "miss_token": "bench_nomatch_url"},
                 "country": {"hit_token": "RU", "miss_token": "bench_nomatch_country"},
             },
+            range_tokens_by_column={
+                "user_id": {"min": "10"},
+            },
         )
         sqls = [item.query for item in generated]
-        self.assertTrue(any("`user_id` IS NULL OR `user_id` IS NOT NULL" in sql for sql in sqls))
+        self.assertTrue(any("`user_id` >" in sql for sql in sqls))
         self.assertTrue(any("`page_url` LIKE concat('%'," in sql for sql in sqls))
         self.assertTrue(any("`country` LIKE concat('%'," in sql for sql in sqls))
 
@@ -225,16 +234,16 @@ class QueryAutoLikeTests(unittest.TestCase):
                     "miss_token": "bench_nomatch_page_url",
                 }
             },
+            range_tokens_by_column={
+                "user_id": {"min": "10"},
+            },
+            include_miss_queries=True,
         )
         sqls = [item.query for item in generated]
         query_types = [item.query_type for item in generated]
-        # user_id: hit + miss
-        self.assertTrue(
-            any("`user_id` IS NULL OR `user_id` IS NOT NULL" in sql for sql in sqls)
-        )
-        self.assertTrue(
-            any("`user_id` IS NULL AND `user_id` IS NOT NULL" in sql for sql in sqls)
-        )
+        # user_id: hit + miss via range
+        self.assertTrue(any("`user_id` >" in sql for sql in sqls))
+        self.assertTrue(any("`user_id` <" in sql for sql in sqls))
         # page_url: hit + miss, и оба сценария содержат LIKE '%%'
         self.assertTrue(any("`page_url` LIKE '%%'" in sql and "/catalog" in sql for sql in sqls))
         self.assertTrue(
@@ -248,7 +257,7 @@ class QueryAutoLikeTests(unittest.TestCase):
 
     def test_generate_queries_applies_default_limit_10_to_auto_selects(self) -> None:
         table = TableDDL.from_ddl(_DDL)
-        generated = generate_queries(table)
+        generated = generate_queries(table, prefer_measured_columns=True)
         sqls = [item.query for item in generated]
         self.assertTrue(sqls)
         self.assertTrue(all("LIMIT 10" in sql for sql in sqls))
@@ -269,7 +278,7 @@ class QueryAutoLikeTests(unittest.TestCase):
 
     def test_generate_queries_auto_base_has_no_group_by_queries(self) -> None:
         table = TableDDL.from_ddl(_DDL)
-        generated = generate_queries(table)
+        generated = generate_queries(table, prefer_measured_columns=True)
         sqls = [item.query.lower() for item in generated]
         self.assertTrue(sqls)
         self.assertTrue(all("group by" not in sql for sql in sqls))

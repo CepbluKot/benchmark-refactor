@@ -419,6 +419,68 @@ class Fetcher:
 
         return result
 
+    def fetch_column_ranges(
+        self,
+        database: str,
+        table: str,
+        columns: Sequence[str],
+    ) -> Dict[str, Dict[str, str]]:
+        """
+        Возвращает min/max значения для numeric/datetime колонок.
+
+        Значения конвертируются в строки, чтобы корректно переживать сериализацию.
+        """
+        if not columns:
+            return {}
+
+        unique_columns: List[str] = []
+        seen: set[str] = set()
+        for raw_column in columns:
+            column_name = str(raw_column).strip()
+            if not column_name or column_name in seen:
+                continue
+            seen.add(column_name)
+            unique_columns.append(column_name)
+
+        if not unique_columns:
+            return {}
+
+        database_ident = self._quote_ident(database)
+        table_ident = self._quote_ident(table)
+        result: Dict[str, Dict[str, str]] = {}
+
+        for column_name in unique_columns:
+            column_ident = self._quote_ident(column_name)
+            try:
+                rows = self._execute(
+                    f\"\"\"
+                    SELECT
+                        min({column_ident}) AS min_value,
+                        max({column_ident}) AS max_value
+                    FROM {database_ident}.{table_ident}
+                    \"\"\"
+                )
+            except Exception:
+                logger.exception(
+                    \"Не удалось получить min/max для колонок: %s.%s.%s\",
+                    database,
+                    table,
+                    column_name,
+                )
+                continue
+
+            if not rows:
+                continue
+            min_value, max_value = rows[0]
+            if min_value is None and max_value is None:
+                continue
+            result[column_name] = {
+                \"min\": str(min_value) if min_value is not None else \"\",
+                \"max\": str(max_value) if max_value is not None else \"\",
+            }
+
+        return result
+
     def create_table(self, table_ddl: TableDDL) -> None:
         """Создаёт таблицу по TableDDL-объекту."""
         self._execute(table_ddl.to_ddl())

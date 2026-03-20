@@ -52,3 +52,22 @@ class MetadataProvider(ABC):
           }
         """
         return {}
+
+    def fetch_column_ranges(
+        self,
+        database: str,
+        table: str,
+        columns: Sequence[str],
+    ) -> Dict[str, Dict[str, str]]:
+        """
+        Returns optional min/max ranges for numeric/datetime columns.
+
+        Expected payload:
+          {
+            "column_name": {
+              "min": "...",
+              "max": "...",
+            }
+          }
+        """
+        return {}
