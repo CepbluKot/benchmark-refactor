@@ -255,6 +255,38 @@ class QueryAutoLikeTests(unittest.TestCase):
         self.assertEqual(query_types.count("hit"), 2)
         self.assertEqual(query_types.count("miss"), 2)
 
+    def test_generate_queries_uses_datetime_parse_cast_for_range_literals(self) -> None:
+        table = TableDDL.from_ddl(_DDL)
+        generated = generate_queries(
+            table,
+            measured_columns=["event_time"],
+            prefer_measured_columns=True,
+            range_tokens_by_column={
+                "event_time": {"min": "2025-01-27 13:51:49+03:00"},
+            },
+            include_miss_queries=True,
+        )
+        sqls = [item.query for item in generated]
+        self.assertEqual(len(sqls), 2)
+        self.assertTrue(all("parseDateTimeBestEffort(" in sql for sql in sqls))
+        self.assertTrue(all("AS DateTime" in sql for sql in sqls))
+        self.assertTrue(all("+03:00" in sql for sql in sqls))
+
+    def test_generate_queries_uses_typed_cast_for_numeric_range_literals(self) -> None:
+        table = TableDDL.from_ddl(_DDL)
+        generated = generate_queries(
+            table,
+            measured_columns=["user_id"],
+            prefer_measured_columns=True,
+            range_tokens_by_column={
+                "user_id": {"min": "10"},
+            },
+            include_miss_queries=True,
+        )
+        sqls = [item.query for item in generated]
+        self.assertEqual(len(sqls), 2)
+        self.assertTrue(all("CAST('10' AS UInt64)" in sql for sql in sqls))
+
     def test_generate_queries_applies_default_limit_10_to_auto_selects(self) -> None:
         table = TableDDL.from_ddl(_DDL)
         generated = generate_queries(table, prefer_measured_columns=True)

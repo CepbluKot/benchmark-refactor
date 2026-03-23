@@ -40,6 +40,21 @@ def _base_type(col: ColumnDef) -> str:
     return t.split("(")[0]
 
 
+def _unwrapped_type(col: ColumnDef) -> str:
+    """Возвращает тип без обёрток Nullable/LowCardinality, но с параметрами."""
+    t = col.type
+    while True:
+        unwrapped = t
+        for wrapper in ("LowCardinality", "Nullable"):
+            m = re.match(rf"^{wrapper}\((.+)\)$", unwrapped)
+            if m:
+                unwrapped = m.group(1)
+        if unwrapped == t:
+            break
+        t = unwrapped
+    return t
+
+
 def _is_integer(col: ColumnDef) -> bool:
     """True для целочисленных типов ClickHouse."""
     base = _base_type(col)
@@ -88,6 +103,30 @@ def _sql_literal(value: object) -> str:
     """Преобразует Python-значение в SQL-литерал."""
     escaped = str(value).replace("\\", "\\\\").replace("'", "\\'")
     return f"'{escaped}'"
+
+
+def _datetime_filter_literal(col: ColumnDef, value: object) -> str:
+    """
+    Строит безопасный Date/DateTime-литерал для фильтров `>`/`<`.
+
+    Важно: range-токены для datetime приходят строками и могут содержать timezone
+    offset (`+03:00`). Прямое сравнение `DateTime > '...+03:00'` в ClickHouse может
+    давать TYPE_MISMATCH, поэтому используем parseDateTime* + CAST к типу колонки.
+    """
+    cast_type = _unwrapped_type(col)
+    base = _base_type(col)
+    literal = _sql_literal(value)
+    if base == "DateTime64":
+        parsed = f"parseDateTime64BestEffort({literal})"
+    else:
+        parsed = f"parseDateTimeBestEffort({literal})"
+    return f"CAST({parsed} AS {cast_type})"
+
+
+def _numeric_filter_literal(col: ColumnDef, value: object) -> str:
+    """Строит типизированный numeric-литерал через CAST."""
+    cast_type = _unwrapped_type(col)
+    return f"CAST({_sql_literal(value)} AS {cast_type})"
 
 
 # ─── датакласс результата ─────────────────────────────────────────────────────
@@ -320,10 +359,21 @@ class QueryGenerator:
                 min_value = str(token_payload.get("min_value") or token_payload.get("min") or "").strip()
                 max_value = str(token_payload.get("max_value") or token_payload.get("max") or "").strip()
 
+                if _is_datetime(column):
+                    min_literal = (
+                        _datetime_filter_literal(column, min_value) if min_value else ""
+                    )
+                    max_literal = (
+                        _datetime_filter_literal(column, max_value) if max_value else ""
+                    )
+                else:
+                    min_literal = _numeric_filter_literal(column, min_value) if min_value else ""
+                    max_literal = _numeric_filter_literal(column, max_value) if max_value else ""
+
                 if min_value:
                     hit_query = (
                         f"SELECT * FROM {t} "
-                        f"WHERE {column_ident} > {_sql_literal(min_value)}"
+                        f"WHERE {column_ident} > {min_literal}"
                     )
                     generated.append(
                         GeneratedQuery(
@@ -336,7 +386,7 @@ class QueryGenerator:
                     if include_miss_queries:
                         miss_query = (
                             f"SELECT * FROM {t} "
-                            f"WHERE {column_ident} < {_sql_literal(min_value)}"
+                            f"WHERE {column_ident} < {min_literal}"
                         )
                         generated.append(
                             GeneratedQuery(
@@ -351,7 +401,7 @@ class QueryGenerator:
                 if max_value:
                     hit_query = (
                         f"SELECT * FROM {t} "
-                        f"WHERE {column_ident} < {_sql_literal(max_value)}"
+                        f"WHERE {column_ident} < {max_literal}"
                     )
                     generated.append(
                         GeneratedQuery(
@@ -364,7 +414,7 @@ class QueryGenerator:
                     if include_miss_queries:
                         miss_query = (
                             f"SELECT * FROM {t} "
-                            f"WHERE {column_ident} > {_sql_literal(max_value)}"
+                            f"WHERE {column_ident} > {max_literal}"
                         )
                         generated.append(
                             GeneratedQuery(
