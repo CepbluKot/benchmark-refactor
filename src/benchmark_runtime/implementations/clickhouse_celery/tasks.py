@@ -2537,33 +2537,79 @@ class _ClickHouseRuntimeClient:
         query_tag: str,
     ) -> Dict[str, float]:
         """
-        Выполняет SELECT и возвращает метрики только из `system.query_log`.
+        Выполняет SELECT и возвращает метрики по приоритету summary/query_log.
 
         Приоритет:
-        1) `stream_client.command(...)`;
-        2) `stream_client.query(...)`;
-        3) `self._client.query(...)`.
+        - summary-mode (`BENCH_SELECT_USE_QUERY_LOG=0`):
+          1) `stream_client.command(...)` summary;
+          2) `stream_client.query(...)` summary;
+          3) `self._client.query(...)` summary;
+          4) fallback в `system.query_log` по query_id.
+        - query-log-mode (`BENCH_SELECT_USE_QUERY_LOG=1`):
+          1) `stream_client.command(...)`;
+          2) `stream_client.query(...)`;
+          3) `self._client.query(...)`.
         """
         _validate_user_read_only_sql_input(query)
         tagged_query = self._build_tagged_query(query, query_tag)
 
         if not _SELECT_USE_QUERY_LOG:
+            summary_query_id = self._build_query_id(query_tag, suffix="sel_summary")
+
+            def _query_with_optional_settings(client_obj: Any) -> Any:
+                try:
+                    return client_obj.query(
+                        tagged_query,
+                        settings={"query_id": summary_query_id},
+                    )
+                except TypeError:
+                    # Совместимость с простыми test-double клиентами без аргумента settings.
+                    return client_obj.query(tagged_query)
+
+            def _command_with_optional_settings(client_obj: Any) -> Any:
+                try:
+                    return client_obj.command(
+                        tagged_query,
+                        settings={"query_id": summary_query_id},
+                    )
+                except TypeError:
+                    # Совместимость с простыми test-double клиентами без аргумента settings.
+                    return client_obj.command(tagged_query)
+
             stream_client = self._get_stream_client()
+            if stream_client is not None:
+                try:
+                    result = _command_with_optional_settings(stream_client)
+                    summary_metrics = self._extract_stream_query_summary(result)
+                    if summary_metrics is not None:
+                        return summary_metrics
+                except Exception:
+                    logger.exception("Stream command для select не удался (summary mode)")
+                try:
+                    result = _query_with_optional_settings(stream_client)
+                    summary_metrics = self._extract_stream_query_summary(result)
+                    if summary_metrics is not None:
+                        return summary_metrics
+                except Exception:
+                    logger.exception("Stream query для select не удался (summary mode)")
+
             try:
-                if stream_client is not None:
-                    result = stream_client.query(tagged_query)
-                else:
-                    result = self._client.query(tagged_query)
+                result = _query_with_optional_settings(self._client)
+                summary_metrics = self._extract_stream_query_summary(result)
+                if summary_metrics is not None:
+                    return summary_metrics
             except Exception:
-                logger.exception("Select query не удался (summary mode)")
+                logger.exception("Client query для select не удался (summary mode)")
                 return _error_query_metrics()
 
-            summary_metrics = self._extract_stream_query_summary(result)
-            if summary_metrics is not None:
-                return summary_metrics
+            query_log_metrics = self._query_log_metrics_by_query_id(query_id=summary_query_id)
+            if query_log_metrics is not None:
+                return query_log_metrics
 
             logger.warning(
-                "SELECT выполнен, но summary-метрики не найдены (summary mode)"
+                "SELECT выполнен, но summary/query_log метрики не найдены "
+                "(summary mode, query_id=%s)",
+                summary_query_id,
             )
             return _error_query_metrics()
 
@@ -3475,16 +3521,10 @@ def _measure_select_queries(
         query_bytes_per_second_entries: list[float] = []
         query_read_bytes_entries: list[float] = []
         select_settings_assignments: list[str] = []
-        if _SELECT_MAX_EXECUTION_TIME_SEC > 0:
-            select_settings_assignments.append(
-                f"max_execution_time = {_SELECT_MAX_EXECUTION_TIME_SEC}"
-            )
         if query_cache_mode == "cold":
             select_settings_assignments.extend(_COLD_SELECT_SETTINGS_ASSIGNMENTS)
-
-        warmup_settings_assignments: list[str] = []
         if _SELECT_MAX_EXECUTION_TIME_SEC > 0:
-            warmup_settings_assignments.append(
+            select_settings_assignments.append(
                 f"max_execution_time = {_SELECT_MAX_EXECUTION_TIME_SEC}"
             )
 
@@ -3505,13 +3545,9 @@ def _measure_select_queries(
                     else [query]
                 )
                 for warmup_query in effective_warmups:
-                    effective_warmup = warmup_query
-                    if warmup_settings_assignments:
-                        effective_warmup = _with_select_settings(
-                            warmup_query,
-                            settings_assignments=warmup_settings_assignments,
-                        )
-                    client.execute_user_read_only_query(effective_warmup)
+                    # Warmup выполняем без перезаписи SETTINGS, чтобы сохранять
+                    # поведение query-plan и стабильные метрики в тестах/runtime.
+                    client.execute_user_read_only_query(warmup_query)
 
             effective_query = query
             if select_settings_assignments:

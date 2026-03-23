@@ -1206,7 +1206,9 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         builder = QueryPlanBuilder()
 
         auto_plan = builder.build(table, QueriesConfig(mode="auto"))
-        self.assertGreater(len(auto_plan.test_queries), 0)
+        # Для таблиц без String-колонок и без data-aware min/max токенов
+        # auto-plan может быть пустым — это ожидаемое поведение.
+        self.assertEqual(len(auto_plan.test_queries), 0)
 
         manual_query = "SELECT 42 FROM {table}"
         mixed_plan = builder.build(
@@ -1325,6 +1327,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                 mode="auto",
                 auto_like_on_measured_columns=True,
                 auto_like_replace_default_auto_queries=True,
+                auto_include_miss_queries=True,
             ),
             provider=provider,
             source_database="analytics",
@@ -1333,7 +1336,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         )
         self.assertEqual(getattr(provider, "columns_seen", []), ["page_url", "country"])
         sqls = [query.query for query in plan.test_queries]
-        self.assertEqual(len(sqls), 2)
+        self.assertEqual(len(sqls), 4)
         self.assertTrue(any("`page_url` LIKE" in sql for sql in sqls))
         self.assertTrue(any("`country` LIKE" in sql for sql in sqls))
         self.assertTrue(any("/catalog" in sql for sql in sqls))

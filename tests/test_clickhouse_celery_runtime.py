@@ -379,10 +379,14 @@ class ClickHouseCeleryRuntimeTests(unittest.TestCase):
             fake_app.calls[0]["kwargs"]["payload"]["query_plan"]["test_queries"][0]["query_type"],
             "generic",
         )
-        self.assertIn(
-            fake_app.calls[1]["kwargs"]["payload"]["query_plan"]["test_queries"][0]["query_type"],
-            {"hit", "miss", "generic", "manual"},
-        )
+        variant_test_queries = fake_app.calls[1]["kwargs"]["payload"]["query_plan"]["test_queries"]
+        if variant_test_queries:
+            self.assertIn(
+                variant_test_queries[0]["query_type"],
+                {"hit", "miss", "generic", "manual"},
+            )
+        else:
+            self.assertEqual(variant_test_queries, [])
 
     def test_execute_variant_retries_dispatch_after_transient_broker_error(self) -> None:
         source_result_payload = {

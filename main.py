@@ -361,7 +361,9 @@ def run_from_settings() -> int:
         legacy_result_table=legacy_result_table,
         phased_result_table=phased_result_table,
         phased_runs_table=phased_runs_table,
-        source_result_timeout_sec=app_settings.source_result_timeout_sec,
+        source_result_timeout_sec=float(
+            getattr(app_settings, "source_result_timeout_sec", 3600.0)
+        ),
     )
 
     fetchers: Dict[str, object] = {}

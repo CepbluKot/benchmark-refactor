@@ -453,16 +453,16 @@ class Fetcher:
             column_ident = self._quote_ident(column_name)
             try:
                 rows = self._execute(
-                    f\"\"\"
+                    f"""
                     SELECT
                         min({column_ident}) AS min_value,
                         max({column_ident}) AS max_value
                     FROM {database_ident}.{table_ident}
-                    \"\"\"
+                    """
                 )
             except Exception:
                 logger.exception(
-                    \"Не удалось получить min/max для колонок: %s.%s.%s\",
+                    "Не удалось получить min/max для колонок: %s.%s.%s",
                     database,
                     table,
                     column_name,
@@ -475,8 +475,8 @@ class Fetcher:
             if min_value is None and max_value is None:
                 continue
             result[column_name] = {
-                \"min\": str(min_value) if min_value is not None else \"\",
-                \"max\": str(max_value) if max_value is not None else \"\",
+                "min": str(min_value) if min_value is not None else "",
+                "max": str(max_value) if max_value is not None else "",
             }
 
         return result
