@@ -4676,8 +4676,27 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
     client = _ClickHouseRuntimeClient(payload.connection)
     baseline_database = payload.test_database or f"{payload.source_database}__benchmark_tmp"
     baseline_table = f"{payload.source_table}__source_baseline__{uuid.uuid4().hex}"
+    run_started_at_monotonic = time.monotonic()
+    logger.info(
+        "run_source_benchmark: start benchmark_run_id=%d, benchmark_id=%s, source=%s.%s, baseline=%s.%s, insert_ops=%d, insert_rows_limit=%s, select_queries=%d",
+        payload.benchmark_run_id,
+        payload.benchmark_id,
+        payload.source_database,
+        payload.source_table,
+        baseline_database,
+        baseline_table,
+        payload.insert_operations_count,
+        payload.insert_rows_limit,
+        len(payload.query_plan.test_queries),
+    )
     try:
         source_total_rows = client.count_rows(payload.source_database, payload.source_table)
+        logger.info(
+            "run_source_benchmark: source rows counted source=%s.%s rows=%d",
+            payload.source_database,
+            payload.source_table,
+            source_total_rows,
+        )
         if source_total_rows <= 0:
             logger.warning(
                 "run_source_benchmark: source таблица %s.%s содержит 0 строк, "
@@ -4721,6 +4740,11 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             target_table=baseline_table,
         )
         client.execute(baseline_ddl)
+        logger.info(
+            "run_source_benchmark: baseline table created %s.%s",
+            baseline_database,
+            baseline_table,
+        )
 
         baseline_test_queries = _rewrite_query_payloads_to_baseline_copy(
             payload.query_plan.test_queries,
@@ -4729,10 +4753,15 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             baseline_database=baseline_database,
             baseline_table=baseline_table,
         )
+        logger.info(
+            "run_source_benchmark: baseline select queries prepared count=%d",
+            len(baseline_test_queries),
+        )
         deterministic_insert_order_by = _resolve_deterministic_insert_order_by_expression(
             payload.source_table_ddl
         )
 
+        insert_stage_started_at = time.monotonic()
         insert_stats = _measure_insert(
             client,
             source_database=payload.source_database,
@@ -4742,6 +4771,11 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             n_rows=payload.insert_rows_limit,
             n_measurements=payload.insert_operations_count,
             deterministic_order_by=deterministic_insert_order_by,
+        )
+        logger.info(
+            "run_source_benchmark: insert stage done measurements=%d, elapsed_sec=%.3f",
+            len(insert_stats.get("elapsed_ns", []) or []),
+            time.monotonic() - insert_stage_started_at,
         )
         insert_time_ms_measurements = [
             value / 1_000_000.0 for value in insert_stats["elapsed_ns"]
@@ -4759,10 +4793,16 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             payload.measured_percentiles,
         )
 
+        select_stage_started_at = time.monotonic()
         select_stats = _measure_select_queries(
             client,
             test_queries=baseline_test_queries,
             n_measurements=payload.insert_operations_count,
+        )
+        logger.info(
+            "run_source_benchmark: select stage done measurements=%d, elapsed_sec=%.3f",
+            len(select_stats.get("elapsed_ns", []) or []),
+            time.monotonic() - select_stage_started_at,
         )
         source_select_per_query_metrics = _build_select_per_query_metrics(
             select_stats.get("per_query", []),
@@ -5123,6 +5163,18 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             baseline_ddl=baseline_ddl,
             result=source_result,
         )
+        logger.info(
+            "run_source_benchmark: done benchmark_run_id=%d, benchmark_id=%s, source=%s.%s, score=%s, quality=%s, rows=%d, size_with_indexes_bytes=%.0f, elapsed_sec=%.3f",
+            payload.benchmark_run_id,
+            payload.benchmark_id,
+            payload.source_database,
+            payload.source_table,
+            baseline_score,
+            measurement_quality_flag,
+            baseline_total_rows,
+            baseline_total_size_bytes_with_indexes,
+            time.monotonic() - run_started_at_monotonic,
+        )
         return source_result
     finally:
         try:
@@ -5148,6 +5200,7 @@ def run_variant_benchmark(
 ) -> BenchmarkVariantResult:
     """Реальное выполнение variant benchmark с сохранением результата в ClickHouse."""
     client = _ClickHouseRuntimeClient(payload.connection)
+    run_started_at_monotonic = time.monotonic()
     result_store = ClickHouseBenchmarkResultStore(
         connection=payload.result_connection.to_result_store_params(),
         database=payload.result_database,
@@ -5163,6 +5216,19 @@ def run_variant_benchmark(
     measured_percentiles = list(payload.measured_percentiles)
     if not measured_percentiles:
         measured_percentiles = list(DEFAULT_MEASURED_PERCENTILES)
+    logger.info(
+        "run_variant_benchmark: start benchmark_run_id=%d, benchmark_id=%s, mode=%s, source=%s.%s, variant=%s.%s, insert_ops=%d, insert_rows_limit=%s, select_queries=%d",
+        payload.benchmark_run_id,
+        payload.benchmark_id,
+        payload.variant_mode,
+        payload.source_database,
+        payload.source_table,
+        payload.variant_database,
+        payload.variant_table,
+        payload.insert_operations_count,
+        payload.insert_rows_limit,
+        len(payload.query_plan.test_queries),
+    )
     runtime_variant_params = _augment_variant_params_with_runtime_context(payload)
     insert_tested_cols: list[str] = []
     raw_index_choices = runtime_variant_params.get("index_choices")
@@ -5197,6 +5263,11 @@ def run_variant_benchmark(
             )
             executed_variant_ddl = _ensure_allow_nullable_key_in_ddl(executed_variant_ddl)
             client.execute(executed_variant_ddl)
+        logger.info(
+            "run_variant_benchmark: variant table created %s.%s",
+            payload.variant_database,
+            payload.variant_table,
+        )
         source_table_ddl_for_insert = None
         if payload.source_benchmark and isinstance(payload.source_benchmark, dict):
             source_table_ddl_for_insert = payload.source_benchmark.get("source_table_ddl")
@@ -5204,6 +5275,7 @@ def run_variant_benchmark(
             source_table_ddl_for_insert
         )
 
+        insert_stage_started_at = time.monotonic()
         insert_stats = _measure_insert(
             client,
             source_database=payload.source_database,
@@ -5214,6 +5286,11 @@ def run_variant_benchmark(
             n_measurements=payload.insert_operations_count,
             tested_cols=insert_tested_cols,
             deterministic_order_by=deterministic_insert_order_by,
+        )
+        logger.info(
+            "run_variant_benchmark: insert stage done measurements=%d, elapsed_sec=%.3f",
+            len(insert_stats.get("elapsed_ns", []) or []),
+            time.monotonic() - insert_stage_started_at,
         )
 
         tested_insert_time_ms = [
@@ -5234,10 +5311,16 @@ def run_variant_benchmark(
             measured_percentiles,
         )
 
+        select_stage_started_at = time.monotonic()
         select_stats = _measure_select_queries(
             client,
             test_queries=payload.query_plan.test_queries,
             n_measurements=payload.insert_operations_count,
+        )
+        logger.info(
+            "run_variant_benchmark: select stage done measurements=%d, elapsed_sec=%.3f",
+            len(select_stats.get("elapsed_ns", []) or []),
+            time.monotonic() - select_stage_started_at,
         )
         tested_select_per_query_metrics = _build_select_per_query_metrics(
             select_stats.get("per_query", []),
@@ -5271,6 +5354,11 @@ def run_variant_benchmark(
 
         tested_rows_count = client.count_rows(payload.variant_database, payload.variant_table)
         source_rows_count = int(source_metrics.get("total_n_rows_in_source_table", 0) or 0)
+        logger.info(
+            "run_variant_benchmark: rows counted source_rows=%d, tested_rows=%d",
+            source_rows_count,
+            tested_rows_count,
+        )
 
         tested_columns_sizes = client.get_column_sizes(payload.variant_database, payload.variant_table)
         tested_indexes_sizes = client.get_index_sizes(payload.variant_database, payload.variant_table)
@@ -5424,6 +5512,12 @@ def run_variant_benchmark(
             source_total_size_bytes_with_indexes = source_total_size_bytes
         if source_bytes_on_disk_sum <= 0 and source_total_size_bytes_with_indexes > 0:
             source_bytes_on_disk_sum = source_total_size_bytes_with_indexes
+        logger.info(
+            "run_variant_benchmark: size metrics source_size_with_indexes=%.0fB, tested_size_with_indexes=%.0fB, tested_bytes_on_disk=%.0fB",
+            source_total_size_bytes_with_indexes,
+            tested_total_size_bytes_with_indexes,
+            tested_bytes_on_disk_sum,
+        )
         tested_size_with_indexes_json = _build_table_size_value_json(
             size_bytes=tested_total_size_bytes_with_indexes,
             size_bytes_readable=make_readable_bytes(tested_total_size_bytes_with_indexes),
@@ -5991,6 +6085,17 @@ def run_variant_benchmark(
                 else None
             ),
             result=result,
+        )
+        logger.info(
+            "run_variant_benchmark: done benchmark_run_id=%d, benchmark_id=%s, mode=%s, variant=%s.%s, score=%s, quality=%s, elapsed_sec=%.3f",
+            payload.benchmark_run_id,
+            payload.benchmark_id,
+            payload.variant_mode,
+            payload.variant_database,
+            payload.variant_table,
+            score,
+            measurement_quality_flag,
+            time.monotonic() - run_started_at_monotonic,
         )
 
         return result

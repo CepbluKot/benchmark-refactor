@@ -136,50 +136,7 @@
           "auto_generate_candidates": false
         },
         "column_rules": [],
-        "index_rules": [
-          {
-            "by_type": "String",
-            "indexes": [
-              {
-                "type": "ngrambf_v1(3, 32768, 2, 0)",
-                "granularity": [
-                  2,
-                  4,
-                  8,
-                  16
-                ],
-                "index_granularity_values": [
-                  8192,
-                  16384,
-                  32768,
-                  65536,
-                  131072
-                ]
-              }
-            ]
-          },
-          {
-            "by_type": "LowCardinality(String)",
-            "indexes": [
-              {
-                "type": "ngrambf_v1(3, 32768, 2, 0)",
-                "granularity": [
-                  2,
-                  4,
-                  8,
-                  16
-                ],
-                "index_granularity_values": [
-                  8192,
-                  16384,
-                  32768,
-                  65536,
-                  131072
-                ]
-              }
-            ]
-          }
-        ]
+        "index_rules": []
       },
       "table_rules": [
         {
@@ -211,6 +168,15 @@
           "rules": {
             "column_rules": [
               {
+                "by_name": "name",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
                 "by_name": "labels_cluster",
                 "by_type": "String",
                 "auto_generate_alternatives": false,
@@ -238,6 +204,29 @@
                 ]
               },
               {
+                "by_name": "name",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
+                "by_name": "labels_namespace",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
+                "by_name": "labels_cluster",
                 "by_type": "String",
                 "codecs": [
                   "CODEC(LZ4)",
@@ -251,6 +240,50 @@
             "index_rules": [
               {
                 "by_name": "name",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 32768, 2, 0)",
+                    "granularity": [
+                      2,
+                      4,
+                      8,
+                      16
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384,
+                      32768,
+                      65536,
+                      131072
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "labels_namespace",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 32768, 2, 0)",
+                    "granularity": [
+                      2,
+                      4,
+                      8,
+                      16
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384,
+                      32768,
+                      65536,
+                      131072
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "labels_cluster",
                 "by_type": "String",
                 "indexes": [
                   {
@@ -304,7 +337,35 @@
             "auto_include_miss_queries": true
           },
           "rules": {
-            "column_rules": [],
+            "column_rules": [
+              {
+                "by_name": "requestPath",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "requestID",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              },
+              {
+                "by_name": "userAgent",
+                "by_type": "String",
+                "auto_generate_alternatives": false,
+                "types": [
+                  "String",
+                  "LowCardinality(String)"
+                ]
+              }
+            ],
             "codec_rules": [
               {
                 "by_name": "timestamp",
@@ -314,6 +375,7 @@
                 ]
               },
               {
+                "by_name": "requestPath",
                 "by_type": "String",
                 "codecs": [
                   "CODEC(LZ4)",
@@ -324,7 +386,19 @@
                 ]
               },
               {
-                "by_type": "LowCardinality(String)",
+                "by_name": "requestID",
+                "by_type": "String",
+                "codecs": [
+                  "CODEC(LZ4)",
+                  "CODEC(ZSTD(1))",
+                  "CODEC(ZSTD(2))",
+                  "CODEC(ZSTD(3))",
+                  "CODEC(ZSTD(4))"
+                ]
+              },
+              {
+                "by_name": "userAgent",
+                "by_type": "String",
                 "codecs": [
                   "CODEC(LZ4)",
                   "CODEC(ZSTD(1))",
@@ -337,6 +411,50 @@
             "index_rules": [
               {
                 "by_name": "requestPath",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 32768, 2, 0)",
+                    "granularity": [
+                      2,
+                      4,
+                      8,
+                      16
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384,
+                      32768,
+                      65536,
+                      131072
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "requestID",
+                "by_type": "String",
+                "indexes": [
+                  {
+                    "type": "ngrambf_v1(3, 32768, 2, 0)",
+                    "granularity": [
+                      2,
+                      4,
+                      8,
+                      16
+                    ],
+                    "index_granularity_values": [
+                      8192,
+                      16384,
+                      32768,
+                      65536,
+                      131072
+                    ]
+                  }
+                ]
+              },
+              {
+                "by_name": "userAgent",
                 "by_type": "String",
                 "indexes": [
                   {

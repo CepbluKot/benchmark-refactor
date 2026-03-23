@@ -10,10 +10,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import logging
 import os
 import subprocess
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.benchmark_engine import (
     BenchmarkEngine,
@@ -147,6 +148,81 @@ def _log_benchmark_selection(
             ", ".join(missing_ids),
         )
     logger.info("===========================")
+
+
+def _sanitize_for_log(value: Any) -> Any:
+    """
+    Маскирует чувствительные поля в произвольной структуре перед логированием.
+
+    Для benchmark-конфигов такие поля обычно не встречаются, но маскирование
+    включено на случай расширений/нестандартных конфигов.
+    """
+    sensitive_keys = {
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "api_key",
+        "apikey",
+        "authorization",
+        "auth",
+        "login",
+        "user",
+        "username",
+    }
+    if isinstance(value, dict):
+        sanitized: Dict[str, Any] = {}
+        for key, raw_value in value.items():
+            normalized_key = str(key).strip().lower()
+            if normalized_key in sensitive_keys or any(
+                marker in normalized_key for marker in ("password", "secret", "token", "credential")
+            ):
+                sanitized[str(key)] = "***"
+                continue
+            sanitized[str(key)] = _sanitize_for_log(raw_value)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_for_log(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_for_log(item) for item in value]
+    return value
+
+
+def _log_selected_benchmark_configs(
+    config: BenchmarkRootConfig,
+    requested_benchmark_ids: Optional[List[str]],
+) -> None:
+    """Пишет в лог JSON-снапшот benchmark-конфигов, которые реально будут запущены."""
+    available_set = {benchmark.id for benchmark in config.benchmarks}
+    if requested_benchmark_ids:
+        selected_ids = [benchmark_id for benchmark_id in requested_benchmark_ids if benchmark_id in available_set]
+        selected = [benchmark for benchmark in config.benchmarks if benchmark.id in set(selected_ids)]
+    else:
+        selected = list(config.benchmarks)
+
+    logger.info("=== Benchmark config snapshot ===")
+    if not selected:
+        logger.info("Нет benchmark-конфигов для логирования")
+        logger.info("=================================")
+        return
+
+    for benchmark in selected:
+        if hasattr(benchmark, "model_dump"):
+            payload = benchmark.model_dump(mode="json", by_alias=True)
+        else:
+            payload = dict(getattr(benchmark, "__dict__", {}))
+        safe_payload = _sanitize_for_log(payload)
+        logger.info(
+            "Benchmark config id=%s\n%s",
+            benchmark.id,
+            json.dumps(
+                safe_payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+        )
+    logger.info("=================================")
 
 
 def _resolve_legacy_table_need(
@@ -301,6 +377,10 @@ def run_from_settings() -> int:
     )
     benchmark_ids: Optional[List[str]] = app_settings.benchmark_ids or None
     _log_benchmark_selection(
+        config=config,
+        requested_benchmark_ids=benchmark_ids,
+    )
+    _log_selected_benchmark_configs(
         config=config,
         requested_benchmark_ids=benchmark_ids,
     )

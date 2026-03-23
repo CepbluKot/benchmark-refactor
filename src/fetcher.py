@@ -448,6 +448,13 @@ class Fetcher:
         database_ident = self._quote_ident(database)
         table_ident = self._quote_ident(table)
         result: Dict[str, Dict[str, str]] = {}
+        started_at = time.monotonic()
+        logger.info(
+            "fetch_column_ranges: start table=%s.%s, requested_columns=%d",
+            database,
+            table,
+            len(unique_columns),
+        )
 
         for column_name in unique_columns:
             column_ident = self._quote_ident(column_name)
@@ -479,6 +486,13 @@ class Fetcher:
                 "max": str(max_value) if max_value is not None else "",
             }
 
+        logger.info(
+            "fetch_column_ranges: done table=%s.%s, resolved_columns=%d, elapsed_sec=%.3f",
+            database,
+            table,
+            len(result),
+            time.monotonic() - started_at,
+        )
         return result
 
     def create_table(self, table_ddl: TableDDL) -> None:
