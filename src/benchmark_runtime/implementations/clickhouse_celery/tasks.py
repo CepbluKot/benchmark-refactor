@@ -1820,6 +1820,15 @@ def _load_task_payload_from_store(
 ) -> Dict[str, Any]:
     """Загружает task payload из ClickHouse по `payload_ref`."""
     payload_ref = TaskPayloadRefPayload.model_validate(payload_ref_raw)
+    log_fn = logger.info if expected_kind == "source" else logger.debug
+    log_fn(
+        "Celery worker: загрузка payload из store "
+        "(expected_kind=%s, payload_id=%s, storage=%s.%s)",
+        expected_kind,
+        payload_ref.payload_id,
+        payload_ref.storage_database,
+        payload_ref.storage_table,
+    )
     if payload_ref.payload_kind != expected_kind:
         raise ValueError(
             f"payload_kind mismatch: expected={expected_kind}, actual={payload_ref.payload_kind}"
@@ -1864,6 +1873,12 @@ def _load_task_payload_from_store(
             "Task payload в ClickHouse payload store должен быть JSON-объектом "
             f"(payload_id={payload_ref.payload_id}, kind={payload_ref.payload_kind})"
         )
+    log_fn(
+        "Celery worker: payload из store загружен "
+        "(expected_kind=%s, payload_id=%s)",
+        expected_kind,
+        payload_ref.payload_id,
+    )
     return payload
 
 
@@ -4689,8 +4704,34 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
         payload.insert_rows_limit,
         len(payload.query_plan.test_queries),
     )
+
+    def _log_step_start(step_name: str) -> float:
+        started_at = time.monotonic()
+        logger.info(
+            "run_source_benchmark: step START (benchmark_run_id=%d, benchmark_id=%s, source=%s.%s, step=%s)",
+            payload.benchmark_run_id,
+            payload.benchmark_id,
+            payload.source_database,
+            payload.source_table,
+            step_name,
+        )
+        return started_at
+
+    def _log_step_end(step_name: str, started_at: float) -> None:
+        logger.info(
+            "run_source_benchmark: step END (benchmark_run_id=%d, benchmark_id=%s, source=%s.%s, step=%s, elapsed_sec=%.3f)",
+            payload.benchmark_run_id,
+            payload.benchmark_id,
+            payload.source_database,
+            payload.source_table,
+            step_name,
+            time.monotonic() - started_at,
+        )
+
     try:
+        step_started_at = _log_step_start("count_source_rows")
         source_total_rows = client.count_rows(payload.source_database, payload.source_table)
+        _log_step_end("count_source_rows", step_started_at)
         logger.info(
             "run_source_benchmark: source rows counted source=%s.%s rows=%d",
             payload.source_database,
@@ -4728,6 +4769,7 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
                 },
             )
 
+        step_started_at = _log_step_start("create_baseline_table")
         client.create_database_if_not_exists(baseline_database)
         client.drop_table_if_exists(
             baseline_database,
@@ -4745,7 +4787,9 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             baseline_database,
             baseline_table,
         )
+        _log_step_end("create_baseline_table", step_started_at)
 
+        step_started_at = _log_step_start("prepare_baseline_select_queries")
         baseline_test_queries = _rewrite_query_payloads_to_baseline_copy(
             payload.query_plan.test_queries,
             source_database=payload.source_database,
@@ -4757,10 +4801,12 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             "run_source_benchmark: baseline select queries prepared count=%d",
             len(baseline_test_queries),
         )
+        _log_step_end("prepare_baseline_select_queries", step_started_at)
         deterministic_insert_order_by = _resolve_deterministic_insert_order_by_expression(
             payload.source_table_ddl
         )
 
+        step_started_at = _log_step_start("measure_insert")
         insert_stage_started_at = time.monotonic()
         insert_stats = _measure_insert(
             client,
@@ -4777,6 +4823,7 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             len(insert_stats.get("elapsed_ns", []) or []),
             time.monotonic() - insert_stage_started_at,
         )
+        _log_step_end("measure_insert", step_started_at)
         insert_time_ms_measurements = [
             value / 1_000_000.0 for value in insert_stats["elapsed_ns"]
         ]
@@ -4793,6 +4840,7 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             payload.measured_percentiles,
         )
 
+        step_started_at = _log_step_start("measure_select")
         select_stage_started_at = time.monotonic()
         select_stats = _measure_select_queries(
             client,
@@ -4804,6 +4852,7 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             len(select_stats.get("elapsed_ns", []) or []),
             time.monotonic() - select_stage_started_at,
         )
+        _log_step_end("measure_select", step_started_at)
         source_select_per_query_metrics = _build_select_per_query_metrics(
             select_stats.get("per_query", []),
             payload.measured_percentiles,
@@ -4834,6 +4883,7 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
         # В baseline-режиме "source" и "tested" метрики должны измеряться
         # на одном и том же объёме данных (копия исходного DDL), чтобы избежать
         # перекоса при сравнении полной source-таблицы vs test-копии.
+        step_started_at = _log_step_start("collect_size_metrics")
         baseline_total_rows = client.count_rows(baseline_database, baseline_table)
         baseline_columns_sizes = client.get_column_sizes(baseline_database, baseline_table)
         baseline_indexes_sizes = client.get_index_sizes(baseline_database, baseline_table)
@@ -4911,7 +4961,9 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
         tested_total_size_bytes = baseline_total_size_bytes
         source_total_size_bytes_with_indexes = baseline_total_size_bytes_with_indexes
         tested_total_size_bytes_with_indexes = baseline_total_size_bytes_with_indexes
+        _log_step_end("collect_size_metrics", step_started_at)
 
+        step_started_at = _log_step_start("build_metrics_payload")
         metrics: dict[str, Any] = {
             "measured_percentiles": list(payload.measured_percentiles),
             "insert_test_n_rows": payload.insert_rows_limit,
@@ -4996,7 +5048,9 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             "total_n_rows_in_tested_table": tested_total_rows,
             "total_n_rows_in_source_table": source_total_rows,
         }
+        _log_step_end("build_metrics_payload", step_started_at)
 
+        step_started_at = _log_step_start("compute_score")
         _, baseline_geomean_details = _compute_variant_ratio_details(
             source_insert_time_ms_measurements=insert_time_ms_measurements,
             tested_insert_time_ms_measurements=insert_time_ms_measurements,
@@ -5144,7 +5198,9 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
                 f"{payload.benchmark_id} {payload.source_database}.{payload.source_table}"
             ),
         )
+        _log_step_end("compute_score", step_started_at)
 
+        step_started_at = _log_step_start("persist_source_result")
         source_result = SourceBenchmarkResult(
             benchmark_run_id=payload.benchmark_run_id,
             benchmark_started_at=payload.benchmark_started_at,
@@ -5163,6 +5219,7 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             baseline_ddl=baseline_ddl,
             result=source_result,
         )
+        _log_step_end("persist_source_result", step_started_at)
         logger.info(
             "run_source_benchmark: done benchmark_run_id=%d, benchmark_id=%s, source=%s.%s, score=%s, quality=%s, rows=%d, size_with_indexes_bytes=%.0f, elapsed_sec=%.3f",
             payload.benchmark_run_id,
@@ -5177,6 +5234,16 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
         )
         return source_result
     finally:
+        cleanup_started_at = time.monotonic()
+        logger.info(
+            "run_source_benchmark: cleanup START (benchmark_run_id=%d, benchmark_id=%s, source=%s.%s, baseline=%s.%s)",
+            payload.benchmark_run_id,
+            payload.benchmark_id,
+            payload.source_database,
+            payload.source_table,
+            baseline_database,
+            baseline_table,
+        )
         try:
             client.drop_table_if_exists(
                 baseline_database,
@@ -5190,6 +5257,16 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
                 baseline_table,
             )
         client.close()
+        logger.info(
+            "run_source_benchmark: cleanup END (benchmark_run_id=%d, benchmark_id=%s, source=%s.%s, baseline=%s.%s, elapsed_sec=%.3f)",
+            payload.benchmark_run_id,
+            payload.benchmark_id,
+            payload.source_database,
+            payload.source_table,
+            baseline_database,
+            baseline_table,
+            time.monotonic() - cleanup_started_at,
+        )
 
 
 def run_variant_benchmark(
@@ -5229,6 +5306,33 @@ def run_variant_benchmark(
         payload.insert_rows_limit,
         len(payload.query_plan.test_queries),
     )
+
+    def _log_step_start(step_name: str) -> float:
+        started_at = time.monotonic()
+        logger.info(
+            "run_variant_benchmark: step START (benchmark_run_id=%d, benchmark_id=%s, mode=%s, variant=%s.%s, step=%s)",
+            payload.benchmark_run_id,
+            payload.benchmark_id,
+            payload.variant_mode,
+            payload.variant_database,
+            payload.variant_table,
+            step_name,
+        )
+        return started_at
+
+    def _log_step_end(step_name: str, started_at: float) -> None:
+        logger.info(
+            "run_variant_benchmark: step END (benchmark_run_id=%d, benchmark_id=%s, mode=%s, variant=%s.%s, step=%s, elapsed_sec=%.3f)",
+            payload.benchmark_run_id,
+            payload.benchmark_id,
+            payload.variant_mode,
+            payload.variant_database,
+            payload.variant_table,
+            step_name,
+            time.monotonic() - started_at,
+        )
+
+    step_started_at = _log_step_start("prepare_runtime_variant_params")
     runtime_variant_params = _augment_variant_params_with_runtime_context(payload)
     insert_tested_cols: list[str] = []
     raw_index_choices = runtime_variant_params.get("index_choices")
@@ -5236,10 +5340,12 @@ def run_variant_benchmark(
         for column_name, index_payload in raw_index_choices.items():
             if index_payload:
                 insert_tested_cols.append(str(column_name))
+    _log_step_end("prepare_runtime_variant_params", step_started_at)
 
     worker_started_at = datetime.now(timezone.utc)
     executed_variant_ddl = payload.variant_ddl
     try:
+        step_started_at = _log_step_start("create_variant_table")
         client.create_database_if_not_exists(payload.variant_database)
         client.drop_table_if_exists(
             payload.variant_database,
@@ -5268,6 +5374,7 @@ def run_variant_benchmark(
             payload.variant_database,
             payload.variant_table,
         )
+        _log_step_end("create_variant_table", step_started_at)
         source_table_ddl_for_insert = None
         if payload.source_benchmark and isinstance(payload.source_benchmark, dict):
             source_table_ddl_for_insert = payload.source_benchmark.get("source_table_ddl")
@@ -5275,6 +5382,7 @@ def run_variant_benchmark(
             source_table_ddl_for_insert
         )
 
+        step_started_at = _log_step_start("measure_insert")
         insert_stage_started_at = time.monotonic()
         insert_stats = _measure_insert(
             client,
@@ -5292,6 +5400,7 @@ def run_variant_benchmark(
             len(insert_stats.get("elapsed_ns", []) or []),
             time.monotonic() - insert_stage_started_at,
         )
+        _log_step_end("measure_insert", step_started_at)
 
         tested_insert_time_ms = [
             value / 1_000_000.0 for value in insert_stats["elapsed_ns"]
@@ -5311,6 +5420,7 @@ def run_variant_benchmark(
             measured_percentiles,
         )
 
+        step_started_at = _log_step_start("measure_select")
         select_stage_started_at = time.monotonic()
         select_stats = _measure_select_queries(
             client,
@@ -5322,6 +5432,7 @@ def run_variant_benchmark(
             len(select_stats.get("elapsed_ns", []) or []),
             time.monotonic() - select_stage_started_at,
         )
+        _log_step_end("measure_select", step_started_at)
         tested_select_per_query_metrics = _build_select_per_query_metrics(
             select_stats.get("per_query", []),
             measured_percentiles,
@@ -5352,14 +5463,17 @@ def run_variant_benchmark(
             measured_percentiles,
         )
 
+        step_started_at = _log_step_start("count_rows")
         tested_rows_count = client.count_rows(payload.variant_database, payload.variant_table)
         source_rows_count = int(source_metrics.get("total_n_rows_in_source_table", 0) or 0)
+        _log_step_end("count_rows", step_started_at)
         logger.info(
             "run_variant_benchmark: rows counted source_rows=%d, tested_rows=%d",
             source_rows_count,
             tested_rows_count,
         )
 
+        step_started_at = _log_step_start("collect_size_metrics")
         tested_columns_sizes = client.get_column_sizes(payload.variant_database, payload.variant_table)
         tested_indexes_sizes = client.get_index_sizes(payload.variant_database, payload.variant_table)
         tested_total_size_bytes = client.get_total_compressed_size_bytes(
@@ -5518,6 +5632,7 @@ def run_variant_benchmark(
             tested_total_size_bytes_with_indexes,
             tested_bytes_on_disk_sum,
         )
+        _log_step_end("collect_size_metrics", step_started_at)
         tested_size_with_indexes_json = _build_table_size_value_json(
             size_bytes=tested_total_size_bytes_with_indexes,
             size_bytes_readable=make_readable_bytes(tested_total_size_bytes_with_indexes),
@@ -5663,6 +5778,7 @@ def run_variant_benchmark(
             source_select_bytes_per_second_for_score = list(
                 source_select_bucket.get("bytes_per_second_percentiles", []) or []
             )
+        step_started_at = _log_step_start("compute_score")
         _, geomean_ratio_details = _compute_variant_ratio_details(
             source_insert_time_ms_measurements=source_insert_ms_for_score,
             tested_insert_time_ms_measurements=tested_insert_time_ms,
@@ -5827,7 +5943,9 @@ def run_variant_benchmark(
                 payload.variant_table,
                 force_score_to_minus_one_reason,
             )
+        _log_step_end("compute_score", step_started_at)
 
+        step_started_at = _log_step_start("persist_variant_result")
         execution_uuid = str(runtime_variant_params.get("execution_uuid") or "").strip()
         worker_finished_at = datetime.now(timezone.utc)
         result = BenchmarkVariantResult(
@@ -6086,6 +6204,7 @@ def run_variant_benchmark(
             ),
             result=result,
         )
+        _log_step_end("persist_variant_result", step_started_at)
         logger.info(
             "run_variant_benchmark: done benchmark_run_id=%d, benchmark_id=%s, mode=%s, variant=%s.%s, score=%s, quality=%s, elapsed_sec=%.3f",
             payload.benchmark_run_id,
@@ -6100,6 +6219,15 @@ def run_variant_benchmark(
 
         return result
     finally:
+        cleanup_started_at = time.monotonic()
+        logger.info(
+            "run_variant_benchmark: cleanup START (benchmark_run_id=%d, benchmark_id=%s, mode=%s, variant=%s.%s)",
+            payload.benchmark_run_id,
+            payload.benchmark_id,
+            payload.variant_mode,
+            payload.variant_database,
+            payload.variant_table,
+        )
         try:
             client.drop_table_if_exists(
                 payload.variant_database,
@@ -6114,6 +6242,15 @@ def run_variant_benchmark(
             )
         result_store.close()
         client.close()
+        logger.info(
+            "run_variant_benchmark: cleanup END (benchmark_run_id=%d, benchmark_id=%s, mode=%s, variant=%s.%s, elapsed_sec=%.3f)",
+            payload.benchmark_run_id,
+            payload.benchmark_id,
+            payload.variant_mode,
+            payload.variant_database,
+            payload.variant_table,
+            time.monotonic() - cleanup_started_at,
+        )
 
 
 def _store_failed_variant_result(
@@ -6337,6 +6474,17 @@ if app is not None:
         payload_ref: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Celery task: baseline benchmark исходной таблицы."""
+        request = getattr(source_benchmark_task, "request", None)
+        celery_task_id = str(getattr(request, "id", "") or "").strip() or None
+        celery_worker_hostname = str(getattr(request, "hostname", "") or "").strip() or None
+        payload_mode = "payload_ref" if payload is None and payload_ref is not None else "inline_payload"
+        logger.info(
+            "Celery worker: received source task "
+            "(task_id=%s, hostname=%s, payload_mode=%s)",
+            celery_task_id,
+            celery_worker_hostname,
+            payload_mode,
+        )
         if payload is None:
             if payload_ref is None:
                 raise ValueError("source_benchmark_task: требуется payload или payload_ref")
@@ -6346,13 +6494,26 @@ if app is not None:
             )
         typed_payload = SourceBenchmarkTaskPayload.model_validate(payload)
         logger.info(
-            "Celery worker: старт source task (benchmark_run_id=%d, benchmark_id=%s, table=%s.%s)",
+            "Celery worker: старт source task "
+            "(task_id=%s, benchmark_run_id=%d, benchmark_id=%s, table=%s.%s)",
+            celery_task_id,
             typed_payload.benchmark_run_id,
             typed_payload.benchmark_id,
             typed_payload.source_database,
             typed_payload.source_table,
         )
         result = run_source_benchmark(typed_payload)
+        result_score = getattr(result, "score", None)
+        result_quality = getattr(result, "measurement_quality_flag", None)
+        logger.info(
+            "Celery worker: source task завершена "
+            "(task_id=%s, benchmark_run_id=%d, benchmark_id=%s, score=%s, quality=%s)",
+            celery_task_id,
+            typed_payload.benchmark_run_id,
+            typed_payload.benchmark_id,
+            result_score,
+            result_quality,
+        )
         return result.model_dump(mode="json")
 
 
@@ -6362,6 +6523,19 @@ if app is not None:
         payload_ref: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Celery task: benchmark варианта таблицы + сохранение результата."""
+        request = getattr(variant_benchmark_task, "request", None)
+        request_task_id = str(getattr(request, "id", "") or "").strip() or None
+        request_worker_hostname = str(getattr(request, "hostname", "") or "").strip() or None
+        payload_mode = (
+            "payload_ref" if payload is None and payload_ref is not None else "inline_payload"
+        )
+        logger.info(
+            "Celery worker: received variant task "
+            "(task_id=%s, hostname=%s, payload_mode=%s)",
+            request_task_id,
+            request_worker_hostname,
+            payload_mode,
+        )
         resolved_payload: Optional[Dict[str, Any]] = payload
         if resolved_payload is None and payload_ref is not None:
             try:
@@ -6437,6 +6611,20 @@ if app is not None:
                 typed_payload,
                 celery_task_id=celery_task_id,
                 celery_worker_hostname=celery_worker_hostname,
+            )
+            result_score = getattr(result, "score", None)
+            result_quality = getattr(result, "measurement_quality_flag", None)
+            logger.info(
+                "Celery worker: variant task завершена "
+                "(task_id=%s, benchmark_run_id=%d, benchmark_id=%s, mode=%s, table=%s.%s, score=%s, quality=%s)",
+                celery_task_id or request_task_id,
+                typed_payload.benchmark_run_id,
+                typed_payload.benchmark_id,
+                typed_payload.variant_mode,
+                typed_payload.variant_database,
+                typed_payload.variant_table,
+                result_score,
+                result_quality,
             )
         except Exception as exc:
             # Важный guard: невалидный/ошибочный вариант считается пропущенным,

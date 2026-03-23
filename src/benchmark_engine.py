@@ -2163,7 +2163,7 @@ class BenchmarkRunner:
         Важно: runner не сохраняет результаты. Сохранение выполняет backend/воркер
         внутри execution adapter реализации.
         """
-        logger.debug(
+        logger.info(
             "BenchmarkRunner: dispatch variant job "
             "(run_id=%d, benchmark=%s, table=%s.%s, variant=%s, mode=%s, index=%d)",
             job.benchmark_run_id,

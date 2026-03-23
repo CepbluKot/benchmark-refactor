@@ -341,6 +341,7 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
             tuple[str, int, str, str, str],
             _ClickHouseTaskPayloadStore,
         ] = {}
+        self._variant_dispatch_count = 0
 
     @staticmethod
     def _compute_retry_delay_sec(attempt_no: int) -> float:
@@ -479,13 +480,41 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
         Если включён payload offload, в broker отправляется только `payload_ref`,
         а полный payload хранится в ClickHouse.
         """
+        log_fn = logger.info if payload_kind == "source" else logger.debug
+        try:
+            payload_size_bytes = len(
+                json.dumps(
+                    payload_data,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            )
+        except Exception:
+            payload_size_bytes = -1
         if not self._payload_store_enabled:
+            log_fn(
+                "CeleryClickHouseExecutionAdapter: используем inline payload "
+                "(kind=%s, payload_size_bytes=%s, payload_store_enabled=%s)",
+                payload_kind,
+                payload_size_bytes if payload_size_bytes >= 0 else "unknown",
+                self._payload_store_enabled,
+            )
             return {"payload": payload_data}
         try:
             payload_ref = self._store_payload_in_db(
                 payload_kind=payload_kind,
                 payload_data=payload_data,
                 storage_connection=storage_connection,
+            )
+            log_fn(
+                "CeleryClickHouseExecutionAdapter: payload offload сохранён "
+                "(kind=%s, payload_id=%s, payload_size_bytes=%s, storage=%s.%s)",
+                payload_kind,
+                payload_ref.payload_id,
+                payload_size_bytes if payload_size_bytes >= 0 else "unknown",
+                payload_ref.storage_database,
+                payload_ref.storage_table,
             )
             return {"payload_ref": payload_ref.model_dump(mode="json")}
         except Exception:
@@ -510,18 +539,37 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
         result_connection = self._resolve_result_connection(job.connection_id)
         source_payload = self._build_source_payload(job)
         source_payload_json = source_payload.model_dump(mode="json")
+        logger.info(
+            "CeleryClickHouseExecutionAdapter: prepare source payload "
+            "(run_id=%d, benchmark=%s, table=%s.%s, payload_store_enabled=%s, payload_store_strict=%s)",
+            job.benchmark_run_id,
+            job.benchmark_id,
+            job.source_database,
+            job.source_table,
+            self._payload_store_enabled,
+            self._payload_store_strict,
+        )
         source_task_kwargs = self._build_task_send_kwargs(
             payload_kind="source",
             payload_data=source_payload_json,
             storage_connection=result_connection,
         )
+        source_payload_mode = (
+            "payload_ref" if "payload_ref" in source_task_kwargs else "inline_payload"
+        )
+        celery_conf = getattr(self._celery_app, "conf", None)
+        queue_name = (
+            str(getattr(celery_conf, "task_default_queue", "") or "").strip() or "default"
+        )
         logger.info(
             "CeleryClickHouseExecutionAdapter: dispatch source benchmark "
-            "(run_id=%d, benchmark=%s, table=%s.%s)",
+            "(run_id=%d, benchmark=%s, table=%s.%s, payload_mode=%s, queue=%s)",
             job.benchmark_run_id,
             job.benchmark_id,
             job.source_database,
             job.source_table,
+            source_payload_mode,
+            queue_name,
         )
         source_task_id = f"source-{uuid.uuid4().hex}"
         deadline_ts = time.monotonic() + float(max(1.0, self._source_result_timeout_sec))
@@ -535,6 +583,12 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
                 expires=None,
                 ignore_result=False,
             ),
+        )
+        logger.info(
+            "CeleryClickHouseExecutionAdapter: source task отправлена "
+            "(task_id=%s, state=%s)",
+            source_task_id,
+            self._safe_async_state(async_result),
         )
 
         while True:
@@ -612,6 +666,22 @@ class CeleryClickHouseExecutionAdapter(BenchmarkExecutionAdapter):
             ),
         )
         self._register_dispatched_task(task_id=task_id)
+        self._variant_dispatch_count += 1
+        if self._variant_dispatch_count <= 5 or self._variant_dispatch_count % 50 == 0:
+            variant_payload_mode = (
+                "payload_ref" if "payload_ref" in variant_task_kwargs else "inline_payload"
+            )
+            logger.info(
+                "CeleryClickHouseExecutionAdapter: variant task отправлена "
+                "(count=%d, task_id=%s, benchmark=%s, mode=%s, table=%s.%s, payload_mode=%s)",
+                self._variant_dispatch_count,
+                task_id,
+                job.benchmark_id,
+                job.variant_meta.mode,
+                job.source_database,
+                job.source_table,
+                variant_payload_mode,
+            )
 
         return BenchmarkVariantResult(
             benchmark_run_id=job.benchmark_run_id,
