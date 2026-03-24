@@ -21,6 +21,8 @@ ORDER BY (user_id, event_time)
 class _FakeSettings:
     benchmark_ids = []
     benchmark_run_id = None
+    resume_incomplete_run = False
+    keep_alive_after_run = False
     test_database = "bench_tmp"
     result_connection_id = "prod_ch"
     result_database = "bench_results"

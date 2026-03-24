@@ -68,6 +68,37 @@ class _FailingProvider(_RecordingProvider):
         raise RuntimeError("provider failure")
 
 
+class _RecordingProviderWithRows(_RecordingProvider):
+    def __init__(
+        self,
+        tokens: Dict[str, Dict[str, str]] | None = None,
+    ) -> None:
+        super().__init__(tokens=tokens)
+        self.estimated_queries: List[str] = []
+
+    def estimate_query_result_rows(self, query: str) -> int:
+        self.estimated_queries.append(query)
+        normalized = query.lower()
+        if "nomatch" in normalized or "not like '%%'" in normalized:
+            return 0
+        if "like '%%'" in normalized:
+            return 10
+        return 1
+
+
+class _RecordingProviderWithStrictZeroRows(_RecordingProviderWithRows):
+    def estimate_query_result_rows(self, query: str) -> int:
+        self.estimated_queries.append(query)
+        normalized = query.lower()
+        if "`page_url`" in normalized:
+            return 0
+        if "nomatch" in normalized or "not like '%%'" in normalized:
+            return 0
+        if "like '%%'" in normalized:
+            return 10
+        return 1
+
+
 class QueryAutoLikeTests(unittest.TestCase):
     def test_generate_queries_appends_data_aware_like_pairs(self) -> None:
         table = TableDDL.from_ddl(_DDL)
@@ -157,6 +188,56 @@ class QueryAutoLikeTests(unittest.TestCase):
         )
         self.assertEqual(provider.columns_seen, ["country", "page_url"])
 
+    def test_query_plan_builder_reuses_cached_like_tokens_between_builds(self) -> None:
+        table = TableDDL.from_ddl(_DDL)
+        provider = _RecordingProvider(
+            tokens={
+                "page_url": {"hit_token": "/catalog", "miss_token": "bench_nomatch_page_url"},
+                "country": {"hit_token": "OTHER", "miss_token": "bench_nomatch_country"},
+            }
+        )
+        builder = QueryPlanBuilder()
+        config = QueriesConfig(
+            mode="auto",
+            auto_like_on_measured_columns=True,
+            auto_include_miss_queries=True,
+        )
+
+        first_plan = builder.build(
+            table,
+            config,
+            provider=provider,
+            source_database="analytics",
+            source_table="events",
+            measured_columns=["page_url", "country"],
+        )
+        self.assertEqual(provider.calls, 1)
+
+        second_plan = builder.build(
+            table,
+            config,
+            provider=provider,
+            source_database="analytics",
+            source_table="events",
+            measured_columns=["page_url"],
+        )
+
+        # Второй build не должен заново ходить в provider за тем же column token.
+        self.assertEqual(provider.calls, 1)
+        first_page_url_queries = [
+            query.query
+            for query in first_plan.test_queries
+            if "`page_url` LIKE" in query.query
+        ]
+        second_page_url_queries = [
+            query.query
+            for query in second_plan.test_queries
+            if "`page_url` LIKE" in query.query
+        ]
+        self.assertTrue(first_page_url_queries)
+        self.assertTrue(second_page_url_queries)
+        self.assertEqual(first_page_url_queries, second_page_url_queries)
+
     def test_query_plan_builder_replace_default_auto_queries_when_tokens_exist(self) -> None:
         table = TableDDL.from_ddl(_DDL)
         provider = _RecordingProvider(
@@ -202,6 +283,55 @@ class QueryAutoLikeTests(unittest.TestCase):
         sqls = [item.query for item in plan.test_queries]
         self.assertIn(manual_sql, sqls)
         self.assertEqual(len(sqls), 3)
+
+    def test_query_plan_builder_filters_auto_queries_with_zero_rows_when_provider_supports_estimate(
+        self,
+    ) -> None:
+        table = TableDDL.from_ddl(_DDL)
+        provider = _RecordingProviderWithRows(
+            tokens={"page_url": {"hit_token": "/catalog", "miss_token": "bench_nomatch_url"}}
+        )
+        plan = QueryPlanBuilder().build(
+            table,
+            QueriesConfig(
+                mode="auto",
+                auto_like_on_measured_columns=True,
+                auto_like_replace_default_auto_queries=True,
+                auto_include_miss_queries=True,
+            ),
+            provider=provider,
+            source_database="analytics",
+            source_table="events",
+            measured_columns=["page_url"],
+        )
+        sqls = [item.query for item in plan.test_queries]
+        self.assertTrue(sqls)
+        self.assertTrue(any("/catalog" in sql for sql in sqls))
+        self.assertTrue(all("bench_nomatch_url" not in sql for sql in sqls))
+        self.assertTrue(provider.estimated_queries)
+
+    def test_query_plan_builder_continues_when_measured_column_has_no_confirmed_non_empty_query(
+        self,
+    ) -> None:
+        table = TableDDL.from_ddl(_DDL)
+        provider = _RecordingProviderWithStrictZeroRows(
+            tokens={"page_url": {"hit_token": "/catalog", "miss_token": "bench_nomatch_url"}}
+        )
+        plan = QueryPlanBuilder().build(
+            table,
+            QueriesConfig(
+                mode="auto",
+                auto_like_on_measured_columns=True,
+                auto_like_replace_default_auto_queries=True,
+                auto_include_miss_queries=True,
+            ),
+            provider=provider,
+            source_database="analytics",
+            source_table="events",
+            measured_columns=["page_url"],
+        )
+        self.assertEqual(plan.test_queries, [])
+        self.assertTrue(provider.estimated_queries)
 
     def test_generate_queries_prefers_measured_columns_and_string_like(self) -> None:
         table = TableDDL.from_ddl(_DDL)

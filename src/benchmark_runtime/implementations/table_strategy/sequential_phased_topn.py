@@ -723,18 +723,21 @@ def _dispatch_stage_jobs(
     jobs: Sequence[VariantJob],
     stage_scope_name: str,
     stage_label: str,
-) -> None:
+) -> List[VariantJob]:
     """Диспачит jobs одной фазы и дожидается завершения batch."""
     _open_progress_scope_if_supported(
         runner=runner,
         scope_name=stage_scope_name,
     )
+    dispatched_jobs: list[VariantJob] = []
     for job in jobs:
-        runner._execute_and_store(job)
+        if runner._execute_and_store(job):
+            dispatched_jobs.append(job)
     _wait_for_dispatched_tasks_if_supported(
         runner=runner,
         stage_label=stage_label,
     )
+    return dispatched_jobs
 
 
 def _expected_execution_uuid_by_table(jobs: Sequence[VariantJob]) -> Dict[str, str]:
@@ -922,6 +925,66 @@ def _build_top_choice_maps(
     if limit <= 0 or not options_by_column:
         return []
 
+    def _choice_map_key(choice_map: Dict[str, Any]) -> str:
+        return repr(sorted(choice_map.items()))
+
+    def _inject_forced_top1_combination(
+        ranked_candidates: List[Tuple[float, Dict[str, Any]]],
+    ) -> List[Tuple[float, Dict[str, Any]]]:
+        """
+        Гарантирует наличие комбинации "top1 по каждой колонке" в финальном списке.
+
+        Это защищает pipeline от краевых случаев beam-like pruning при маленьком
+        `limit`: top1-per-column комбинация всегда должна быть прогнана.
+        """
+        forced_choice_map: Dict[str, Any] = {}
+        forced_total_score = 0.0
+        for column_name, options in options_by_column.items():
+            if not options:
+                continue
+            ranked_top1 = _dedupe_stage_options(
+                options,
+                limit=1,
+                prefer_higher_score=prefer_higher_score,
+            )
+            if not ranked_top1:
+                continue
+            top_score, top_payload = ranked_top1[0]
+            forced_choice_map[column_name] = top_payload
+            forced_total_score += float(top_score)
+        if not forced_choice_map:
+            return ranked_candidates
+
+        forced_key = _choice_map_key(forced_choice_map)
+        existing_keys = {_choice_map_key(choice_map) for _, choice_map in ranked_candidates}
+        if forced_key in existing_keys:
+            return ranked_candidates
+
+        if len(ranked_candidates) < limit:
+            ranked_candidates.append((forced_total_score, forced_choice_map))
+        elif ranked_candidates:
+            # Удерживаем размер beam, но гарантируем прогон forced-кандидата.
+            ranked_candidates[-1] = (forced_total_score, forced_choice_map)
+        else:
+            ranked_candidates = [(forced_total_score, forced_choice_map)]
+
+        ranked_candidates = sorted(
+            ranked_candidates,
+            key=lambda item: item[0],
+            reverse=prefer_higher_score,
+        )
+        deduped: List[Tuple[float, Dict[str, Any]]] = []
+        seen_keys: set[str] = set()
+        for score_value, choice_map in ranked_candidates:
+            map_key = _choice_map_key(choice_map)
+            if map_key in seen_keys:
+                continue
+            seen_keys.add(map_key)
+            deduped.append((score_value, choice_map))
+            if len(deduped) >= limit:
+                break
+        return deduped
+
     merged: List[Tuple[float, Dict[str, Any]]] = [(0.0, {})]
     for column_name, options in options_by_column.items():
         if not options:
@@ -941,7 +1004,7 @@ def _build_top_choice_maps(
             key=lambda item: item[0],
             reverse=prefer_higher_score,
         ):
-            map_key = repr(sorted(choice_map.items()))
+            map_key = _choice_map_key(choice_map)
             if map_key in seen_keys:
                 continue
             seen_keys.add(map_key)
@@ -951,6 +1014,7 @@ def _build_top_choice_maps(
         merged = deduped
         if not merged:
             break
+    merged = _inject_forced_top1_combination(list(merged[:limit]))
     return merged[:limit]
 
 
@@ -1555,7 +1619,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             order_jobs.append(job)
             order_job_ddls_by_table[job.variant_table] = variant_ddl.copy()
 
-        _dispatch_stage_jobs(
+        dispatched_order_jobs = _dispatch_stage_jobs(
             runner=runner,
             jobs=order_jobs,
             stage_scope_name=(
@@ -1575,7 +1639,9 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             source_table=table_plan.table,
             variant_mode="order_by",
             expected_variant_tables=[job.variant_table for job in order_jobs],
-            expected_execution_uuid_by_table=_expected_execution_uuid_by_table(order_jobs),
+            expected_execution_uuid_by_table=_expected_execution_uuid_by_table(
+                dispatched_order_jobs
+            ),
         )
         _finalize_stage_ranking_if_supported(
             store=store,
@@ -1720,7 +1786,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                     f"phase2 types: {table_plan.benchmark_id} "
                     f"{table_plan.database}.{table_plan.table} parent={parent.variant_table}"
                 )
-                _dispatch_stage_jobs(
+                dispatched_type_jobs = _dispatch_stage_jobs(
                     runner=runner,
                     jobs=jobs,
                     stage_scope_name=stage_scope,
@@ -1734,7 +1800,9 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                     source_table=table_plan.table,
                     variant_mode="types",
                     expected_variant_tables=[job.variant_table for job in jobs],
-                    expected_execution_uuid_by_table=_expected_execution_uuid_by_table(jobs),
+                    expected_execution_uuid_by_table=_expected_execution_uuid_by_table(
+                        dispatched_type_jobs
+                    ),
                 )
                 options_by_column: Dict[str, List[Tuple[float, _TypeColumnOption]]] = {}
                 for variant_table, summary in summaries.items():
@@ -1900,7 +1968,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                     f"phase3 codecs: {table_plan.benchmark_id} "
                     f"{table_plan.database}.{table_plan.table} parent={parent.variant_table}"
                 )
-                _dispatch_stage_jobs(
+                dispatched_codec_jobs = _dispatch_stage_jobs(
                     runner=runner,
                     jobs=jobs,
                     stage_scope_name=stage_scope,
@@ -1914,7 +1982,9 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                     source_table=table_plan.table,
                     variant_mode="codecs",
                     expected_variant_tables=[job.variant_table for job in jobs],
-                    expected_execution_uuid_by_table=_expected_execution_uuid_by_table(jobs),
+                    expected_execution_uuid_by_table=_expected_execution_uuid_by_table(
+                        dispatched_codec_jobs
+                    ),
                 )
                 options_by_column: Dict[str, List[Tuple[float, _CodecColumnOption]]] = {}
                 for variant_table, summary in summaries.items():
@@ -2139,7 +2209,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 f"phase4 index_granularity: {table_plan.benchmark_id} "
                 f"{table_plan.database}.{table_plan.table} parent={parent.variant_table}"
             )
-            _dispatch_stage_jobs(
+            dispatched_granularity_jobs = _dispatch_stage_jobs(
                 runner=runner,
                 jobs=jobs,
                 stage_scope_name=stage_scope,
@@ -2153,7 +2223,9 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                 source_table=table_plan.table,
                 variant_mode="index_granularity",
                 expected_variant_tables=[job.variant_table for job in jobs],
-                expected_execution_uuid_by_table=_expected_execution_uuid_by_table(jobs),
+                expected_execution_uuid_by_table=_expected_execution_uuid_by_table(
+                    dispatched_granularity_jobs
+                ),
             )
             branch_candidates: list[_PhaseCandidate] = []
             for variant_table, summary in summaries.items():
@@ -2346,7 +2418,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                         f"phase5 indexes: {table_plan.benchmark_id} "
                         f"{table_plan.database}.{table_plan.table} parent={parent.variant_table}"
                     )
-                    _dispatch_stage_jobs(
+                    dispatched_index_jobs = _dispatch_stage_jobs(
                         runner=runner,
                         jobs=jobs,
                         stage_scope_name=stage_scope,
@@ -2361,7 +2433,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
                         variant_mode="indexes",
                         expected_variant_tables=[job.variant_table for job in jobs],
                         expected_execution_uuid_by_table=_expected_execution_uuid_by_table(
-                            jobs
+                            dispatched_index_jobs
                         ),
                     )
                     for variant_table, summary in summaries.items():
@@ -2566,7 +2638,7 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             f"phase6 final: {table_plan.benchmark_id} "
             f"{table_plan.database}.{table_plan.table}"
         )
-        _dispatch_stage_jobs(
+        dispatched_final_jobs = _dispatch_stage_jobs(
             runner=runner,
             jobs=final_jobs,
             stage_scope_name=final_scope,
@@ -2580,7 +2652,9 @@ class SequentialPhasedTopNTableExecutionStrategy(TableExecutionStrategy):
             source_table=table_plan.table,
             variant_mode="final_validation",
             expected_variant_tables=[job.variant_table for job in final_jobs],
-            expected_execution_uuid_by_table=_expected_execution_uuid_by_table(final_jobs),
+            expected_execution_uuid_by_table=_expected_execution_uuid_by_table(
+                dispatched_final_jobs
+            ),
         )
         _finalize_stage_ranking_if_supported(
             store=store,

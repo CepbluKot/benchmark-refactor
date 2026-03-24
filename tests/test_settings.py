@@ -123,6 +123,24 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.resolved_phased_result_table, "phased_tbl")
         self.assertEqual(settings.resolved_phased_runs_table, "phased_runs")
 
+    def test_resume_incomplete_run_flag_is_parsed(self) -> None:
+        """Проверяет чтение BENCH_RESUME_INCOMPLETE_RUN как bool."""
+        settings = AppSettings(
+            _env_file=None,
+            **self._required_base_kwargs(),
+            resume_incomplete_run="1",
+        )
+        self.assertTrue(settings.resume_incomplete_run)
+
+    def test_keep_alive_after_run_flag_is_parsed(self) -> None:
+        """Проверяет чтение BENCH_KEEP_ALIVE_AFTER_RUN как bool."""
+        settings = AppSettings(
+            _env_file=None,
+            **self._required_base_kwargs(),
+            keep_alive_after_run="true",
+        )
+        self.assertTrue(settings.keep_alive_after_run)
+
 
 if __name__ == "__main__":
     unittest.main()

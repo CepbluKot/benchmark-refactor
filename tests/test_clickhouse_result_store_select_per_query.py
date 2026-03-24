@@ -465,6 +465,16 @@ class ClickHouseResultStorePerQuerySelectTests(unittest.TestCase):
         self.assertEqual(speedup_vs_source_per_query_json, speedup_per_query_json)
         self.assertIn("insert_main", tested_insert_metrics_json)
         self.assertIn("insert_main", source_insert_metrics_json)
+        self.assertIn("read_bytes_measurements", tested_insert_metrics_json["insert_main"])
+        self.assertIn("written_bytes_measurements", tested_insert_metrics_json["insert_main"])
+        self.assertIn(
+            "read_bytes_percentiles_speed_up_coefs",
+            tested_insert_metrics_json["insert_main"],
+        )
+        self.assertIn(
+            "written_bytes_percentiles_speed_up_coefs",
+            tested_insert_metrics_json["insert_main"],
+        )
         self.assertEqual(
             tested_per_query_json["query_0"]["elapsed_ms_measurements"],
             [10, 20],

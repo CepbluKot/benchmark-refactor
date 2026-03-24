@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.benchmark_engine import (
@@ -421,11 +422,9 @@ def run_from_settings() -> int:
         create_legacy_table=create_legacy_table,
         create_table_if_missing=True,
     )
-    _log_build_metadata(
-        _resolve_current_benchmark_run_id(
-            requested_run_id=app_settings.benchmark_run_id,
-            result_store=result_store,
-        )
+    logger.info(
+        "Resume policy: BENCH_RESUME_INCOMPLETE_RUN=%s",
+        app_settings.resume_incomplete_run,
     )
 
     connections_by_id = {connection.id: connection for connection in config.connections}
@@ -463,6 +462,7 @@ def run_from_settings() -> int:
                     getattr(result_store, "max_benchmark_run_id", lambda: 0)() or 0
                 )
             ),
+            resume_incomplete_run=app_settings.resume_incomplete_run,
         )
 
         run_id = runner.run(
@@ -483,6 +483,14 @@ def main() -> None:
     logger.info("Старт benchmark launcher (log_level=%s)", app_settings.log_level)
     run_id = run_from_settings()
     print(f"Benchmark run completed. benchmark_run_id={run_id}")
+    if app_settings.keep_alive_after_run:
+        logger.info(
+            "BENCH_KEEP_ALIVE_AFTER_RUN включен: процесс остаётся в idle-состоянии "
+            "после завершения benchmark run (run_id=%d)",
+            run_id,
+        )
+        while True:
+            time.sleep(3600.0)
 
 
 if __name__ == "__main__":

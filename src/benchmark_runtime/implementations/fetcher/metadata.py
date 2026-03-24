@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from src.clickhouse_ddl import TableDDL
 
@@ -66,3 +66,21 @@ class FetcherMetadataProvider(MetadataProvider):
             table,
             columns,
         )
+
+    def estimate_query_result_rows(self, query: str) -> Optional[int]:
+        run_query_method = getattr(self._fetcher, "run_query", None)
+        if callable(run_query_method):
+            try:
+                result = run_query_method(query)
+                return int(getattr(result, "result_rows", 0) or 0)
+            except Exception:
+                return None
+
+        execute_method = getattr(self._fetcher, "_execute", None)
+        if callable(execute_method):
+            try:
+                rows = execute_method(query)
+                return len(list(rows or []))
+            except Exception:
+                return None
+        return None

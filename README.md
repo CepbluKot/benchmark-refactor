@@ -228,6 +228,8 @@ JSON-секции или `benchmark.project.json`.
 - merge в full-table кандидаты делается на `index_granularity` и `final_validation`;
 - в `indexes` тестируются только колонки, которые реально встречаются в `WHERE`;
 - для конкретной колонки на `indexes` используются только запросы, где она есть в `WHERE`;
+- в `final_validation` гарантированно прогоняется комбинация “top-1 по каждой колонке”
+  (даже если beam-limit маленький);
 - после merge в `final_validation` может запускаться post-merge local search
   (замена одной колонки на top-2/top-3 и т.д.).
 `result_store` в `BenchmarkRunner` теперь опционален, но для top-N стратегий обязателен
@@ -558,6 +560,8 @@ BENCH_RESULT_STORE_REDIS_URL=redis://redis:6379/0
 BENCH_RESULT_STORE_REDIS_LOCK_PREFIX=bench_result_store_lock
 BENCH_RESULT_STORE_REDIS_LOCK_TTL_SEC=300
 BENCH_RESULT_STORE_REDIS_LOCK_BLOCKING_TIMEOUT_SEC=60
+BENCH_RESUME_INCOMPLETE_RUN=1
+BENCH_KEEP_ALIVE_AFTER_RUN=1
 ```
 
 Если `BENCH_RESULT_CONNECTION_ID` не задан, берётся первый connection из конфига.
@@ -566,6 +570,16 @@ BENCH_RESULT_STORE_REDIS_LOCK_BLOCKING_TIMEOUT_SEC=60
 Если оба URL не Redis/пустые, используется fallback `redis://localhost:6379/0`.
 Если по итоговому URL Redis недоступен, запуск завершится ошибкой.
 Пакет `redis` обязателен (входит в `requirements.txt`); без него store не стартует.
+
+`BENCH_RESUME_INCOMPLETE_RUN`:
+- `1/true/on` — при старте launcher проверит последний `benchmark_run_id` и, если он не завершён
+  (для phased-стратегии), продолжит его вместо создания нового;
+- `0/false/off` — игнорирует незавершённый прошлый run и всегда стартует новый.
+
+`BENCH_KEEP_ALIVE_AFTER_RUN`:
+- `1/true/on` — после завершения benchmark-run `main.py` не выходит, а остаётся в idle-loop
+  (полезно для окружений с авто-restart контейнера при завершении процесса);
+- `0/false/off` — стандартное поведение: процесс завершается после run.
 
 3. Запусти:
 
@@ -994,9 +1008,11 @@ print(run_id)
 - В `mode=auto` генератор теперь строит one-column запросы по измеряемым колонкам
   (по тем, что реально участвуют в type/codec/index фазах).
   Для строковых колонок в автогенерации всегда используется `LIKE '%...%'`.
-  Для каждой измеряемой колонки генерируются 2 сценария:
-  - `hit` (ожидаем, что запрос вернёт строки);
-  - `miss` (ожидаем, что запрос не вернёт строк).
+  По умолчанию генерируются `hit`-сценарии; `miss` добавляются только если
+  включён `queries.auto_include_miss_queries=true` (default: `false`).
+- Если metadata provider поддерживает `estimate_query_result_rows`,
+  auto-запросы фильтруются до подтверждённо non-empty (`rows > 0`).
+  Для колонки без подтверждённого non-empty запроса пишется warning, но run не падает.
 - `queries.auto_like_replace_default_auto_queries`: если `true`, оставляет
   только data-aware `LIKE` авто-запросы (без базовых auto-запросов).
 - `queries.auto_like_sample_rows_per_column`: сколько строк читать для подбора hit-token.
@@ -1031,7 +1047,7 @@ print(run_id)
   `BENCH_SELECT_MAX_EXECUTION_TIME_SEC` (по умолчанию 30 секунд).
 - Метрики SELECT по умолчанию берутся из summary clickhouse-connect.
   При необходимости можно переключиться на `system.query_log`
-  (`BENCH_SELECT_USE_QUERY_LOG=1`).
+  (`BENCH_SELECT_USE_QUERY_LOG=1`); в summary-режиме query_log используется только как fallback.
 - Пересчёт live-size исходной таблицы для каждого варианта отключается
   через `BENCH_DISABLE_LIVE_SOURCE_SIZE_RECALC=1` (используются baseline-метрики).
 - Для INSERT benchmark используется детерминированный порядок чтения source-данных:

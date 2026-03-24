@@ -1342,6 +1342,71 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
             table_name=self._phased_table,
         )
 
+    def list_variant_tables(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        variant_modes: Optional[Sequence[str]] = None,
+    ) -> List[str]:
+        """Возвращает dedup-список `variant_table` для run/table scope."""
+        result: list[str] = []
+        seen: set[str] = set()
+        table_names: list[str] = [self._phased_table]
+        if self._legacy_table != self._phased_table and self._create_legacy_table:
+            table_names.append(self._legacy_table)
+
+        for table_name in table_names:
+            rows = self._list_variant_table_rows_from_table(
+                benchmark_run_id=benchmark_run_id,
+                benchmark_id=benchmark_id,
+                source_database=source_database,
+                source_table=source_table,
+                variant_modes=variant_modes,
+                table_name=table_name,
+            )
+            for row in rows:
+                if not row:
+                    continue
+                table_value = str(row[0] or "").strip()
+                if not table_value or table_value in seen:
+                    continue
+                seen.add(table_value)
+                result.append(table_value)
+        return result
+
+    def is_benchmark_run_table_finished(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+    ) -> bool:
+        """Проверяет, что table-level запись в `benchmark_runs` имеет `finished_at`."""
+        run_record_id = self._build_run_record_id(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_id=benchmark_id,
+            source_database=source_database,
+            source_table=source_table,
+        )
+        rows = self._execute(
+            f"""
+            SELECT finished_at
+            FROM `{self._database}`.`{self._phased_runs_table}`
+            WHERE id = %(id)s
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            {"id": run_record_id},
+        )
+        if not rows:
+            return False
+        finished_at = rows[0][0] if rows[0] else None
+        return finished_at is not None
+
     def _list_variant_summaries_from_table(
         self,
         *,
@@ -1446,6 +1511,56 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 )
             )
         return summaries
+
+    def _list_variant_table_rows_from_table(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        variant_modes: Optional[Sequence[str]],
+        table_name: str,
+    ) -> List[tuple]:
+        """Читает lightweight rows `variant_table` с optional mode-фильтром."""
+        mode_filter = {
+            str(mode).strip()
+            for mode in (variant_modes or [])
+            if str(mode).strip()
+        }
+        params: Dict[str, Any] = {
+            "benchmark_run_id": benchmark_run_id,
+            "benchmark_id": benchmark_id,
+            "source_database": source_database,
+            "source_table": source_table,
+        }
+        try:
+            rows = self._execute(
+                f"""
+                SELECT variant_table, variant_mode
+                FROM `{self._database}`.`{table_name}`
+                WHERE benchmark_run_id = %(benchmark_run_id)s
+                  AND benchmark_id = %(benchmark_id)s
+                  AND source_db_name = %(source_database)s
+                  AND source_table_name = %(source_table)s
+                ORDER BY finished_at DESC, benchmark_started_at DESC, id DESC
+                """,
+                params,
+            )
+        except Exception as exc:
+            if self._is_missing_ch_object_error(exc):
+                return []
+            raise
+        if not mode_filter:
+            return rows
+        filtered_rows: list[tuple] = []
+        for row in rows:
+            if not row or len(row) < 2:
+                continue
+            mode_value = str(row[1] or "").strip()
+            if mode_value in mode_filter:
+                filtered_rows.append((row[0],))
+        return filtered_rows
 
     def get_top_variants(
         self,
@@ -1687,6 +1802,36 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 bytes_per_second_percentiles_readable=(
                     result.tested_table_insert_bytes_per_second_measurements_percentiles_readable
                 ),
+                read_bytes_measurements=result.tested_table_insert_read_bytes_measurements,
+                read_bytes_measurements_readable=[
+                    make_readable_bytes(value)
+                    for value in result.tested_table_insert_read_bytes_measurements
+                ],
+                read_bytes_percentiles=(
+                    result.tested_table_insert_read_bytes_measurements_percentiles
+                ),
+                read_bytes_percentiles_readable=[
+                    make_readable_bytes(value)
+                    for value in result.tested_table_insert_read_bytes_measurements_percentiles
+                ],
+                read_bytes_speedup_percentiles=(
+                    result.tested_table_insert_read_bytes_measurements_percentiles_speed_up_coefs
+                ),
+                written_bytes_measurements=result.tested_table_insert_written_bytes_measurements,
+                written_bytes_measurements_readable=[
+                    make_readable_bytes(value)
+                    for value in result.tested_table_insert_written_bytes_measurements
+                ],
+                written_bytes_percentiles=(
+                    result.tested_table_insert_written_bytes_measurements_percentiles
+                ),
+                written_bytes_percentiles_readable=[
+                    make_readable_bytes(value)
+                    for value in result.tested_table_insert_written_bytes_measurements_percentiles
+                ],
+                written_bytes_speedup_percentiles=(
+                    result.tested_table_insert_written_bytes_measurements_percentiles_speed_up_coefs
+                ),
             )
         )
         source_insert_metrics_json = (
@@ -1713,6 +1858,32 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 bytes_per_second_percentiles_readable=(
                     result.source_table_insert_bytes_per_second_measurements_percentiles_readable
                 ),
+                read_bytes_measurements=result.source_table_insert_read_bytes_measurements,
+                read_bytes_measurements_readable=[
+                    make_readable_bytes(value)
+                    for value in result.source_table_insert_read_bytes_measurements
+                ],
+                read_bytes_percentiles=(
+                    result.source_table_insert_read_bytes_measurements_percentiles
+                ),
+                read_bytes_percentiles_readable=[
+                    make_readable_bytes(value)
+                    for value in result.source_table_insert_read_bytes_measurements_percentiles
+                ],
+                read_bytes_speedup_percentiles=[],
+                written_bytes_measurements=result.source_table_insert_written_bytes_measurements,
+                written_bytes_measurements_readable=[
+                    make_readable_bytes(value)
+                    for value in result.source_table_insert_written_bytes_measurements
+                ],
+                written_bytes_percentiles=(
+                    result.source_table_insert_written_bytes_measurements_percentiles
+                ),
+                written_bytes_percentiles_readable=[
+                    make_readable_bytes(value)
+                    for value in result.source_table_insert_written_bytes_measurements_percentiles
+                ],
+                written_bytes_speedup_percentiles=[],
             )
         )
         tested_select_metrics_json = self._to_query_keyed_json_map(
@@ -2251,6 +2422,16 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
         bytes_per_second_measurements_readable: List[str],
         bytes_per_second_percentiles: List[float],
         bytes_per_second_percentiles_readable: List[str],
+        read_bytes_measurements: List[float],
+        read_bytes_measurements_readable: List[str],
+        read_bytes_percentiles: List[float],
+        read_bytes_percentiles_readable: List[str],
+        read_bytes_speedup_percentiles: List[float],
+        written_bytes_measurements: List[float],
+        written_bytes_measurements_readable: List[str],
+        written_bytes_percentiles: List[float],
+        written_bytes_percentiles_readable: List[str],
+        written_bytes_speedup_percentiles: List[float],
     ) -> Optional[str]:
         """Собирает компактный JSON-снимок insert-метрик."""
         payload = {
@@ -2267,6 +2448,20 @@ class ClickHouseBenchmarkResultStore(BenchmarkResultStore):
                 "bytes_per_second_percentiles": list(bytes_per_second_percentiles),
                 "bytes_per_second_percentiles_readable": list(
                     bytes_per_second_percentiles_readable
+                ),
+                "read_bytes_measurements": list(read_bytes_measurements),
+                "read_bytes_measurements_readable": list(read_bytes_measurements_readable),
+                "read_bytes_percentiles": list(read_bytes_percentiles),
+                "read_bytes_percentiles_readable": list(read_bytes_percentiles_readable),
+                "read_bytes_percentiles_speed_up_coefs": list(read_bytes_speedup_percentiles),
+                "written_bytes_measurements": list(written_bytes_measurements),
+                "written_bytes_measurements_readable": list(written_bytes_measurements_readable),
+                "written_bytes_percentiles": list(written_bytes_percentiles),
+                "written_bytes_percentiles_readable": list(
+                    written_bytes_percentiles_readable
+                ),
+                "written_bytes_percentiles_speed_up_coefs": list(
+                    written_bytes_speedup_percentiles
                 ),
             }
         }

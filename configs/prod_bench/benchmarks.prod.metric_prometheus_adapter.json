@@ -158,12 +158,13 @@
           "queries": {
             "mode": "auto",
             "auto_like_on_measured_columns": true,
+            "auto_like_replace_default_auto_queries": true,
             "auto_like_sample_rows_per_column": 20,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
             "auto_select_limit": 10,
             "auto_select_operations_count": 5,
-            "auto_include_miss_queries": true
+            "auto_include_miss_queries": false
           },
           "rules": {
             "column_rules": [
@@ -306,13 +307,13 @@
               }
             ]
           }
-        }
-        ,
+        },
         {
           "database": "raw_lm",
           "table": "log_fluentbit_minio_s3",
           "order_by_first": "timestamp",
           "order_by_candidates": [
+            "time",
             "event",
             "trigger",
             "requestPath",
@@ -329,12 +330,13 @@
           "queries": {
             "mode": "auto",
             "auto_like_on_measured_columns": true,
+            "auto_like_replace_default_auto_queries": true,
             "auto_like_sample_rows_per_column": 20,
             "auto_like_min_token_length": 3,
             "auto_like_max_token_length": 24,
             "auto_select_limit": 10,
             "auto_select_operations_count": 5,
-            "auto_include_miss_queries": true
+            "auto_include_miss_queries": false
           },
           "rules": {
             "column_rules": [
@@ -482,12 +484,13 @@
       "queries": {
         "mode": "auto",
         "auto_like_on_measured_columns": true,
+        "auto_like_replace_default_auto_queries": true,
         "auto_like_sample_rows_per_column": 20,
         "auto_like_min_token_length": 3,
         "auto_like_max_token_length": 24,
         "auto_select_limit": 10,
-            "auto_select_operations_count": 5,
-            "auto_include_miss_queries": true
+        "auto_select_operations_count": 5,
+        "auto_include_miss_queries": false
       }
     }
   ]

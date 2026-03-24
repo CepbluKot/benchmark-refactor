@@ -150,6 +150,58 @@ class BenchmarkResultStore(ABC):
         """
         return None
 
+    def is_benchmark_run_table_finished(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+    ) -> bool:
+        """
+        Возвращает `True`, если table-level benchmark run уже завершён.
+
+        Базовая реализация — `False` (resume недоступен).
+        """
+        del benchmark_run_id, benchmark_id, source_database, source_table
+        return False
+
+    def list_variant_tables(
+        self,
+        *,
+        benchmark_run_id: int,
+        benchmark_id: str,
+        source_database: str,
+        source_table: str,
+        variant_modes: Optional[Sequence[str]] = None,
+    ) -> List[str]:
+        """
+        Возвращает список уже сохранённых `variant_table` для run/table scope.
+
+        Базовая реализация строит список из `list_variant_summaries()`, если он
+        поддерживается, иначе возвращает пустой список.
+        """
+        try:
+            summaries = self.list_variant_summaries(
+                benchmark_run_id=benchmark_run_id,
+                benchmark_id=benchmark_id,
+                source_database=source_database,
+                source_table=source_table,
+                variant_modes=variant_modes,
+            )
+        except NotImplementedError:
+            return []
+
+        result: List[str] = []
+        seen: set[str] = set()
+        for summary in summaries:
+            table_name = str(summary.variant_table or "").strip()
+            if not table_name or table_name in seen:
+                continue
+            seen.add(table_name)
+            result.append(table_name)
+        return result
+
     def recalculate_custom_score_for_benchmark(
         self,
         *,

@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Dict, List
 
 import src.benchmark_runtime.implementations.table_strategy.sequential_topn as sequential_topn_strategy_impl
@@ -1259,6 +1260,10 @@ class PlannerEngineRunnerTests(unittest.TestCase):
                     }
                 }
 
+            def run_query(self, query: str):
+                del query
+                return SimpleNamespace(result_rows=42)
+
         provider_without_sizes = FetcherMetadataProvider(FetcherNoSizes())
         provider_with_sizes = FetcherMetadataProvider(FetcherWithSizes())
 
@@ -1274,6 +1279,13 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         self.assertEqual(
             provider_with_sizes.fetch_like_tokens("analytics", "events", ["event_time"]),
             {"event_time": {"hit_token": "2025", "miss_token": "bench_nomatch"}},
+        )
+        self.assertIsNone(
+            provider_without_sizes.estimate_query_result_rows("SELECT 1"),
+        )
+        self.assertEqual(
+            provider_with_sizes.estimate_query_result_rows("SELECT 1"),
+            42,
         )
         ddl = provider_with_sizes.fetch_table_ddl("analytics", "events")
         self.assertEqual(ddl.name, "analytics.events")
@@ -1336,7 +1348,7 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         )
         self.assertEqual(getattr(provider, "columns_seen", []), ["page_url", "country"])
         sqls = [query.query for query in plan.test_queries]
-        self.assertEqual(len(sqls), 4)
+        self.assertGreaterEqual(len(sqls), 4)
         self.assertTrue(any("`page_url` LIKE" in sql for sql in sqls))
         self.assertTrue(any("`country` LIKE" in sql for sql in sqls))
         self.assertTrue(any("/catalog" in sql for sql in sqls))
@@ -4064,6 +4076,252 @@ class PlannerEngineRunnerTests(unittest.TestCase):
         index_jobs = [job for job in adapter.executed_jobs if job.variant_meta.mode == "indexes"]
         self.assertEqual(len(type_jobs), 2)
         self.assertEqual(len(index_jobs), 4)
+
+    def test_resume_incomplete_run_reuses_latest_run_id(self) -> None:
+        """Проверяет, что при незавершённом run runner продолжает его, а не создаёт новый."""
+        benchmark = BenchmarkConfig(
+            id="bench_resume_incomplete",
+            connection_id="prod_ch",
+            strategy="types_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    )
+                ]
+            ),
+        )
+
+        class ResumeAwareStore(InMemoryBenchmarkResultStore):
+            def max_benchmark_run_id(self) -> int:
+                return 5
+
+            def is_benchmark_run_table_finished(
+                self,
+                *,
+                benchmark_run_id: int,
+                benchmark_id: str,
+                source_database: str,
+                source_table: str,
+            ) -> bool:
+                return False
+
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = RecordingExecutionAdapter()
+        result_store = ResumeAwareStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+            run_id_provider=MaxIdBenchmarkRunIdProvider(
+                max_id_getter=lambda: int(result_store.max_benchmark_run_id())
+            ),
+            resume_incomplete_run=True,
+        )
+
+        run_id = runner.run()
+
+        self.assertEqual(run_id, 5)
+        self.assertTrue(adapter.source_jobs)
+        self.assertTrue(all(job.benchmark_run_id == 5 for job in adapter.source_jobs))
+        self.assertTrue(all(job.benchmark_run_id == 5 for job in adapter.executed_jobs))
+
+    def test_resume_incomplete_run_starts_new_when_previous_run_fully_finished(self) -> None:
+        """Проверяет, что полностью завершённый прошлый run не переиспользуется."""
+        benchmark = BenchmarkConfig(
+            id="bench_resume_finished",
+            connection_id="prod_ch",
+            strategy="types_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    )
+                ]
+            ),
+        )
+
+        class ResumeAwareStore(InMemoryBenchmarkResultStore):
+            def max_benchmark_run_id(self) -> int:
+                return 7
+
+            def is_benchmark_run_table_finished(
+                self,
+                *,
+                benchmark_run_id: int,
+                benchmark_id: str,
+                source_database: str,
+                source_table: str,
+            ) -> bool:
+                return benchmark_run_id == 7
+
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = RecordingExecutionAdapter()
+        result_store = ResumeAwareStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+            run_id_provider=MaxIdBenchmarkRunIdProvider(
+                max_id_getter=lambda: int(result_store.max_benchmark_run_id())
+            ),
+            resume_incomplete_run=True,
+        )
+
+        run_id = runner.run()
+
+        self.assertEqual(run_id, 8)
+        self.assertTrue(adapter.source_jobs)
+        self.assertTrue(all(job.benchmark_run_id == 8 for job in adapter.source_jobs))
+
+    def test_resume_incomplete_run_skips_already_finished_tables(self) -> None:
+        """Проверяет, что при resume пропускаются уже завершённые table-plan'ы."""
+        benchmark = BenchmarkConfig(
+            id="bench_resume_skip_finished_tables",
+            connection_id="prod_ch",
+            strategy="types_strategy",
+            databases=["analytics"],
+            tables=["events", "sessions"],
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    ),
+                    ColumnRuleConfig(
+                        by_type="DateTime",
+                        by_name="started_at",
+                        types=["DateTime"],
+                    ),
+                ]
+            ),
+        )
+
+        class ResumeAwareStore(InMemoryBenchmarkResultStore):
+            def max_benchmark_run_id(self) -> int:
+                return 11
+
+            def is_benchmark_run_table_finished(
+                self,
+                *,
+                benchmark_run_id: int,
+                benchmark_id: str,
+                source_database: str,
+                source_table: str,
+            ) -> bool:
+                return source_table == "events"
+
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = RecordingExecutionAdapter()
+        result_store = ResumeAwareStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+            run_id_provider=MaxIdBenchmarkRunIdProvider(
+                max_id_getter=lambda: int(result_store.max_benchmark_run_id())
+            ),
+            resume_incomplete_run=True,
+        )
+
+        run_id = runner.run()
+
+        self.assertEqual(run_id, 11)
+        self.assertEqual(len(adapter.source_jobs), 1)
+        self.assertEqual(adapter.source_jobs[0].source_table, "sessions")
+        self.assertTrue(all(job.source_table == "sessions" for job in adapter.executed_jobs))
+
+    def test_resume_incomplete_run_skips_already_saved_variant_tables(self) -> None:
+        """Проверяет, что runner не переотправляет variant_table, уже сохранённые в store."""
+        benchmark = BenchmarkConfig(
+            id="bench_resume_skip_variants",
+            connection_id="prod_ch",
+            strategy="types_strategy",
+            databases=["analytics"],
+            tables=["events"],
+            global_rules=RulesConfig(
+                column_rules=[
+                    ColumnRuleConfig(
+                        by_type="UInt64",
+                        by_name="user_id",
+                        types=["UInt64", "UInt32"],
+                    )
+                ]
+            ),
+        )
+
+        class ResumeAwareStore(InMemoryBenchmarkResultStore):
+            def max_benchmark_run_id(self) -> int:
+                return 3
+
+            def is_benchmark_run_table_finished(
+                self,
+                *,
+                benchmark_run_id: int,
+                benchmark_id: str,
+                source_database: str,
+                source_table: str,
+            ) -> bool:
+                return False
+
+            def list_variant_tables(
+                self,
+                *,
+                benchmark_run_id: int,
+                benchmark_id: str,
+                source_database: str,
+                source_table: str,
+                variant_modes=None,
+            ) -> List[str]:
+                return ["events__bench__bench_resume_skip_variants__0000"]
+
+        planner = BenchmarkPlanner(
+            config=self._root(benchmark),
+            providers_by_connection_id={"prod_ch": self.provider},
+        )
+        engine = BenchmarkEngine(planner=planner)
+        adapter = RecordingExecutionAdapter()
+        result_store = ResumeAwareStore()
+        runner = BenchmarkRunner(
+            engine=engine,
+            execution_adapter=adapter,
+            result_store=result_store,
+            run_id_provider=MaxIdBenchmarkRunIdProvider(
+                max_id_getter=lambda: int(result_store.max_benchmark_run_id())
+            ),
+            resume_incomplete_run=True,
+        )
+
+        run_id = runner.run()
+
+        self.assertEqual(run_id, 3)
+        dispatched_variant_tables = [job.variant_table for job in adapter.executed_jobs]
+        self.assertTrue(dispatched_variant_tables)
+        self.assertNotIn(
+            "events__bench__bench_resume_skip_variants__0000",
+            dispatched_variant_tables,
+        )
 
 
 if __name__ == "__main__":

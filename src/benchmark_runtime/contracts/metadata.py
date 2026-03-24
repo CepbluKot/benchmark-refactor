@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from src.clickhouse_ddl import TableDDL
 
@@ -71,3 +71,12 @@ class MetadataProvider(ABC):
           }
         """
         return {}
+
+    def estimate_query_result_rows(self, query: str) -> Optional[int]:
+        """
+        Returns optional estimated number of result rows for a read-only SQL query.
+
+        Used by query-plan builder to keep only auto-queries that are known to
+        return at least one row on source data.
+        """
+        return None

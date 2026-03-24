@@ -424,16 +424,136 @@ class ClickHouseCeleryTasksMetricsTests(unittest.TestCase):
         self.assertEqual(len(speedup), 1)
         self.assertEqual(speedup[0]["elapsed_ms_percentiles_speed_up_coefs"], [2.0, 2.0])
         # first percentile: 0/0 -> neutral ratio
-        # second percentile: tested=0, source>0 -> fallback to elapsed ratio
-        self.assertEqual(speedup[0]["read_bytes_percentiles_speed_up_coefs"], [1.0, 2.0])
+        # second percentile: tested=0, source>0 -> boosted ratio (>= time fallback).
+        self.assertEqual(speedup[0]["read_bytes_percentiles_speed_up_coefs"], [1.0, 5.0])
         self.assertEqual(
             speedup[0]["read_bytes_percentiles_speed_up_modes"],
-            ["zero_both", "fallback_time"],
+            ["zero_both", "tested_zero_boost"],
         )
         self.assertEqual(
             speedup[0]["read_bytes_percentiles_speed_up_mode_counts"],
-            {"zero_both": 1, "fallback_time": 1},
+            {"zero_both": 1, "tested_zero_boost": 1},
         )
+
+    def test_compute_select_time_speedup_by_query_matches_by_signature_when_ids_differ(
+        self,
+    ) -> None:
+        source_per_query = [
+            {
+                "query_index": 0,
+                "query_id": "source_hit",
+                "query_type": "hit",
+                "query_column": "message",
+                "query": (
+                    "SELECT * FROM `benchmark_tmp`.`events__source_baseline__001` "
+                    "WHERE `message` LIKE concat('%', 'retrieving', '%') LIMIT 10"
+                ),
+                "elapsed_ms_percentiles": [100.0, 200.0],
+                "read_bytes_percentiles": [1_000.0, 2_000.0],
+            },
+            {
+                "query_index": 1,
+                "query_id": "source_miss",
+                "query_type": "miss",
+                "query_column": "message",
+                "query": (
+                    "SELECT * FROM `benchmark_tmp`.`events__source_baseline__001` "
+                    "WHERE `message` LIKE concat('%', 'bench_nomatch_token', '%') LIMIT 10"
+                ),
+                "elapsed_ms_percentiles": [300.0, 600.0],
+                "read_bytes_percentiles": [3_000.0, 6_000.0],
+            },
+        ]
+        tested_per_query = [
+            {
+                "query_index": 0,
+                "query_id": "auto_query_0",
+                "query_type": "hit",
+                "query_column": "message",
+                "query": (
+                    "SELECT * FROM `benchmark_tmp`.`events__bench__bench_a__0042` "
+                    "WHERE `message` LIKE concat('%', 'retrieving', '%') LIMIT 10"
+                ),
+                "elapsed_ms_percentiles": [50.0, 100.0],
+                "read_bytes_percentiles": [500.0, 1_000.0],
+            },
+            {
+                "query_index": 1,
+                "query_id": "auto_query_1",
+                "query_type": "miss",
+                "query_column": "message",
+                "query": (
+                    "SELECT * FROM `benchmark_tmp`.`events__bench__bench_a__0042` "
+                    "WHERE `message` LIKE concat('%', 'bench_nomatch_token', '%') LIMIT 10"
+                ),
+                "elapsed_ms_percentiles": [100.0, 200.0],
+                "read_bytes_percentiles": [1_000.0, 2_000.0],
+            },
+        ]
+
+        speedup = _compute_select_time_speedup_by_query(source_per_query, tested_per_query)
+
+        self.assertEqual(len(speedup), 2)
+        self.assertEqual(speedup[0]["source_match_mode"], "query_signature")
+        self.assertEqual(speedup[1]["source_match_mode"], "query_signature")
+        self.assertEqual(speedup[0]["source_query_id"], "source_hit")
+        self.assertEqual(speedup[1]["source_query_id"], "source_miss")
+        self.assertEqual(speedup[0]["elapsed_ms_percentiles_speed_up_coefs"], [2.0, 2.0])
+        self.assertEqual(speedup[1]["elapsed_ms_percentiles_speed_up_coefs"], [3.0, 3.0])
+        self.assertEqual(speedup[0]["read_bytes_percentiles_speed_up_coefs"], [2.0, 2.0])
+        self.assertEqual(speedup[1]["read_bytes_percentiles_speed_up_coefs"], [3.0, 3.0])
+
+    def test_compute_select_time_speedup_by_query_ignores_conflicting_query_id_when_sql_differs(
+        self,
+    ) -> None:
+        source_per_query = [
+            {
+                "query_index": 0,
+                "query_id": "auto_query_0",
+                "query_type": "hit",
+                "query_column": "country",
+                "query": (
+                    "SELECT * FROM `benchmark_tmp`.`events__source_baseline__001` "
+                    "WHERE `country` LIKE concat('%', 'OTHER', '%') LIMIT 10"
+                ),
+                "elapsed_ms_percentiles": [1000.0],
+                "read_bytes_percentiles": [10_000.0],
+            },
+            {
+                "query_index": 1,
+                "query_id": "source_message_hit",
+                "query_type": "hit",
+                "query_column": "message",
+                "query": (
+                    "SELECT * FROM `benchmark_tmp`.`events__source_baseline__001` "
+                    "WHERE `message` LIKE concat('%', 'retrieving', '%') LIMIT 10"
+                ),
+                "elapsed_ms_percentiles": [100.0],
+                "read_bytes_percentiles": [1_000.0],
+            },
+        ]
+        tested_per_query = [
+            {
+                "query_index": 0,
+                "query_id": "auto_query_0",
+                "query_type": "hit",
+                "query_column": "message",
+                "query": (
+                    "SELECT * FROM `benchmark_tmp`.`events__bench__bench_a__0042` "
+                    "WHERE `message` LIKE concat('%', 'retrieving', '%') LIMIT 10"
+                ),
+                "elapsed_ms_percentiles": [50.0],
+                "read_bytes_percentiles": [500.0],
+            }
+        ]
+
+        speedup = _compute_select_time_speedup_by_query(source_per_query, tested_per_query)
+
+        self.assertEqual(len(speedup), 1)
+        self.assertEqual(speedup[0]["source_match_mode"], "query_signature")
+        self.assertEqual(speedup[0]["source_query_id"], "source_message_hit")
+        self.assertEqual(speedup[0]["elapsed_ms_percentiles_speed_up_coefs"], [2.0])
+        self.assertEqual(speedup[0]["read_bytes_percentiles_speed_up_coefs"], [2.0])
 
     def test_run_source_benchmark_calculates_metrics_and_baseline_score(self) -> None:
         fake_client = _FakeRuntimeClient(
@@ -3307,7 +3427,7 @@ ORDER BY country
             def query(self, query: str):
                 if "FROM system.query_log" in query:
                     return SimpleNamespace(
-                        result_rows=[(123.0, 1000.0, 10_000.0, 1000.0, 10_000.0)]
+                        result_rows=[(123.0, 1000.0, 10_000.0, 1000.0, 1000.0, 10_000.0)]
                     )
                 return SimpleNamespace(result_rows=[])
 
@@ -3358,7 +3478,7 @@ ORDER BY country
                     return SimpleNamespace(result_rows=[(1000,)])
                 if "FROM system.query_log" in query:
                     return SimpleNamespace(
-                        result_rows=[(100.0, 1000.0, 10_000.0, 1000.0, 10_000.0)]
+                        result_rows=[(100.0, 1000.0, 10_000.0, 1000.0, 1000.0, 10_000.0)]
                     )
                 return SimpleNamespace(result_rows=[])
 
@@ -3406,10 +3526,19 @@ ORDER BY country
                 if "FROM system.query_log" in query:
                     limit_match = re.search(r"LIMIT\s+(\d+)\s+OFFSET\s+(\d+)", self.last_insert_query)
                     if limit_match is None:
-                        return SimpleNamespace(result_rows=[(50.0, 0.0, 0.0, 0.0, 0.0)])
+                        return SimpleNamespace(result_rows=[(50.0, 0.0, 0.0, 0.0, 0.0, 0.0)])
                     limit_rows = float(limit_match.group(1))
                     return SimpleNamespace(
-                        result_rows=[(50.0, limit_rows, limit_rows * 10.0, limit_rows, limit_rows * 10.0)]
+                        result_rows=[
+                            (
+                                50.0,
+                                limit_rows,
+                                limit_rows * 10.0,
+                                limit_rows,
+                                limit_rows,
+                                limit_rows * 10.0,
+                            )
+                        ]
                     )
                 return SimpleNamespace(result_rows=[])
 
@@ -3525,7 +3654,7 @@ ORDER BY country
             def query(self, query: str):
                 if "FROM system.query_log" in query:
                     return SimpleNamespace(
-                        result_rows=[(111.0, 777.0, 7_770.0, 777.0, 7_770.0)]
+                        result_rows=[(111.0, 777.0, 7_770.0, 777.0, 777.0, 7_770.0)]
                     )
                 return SimpleNamespace(result_rows=[])
 
@@ -3657,7 +3786,7 @@ ORDER BY country
             def query(self, query: str):
                 if "FROM system.query_log" in query:
                     return SimpleNamespace(
-                        result_rows=[(50.0, 500.0, 5_000.0, 0.0, 0.0)]
+                        result_rows=[(50.0, 500.0, 5_000.0, 1.0, 0.0, 0.0)]
                     )
                 raise AssertionError(f"Ожидался только system.query_log запрос, получили: {query}")
 
@@ -3693,7 +3822,7 @@ ORDER BY country
                 self.query_calls.append(query)
                 if "FROM system.query_log" in query:
                     return _DummyResult(
-                        rows=[(150.0, 111.0, 2222.0, 0.0, 0.0)]
+                        rows=[(150.0, 111.0, 2222.0, 7.0, 0.0, 0.0)]
                     )
                 return _DummyResult(summary=None, rows=[(1,)])
 
@@ -3714,6 +3843,7 @@ ORDER BY country
         self.assertEqual(metrics["elapsed_ns"], 150_000_000.0)
         self.assertEqual(metrics["read_rows"], 111.0)
         self.assertEqual(metrics["read_bytes"], 2222.0)
+        self.assertEqual(metrics["result_rows"], 7.0)
 
     def test_command_metrics_fallback_to_query_log_when_summary_missing(self) -> None:
         class _DummyResult:
@@ -3735,7 +3865,7 @@ ORDER BY country
                 self.query_calls.append(query)
                 if "FROM system.query_log" in query:
                     return _DummyResult(
-                        rows=[(210.0, 333.0, 4444.0, 555.0, 6666.0)]
+                        rows=[(210.0, 333.0, 4444.0, 9.0, 555.0, 6666.0)]
                     )
                 return _DummyResult(rows=[])
 
@@ -3754,6 +3884,7 @@ ORDER BY country
         self.assertEqual(metrics["elapsed_ns"], 210_000_000.0)
         self.assertEqual(metrics["read_rows"], 333.0)
         self.assertEqual(metrics["read_bytes"], 4444.0)
+        self.assertEqual(metrics["result_rows"], 9.0)
         self.assertEqual(metrics["written_rows"], 555.0)
         self.assertEqual(metrics["written_bytes"], 6666.0)
 
@@ -3828,9 +3959,11 @@ ORDER BY country
         self.assertEqual(stats["per_query"][0]["query"], "SELECT count() FROM t1")
         self.assertEqual(stats["per_query"][0]["query_type"], "generic")
         self.assertEqual(stats["per_query"][0]["elapsed_ns_measurements"], [100_000_000.0])
+        self.assertEqual(stats["per_query"][0]["result_rows_measurements"], [1000.0])
         self.assertEqual(stats["per_query"][1]["query"], "SELECT count() FROM t2")
         self.assertEqual(stats["per_query"][1]["query_type"], "generic")
         self.assertEqual(stats["per_query"][1]["elapsed_ns_measurements"], [300_000_000.0])
+        self.assertEqual(stats["per_query"][1]["result_rows_measurements"], [3000.0])
 
     def test_measure_insert_retries_until_success(self) -> None:
         fake_client = _FakeRuntimeClient(
@@ -4008,6 +4141,8 @@ ORDER BY country
 
         self.assertEqual([call["n_rows"] for call in client.calls], [1000, 500])
         self.assertEqual(stats["written_rows"], [500.0])
+        self.assertEqual(stats["read_bytes"], [5000.0])
+        self.assertEqual(stats["written_bytes"], [5000.0])
         self.assertEqual(stats["elapsed_ns"], [100_000_000.0])
 
     def test_measure_insert_does_not_reduce_rows_limit_on_oom_for_non_baseline(self) -> None:
@@ -4092,6 +4227,8 @@ ORDER BY country
         self.assertEqual(stats["elapsed_ns"], [100_000_000.0, 120_000_000.0])
         self.assertEqual(stats["rows_per_second"], [10_000.0])
         self.assertEqual(stats["written_rows"], [1000.0])
+        self.assertEqual(stats["read_bytes"], [10_000.0, 12_000.0])
+        self.assertEqual(stats["written_bytes"], [10_000.0, 12_000.0])
 
     def test_measure_select_queries_filters_zero_rows_per_second_from_measurements(self) -> None:
         fake_client = _FakeRuntimeClient(

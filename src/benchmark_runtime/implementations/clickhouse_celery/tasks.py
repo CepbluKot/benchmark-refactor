@@ -112,6 +112,10 @@ _INSERT_SELECT_ENABLE_DETERMINISTIC_ORDER_BY = str(
     "on",
 }
 _RATIO_EPSILON = 1e-9
+_READ_BYTES_TESTED_ZERO_BOOST = max(
+    1.0,
+    float(os.getenv("BENCH_READ_BYTES_TESTED_ZERO_BOOST", "5.0")),
+)
 
 
 def _is_nullable_sorting_key_error(exc: Exception) -> bool:
@@ -656,6 +660,7 @@ def _error_query_metrics() -> Dict[str, float]:
         "elapsed_ns": -1.0,
         "read_rows": -1.0,
         "read_bytes": -1.0,
+        "result_rows": -1.0,
         "written_rows": -1.0,
         "written_bytes": -1.0,
     }
@@ -1010,6 +1015,7 @@ def _safe_ratio_with_zero_policy(
     Modes:
       - `normal`: оба значения > epsilon, обычное деление.
       - `zero_both`: оба значения ~0, считаем ratio=1.
+      - `tested_zero_boost`: source > 0, tested ~0 — выдаём boost (минимум configurable floor).
       - `fallback_time`: один из операндов ~0, берём ratio из time speedup.
       - `fallback_neutral`: один из операндов ~0 и time-fallback недоступен, ratio=1.
     """
@@ -1040,6 +1046,16 @@ def _safe_ratio_with_zero_policy(
     if source_is_zero and tested_is_zero:
         return 1.0, "zero_both"
 
+    if not source_is_zero and tested_is_zero:
+        candidate = _READ_BYTES_TESTED_ZERO_BOOST
+        if (
+            time_fallback_ratio is not None
+            and math.isfinite(float(time_fallback_ratio))
+            and float(time_fallback_ratio) > 0
+        ):
+            candidate = max(float(time_fallback_ratio), candidate)
+        return float(candidate), "tested_zero_boost"
+
     if (
         time_fallback_ratio is not None
         and math.isfinite(float(time_fallback_ratio))
@@ -1061,6 +1077,10 @@ def _build_score_context_medians(
     tested_select_rows_per_second: Sequence[Any],
     source_insert_bytes_per_second: Sequence[Any],
     tested_insert_bytes_per_second: Sequence[Any],
+    source_insert_read_bytes: Sequence[Any],
+    tested_insert_read_bytes: Sequence[Any],
+    source_insert_written_bytes: Sequence[Any],
+    tested_insert_written_bytes: Sequence[Any],
     source_select_bytes_per_second: Sequence[Any],
     tested_select_bytes_per_second: Sequence[Any],
     insert_time_speedup: Sequence[Any],
@@ -1270,6 +1290,41 @@ def _build_score_context_medians(
     tested_insert_bytes_per_second_median = _median_positive_finite(
         tested_insert_bytes_per_second
     )
+    source_insert_read_bytes_raw = _median_non_negative_finite(source_insert_read_bytes)
+    tested_insert_read_bytes_raw = _median_non_negative_finite(tested_insert_read_bytes)
+    source_insert_written_bytes_raw = _median_non_negative_finite(source_insert_written_bytes)
+    tested_insert_written_bytes_raw = _median_non_negative_finite(tested_insert_written_bytes)
+    insert_time_speedup_median = _median_positive_finite(insert_time_speedup)
+    insert_read_bytes_speedup, insert_read_bytes_speedup_mode = _safe_ratio_with_zero_policy(
+        source_insert_read_bytes_raw,
+        tested_insert_read_bytes_raw,
+        time_fallback_ratio=insert_time_speedup_median,
+    )
+    insert_written_bytes_speedup, insert_written_bytes_speedup_mode = _safe_ratio_with_zero_policy(
+        source_insert_written_bytes_raw,
+        tested_insert_written_bytes_raw,
+        time_fallback_ratio=insert_time_speedup_median,
+    )
+    source_insert_read_bytes_effective = source_insert_read_bytes_raw
+    tested_insert_read_bytes_effective = tested_insert_read_bytes_raw
+    if (
+        source_insert_read_bytes_effective is None
+        or tested_insert_read_bytes_effective is None
+        or source_insert_read_bytes_effective <= _RATIO_EPSILON
+        or tested_insert_read_bytes_effective <= _RATIO_EPSILON
+    ):
+        source_insert_read_bytes_effective = float(insert_read_bytes_speedup)
+        tested_insert_read_bytes_effective = 1.0
+    source_insert_written_bytes_effective = source_insert_written_bytes_raw
+    tested_insert_written_bytes_effective = tested_insert_written_bytes_raw
+    if (
+        source_insert_written_bytes_effective is None
+        or tested_insert_written_bytes_effective is None
+        or source_insert_written_bytes_effective <= _RATIO_EPSILON
+        or tested_insert_written_bytes_effective <= _RATIO_EPSILON
+    ):
+        source_insert_written_bytes_effective = float(insert_written_bytes_speedup)
+        tested_insert_written_bytes_effective = 1.0
     source_select_bytes_per_second_median = _median_positive_finite(
         source_select_bytes_per_second
     )
@@ -1300,10 +1355,58 @@ def _build_score_context_medians(
             if source_insert_bytes_per_second_median is not None
             else None
         ),
+        "source_insert_read_bytes_raw": source_insert_read_bytes_raw,
+        "source_insert_read_bytes_raw_readable": (
+            make_readable_bytes(source_insert_read_bytes_raw)
+            if source_insert_read_bytes_raw is not None
+            else None
+        ),
+        "source_insert_read_bytes": source_insert_read_bytes_effective,
+        "source_insert_read_bytes_readable": (
+            make_readable_bytes(source_insert_read_bytes_effective)
+            if source_insert_read_bytes_effective is not None
+            else None
+        ),
+        "source_insert_written_bytes_raw": source_insert_written_bytes_raw,
+        "source_insert_written_bytes_raw_readable": (
+            make_readable_bytes(source_insert_written_bytes_raw)
+            if source_insert_written_bytes_raw is not None
+            else None
+        ),
+        "source_insert_written_bytes": source_insert_written_bytes_effective,
+        "source_insert_written_bytes_readable": (
+            make_readable_bytes(source_insert_written_bytes_effective)
+            if source_insert_written_bytes_effective is not None
+            else None
+        ),
         "tested_insert_bytes_per_second": tested_insert_bytes_per_second_median,
         "tested_insert_bytes_per_second_readable": (
             make_readable_bytes(tested_insert_bytes_per_second_median)
             if tested_insert_bytes_per_second_median is not None
+            else None
+        ),
+        "tested_insert_read_bytes_raw": tested_insert_read_bytes_raw,
+        "tested_insert_read_bytes_raw_readable": (
+            make_readable_bytes(tested_insert_read_bytes_raw)
+            if tested_insert_read_bytes_raw is not None
+            else None
+        ),
+        "tested_insert_read_bytes": tested_insert_read_bytes_effective,
+        "tested_insert_read_bytes_readable": (
+            make_readable_bytes(tested_insert_read_bytes_effective)
+            if tested_insert_read_bytes_effective is not None
+            else None
+        ),
+        "tested_insert_written_bytes_raw": tested_insert_written_bytes_raw,
+        "tested_insert_written_bytes_raw_readable": (
+            make_readable_bytes(tested_insert_written_bytes_raw)
+            if tested_insert_written_bytes_raw is not None
+            else None
+        ),
+        "tested_insert_written_bytes": tested_insert_written_bytes_effective,
+        "tested_insert_written_bytes_readable": (
+            make_readable_bytes(tested_insert_written_bytes_effective)
+            if tested_insert_written_bytes_effective is not None
             else None
         ),
         "source_select_bytes_per_second": source_select_bytes_per_second_median,
@@ -1343,6 +1446,10 @@ def _build_score_context_medians(
             else None
         ),
         "insert_time_speedup": _median_positive_finite(insert_time_speedup),
+        "insert_read_bytes_speedup": insert_read_bytes_speedup,
+        "insert_read_bytes_speedup_mode": insert_read_bytes_speedup_mode,
+        "insert_written_bytes_speedup": insert_written_bytes_speedup,
+        "insert_written_bytes_speedup_mode": insert_written_bytes_speedup_mode,
         "select_time_speedup": _median_positive_finite(select_time_speedup),
         "select_time_speedup_by_query_geomean": select_time_speedup_by_query_geomean,
         "select_read_bytes_speedup": select_read_bytes_speedup,
@@ -2708,6 +2815,7 @@ class _ClickHouseRuntimeClient:
                 query_duration_ms,
                 read_rows,
                 read_bytes,
+                result_rows,
                 written_rows,
                 written_bytes
             FROM system.query_log
@@ -2721,6 +2829,7 @@ class _ClickHouseRuntimeClient:
                 query_duration_ms,
                 read_rows,
                 read_bytes,
+                result_rows,
                 written_rows,
                 written_bytes
             FROM system.query_log
@@ -2746,7 +2855,7 @@ class _ClickHouseRuntimeClient:
                 if not rows:
                     continue
                 row = rows[0]
-                if not isinstance(row, (list, tuple)) or len(row) < 5:
+                if not isinstance(row, (list, tuple)) or len(row) < 6:
                     continue
                 elapsed_ms = _to_metric_or_error(row[0])
                 if elapsed_ms < 0:
@@ -2757,8 +2866,9 @@ class _ClickHouseRuntimeClient:
                     "elapsed_ns": elapsed_ns,
                     "read_rows": _to_metric_or_error(row[1]),
                     "read_bytes": _to_metric_or_error(row[2]),
-                    "written_rows": _to_metric_or_error(row[3]),
-                    "written_bytes": _to_metric_or_error(row[4]),
+                    "result_rows": _to_metric_or_error(row[3]),
+                    "written_rows": _to_metric_or_error(row[4]),
+                    "written_bytes": _to_metric_or_error(row[5]),
                 }
             if attempt_id + 1 >= effective_attempts:
                 continue
@@ -2983,15 +3093,24 @@ class _ClickHouseRuntimeClient:
                 "elapsed_ns",
                 "read_rows",
                 "read_bytes",
+                "result_rows",
                 "written_rows",
                 "written_bytes",
             )
         ):
             return None
+
+        result_rows_fallback = -1.0
+        result_rows_payload = getattr(query_summary, "result_rows", None)
+        if isinstance(result_rows_payload, list):
+            result_rows_fallback = float(len(result_rows_payload))
         return {
             "elapsed_ns": _to_metric_or_error(summary.get("elapsed_ns")),
             "read_rows": _to_metric_or_error(summary.get("read_rows")),
             "read_bytes": _to_metric_or_error(summary.get("read_bytes")),
+            "result_rows": _to_metric_or_error(
+                summary.get("result_rows", result_rows_fallback)
+            ),
             "written_rows": _to_metric_or_error(summary.get("written_rows")),
             "written_bytes": _to_metric_or_error(summary.get("written_bytes")),
         }
@@ -3325,6 +3444,8 @@ def _measure_insert(
     elapsed_ns_entries: list[float] = []
     written_rows_per_second_entries: list[float] = []
     read_bytes_per_second_entries: list[float] = []
+    read_bytes_entries: list[float] = []
+    written_bytes_entries: list[float] = []
     written_rows_entries: list[float] = []
     max_retries, initial_sleep_sec, retry_sleep_increment = client.get_retry_policy()
     effective_rows_limit = int(n_rows) if n_rows is not None else None
@@ -3446,9 +3567,12 @@ def _measure_insert(
         elapsed_ns = float(query_metrics["elapsed_ns"])
         read_bytes = float(query_metrics["read_bytes"])
         written_rows = float(query_metrics["written_rows"])
+        written_bytes = float(query_metrics["written_bytes"])
         elapsed_ns_entries.append(elapsed_ns)
         written_rows_per_second_entries.append(_rows_per_second(written_rows, elapsed_ns))
         read_bytes_per_second_entries.append(_bytes_per_second(read_bytes, elapsed_ns))
+        read_bytes_entries.append(read_bytes)
+        written_bytes_entries.append(written_bytes)
         written_rows_entries.append(written_rows)
 
     context = f"insert metrics {target_database}.{target_table}"
@@ -3466,6 +3590,16 @@ def _measure_insert(
         "bytes_per_second": _filter_positive_finite_measurements(
             read_bytes_per_second_entries,
             metric_name="bytes_per_second",
+            context=context,
+        ),
+        "read_bytes": _filter_non_negative_finite_measurements(
+            read_bytes_entries,
+            metric_name="read_bytes",
+            context=context,
+        ),
+        "written_bytes": _filter_non_negative_finite_measurements(
+            written_bytes_entries,
+            metric_name="written_bytes",
             context=context,
         ),
         "written_rows": _filter_positive_finite_measurements(
@@ -3508,6 +3642,7 @@ def _measure_select_queries(
     read_rows_per_second_entries: list[float] = []
     read_bytes_per_second_entries: list[float] = []
     read_bytes_entries: list[float] = []
+    result_rows_entries: list[float] = []
     per_query_entries: list[dict[str, Any]] = []
     max_retries, initial_sleep_sec, retry_sleep_increment = client.get_retry_policy()
 
@@ -3517,6 +3652,7 @@ def _measure_select_queries(
             "rows_per_second": read_rows_per_second_entries,
             "bytes_per_second": read_bytes_per_second_entries,
             "read_bytes": read_bytes_entries,
+            "result_rows": result_rows_entries,
             "per_query": per_query_entries,
         }
 
@@ -3535,6 +3671,7 @@ def _measure_select_queries(
         query_rows_per_second_entries: list[float] = []
         query_bytes_per_second_entries: list[float] = []
         query_read_bytes_entries: list[float] = []
+        query_result_rows_entries: list[float] = []
         select_settings_assignments: list[str] = []
         if query_cache_mode == "cold":
             select_settings_assignments.extend(_COLD_SELECT_SETTINGS_ASSIGNMENTS)
@@ -3613,6 +3750,9 @@ def _measure_select_queries(
             elapsed_ns = float(query_metrics["elapsed_ns"])
             read_rows = float(query_metrics["read_rows"])
             read_bytes = float(query_metrics["read_bytes"])
+            result_rows = float(
+                query_metrics.get("result_rows", query_metrics.get("read_rows", -1.0))
+            )
             query_rows_per_second = _rows_per_second(read_rows, elapsed_ns)
             query_bytes_per_second = _bytes_per_second(read_bytes, elapsed_ns)
 
@@ -3620,6 +3760,7 @@ def _measure_select_queries(
             query_rows_per_second_entries.append(query_rows_per_second)
             query_bytes_per_second_entries.append(query_bytes_per_second)
             query_read_bytes_entries.append(read_bytes)
+            query_result_rows_entries.append(result_rows)
 
         query_context = f"select metrics query[{query_index}]"
         query_elapsed_ns_entries = _filter_positive_finite_measurements(
@@ -3642,10 +3783,16 @@ def _measure_select_queries(
             metric_name="read_bytes",
             context=query_context,
         )
+        query_result_rows_entries = _filter_non_negative_finite_measurements(
+            query_result_rows_entries,
+            metric_name="result_rows",
+            context=query_context,
+        )
         elapsed_ns_entries.extend(query_elapsed_ns_entries)
         read_rows_per_second_entries.extend(query_rows_per_second_entries)
         read_bytes_per_second_entries.extend(query_bytes_per_second_entries)
         read_bytes_entries.extend(query_read_bytes_entries)
+        result_rows_entries.extend(query_result_rows_entries)
 
         per_query_entries.append(
             {
@@ -3661,6 +3808,7 @@ def _measure_select_queries(
                 "rows_per_second_measurements": query_rows_per_second_entries,
                 "bytes_per_second_measurements": query_bytes_per_second_entries,
                 "read_bytes_measurements": query_read_bytes_entries,
+                "result_rows_measurements": query_result_rows_entries,
             }
         )
 
@@ -3669,6 +3817,7 @@ def _measure_select_queries(
         "rows_per_second": read_rows_per_second_entries,
         "bytes_per_second": read_bytes_per_second_entries,
         "read_bytes": read_bytes_entries,
+        "result_rows": result_rows_entries,
         "per_query": per_query_entries,
     }
 
@@ -3712,6 +3861,11 @@ def _build_select_per_query_metrics(
             metric_name="read_bytes",
             context=entry_context,
         )
+        result_rows_measurements = _filter_non_negative_finite_measurements(
+            list(float(value) for value in (raw_entry.get("result_rows_measurements", []) or [])),
+            metric_name="result_rows",
+            context=entry_context,
+        )
 
         elapsed_ms_measurements = [
             value / 1_000_000.0 for value in elapsed_ns_measurements
@@ -3733,6 +3887,10 @@ def _build_select_per_query_metrics(
             read_bytes_measurements,
             measured_percentiles,
         )
+        result_rows_percentiles = compute_percentiles(
+            result_rows_measurements,
+            measured_percentiles,
+        )
         bytes_per_second_measurements_readable = [
             make_readable_bytes(value) for value in bytes_per_second_measurements
         ]
@@ -3746,6 +3904,7 @@ def _build_select_per_query_metrics(
             make_readable_bytes(value) for value in read_bytes_percentiles
         ]
         elapsed_ms_median = _median_positive_finite(elapsed_ms_measurements)
+        result_rows_median = _median_non_negative_finite(result_rows_measurements)
 
         result.append(
             {
@@ -3774,6 +3933,9 @@ def _build_select_per_query_metrics(
                 "read_bytes_measurements_readable": read_bytes_measurements_readable,
                 "read_bytes_percentiles": read_bytes_percentiles,
                 "read_bytes_percentiles_readable": read_bytes_percentiles_readable,
+                "result_rows_measurements": result_rows_measurements,
+                "result_rows_percentiles": result_rows_percentiles,
+                "result_rows_median": result_rows_median,
                 "elapsed_ms_median": elapsed_ms_median,
             }
         )
@@ -3803,6 +3965,9 @@ def _extract_source_select_per_query_metrics(
             normalized_entry.setdefault("query_id", f"query_{query_index}")
             normalized_entry.setdefault("query_type", "generic")
             normalized_entry.setdefault("query_column", None)
+            normalized_entry.setdefault("result_rows_measurements", [])
+            normalized_entry.setdefault("result_rows_percentiles", [])
+            normalized_entry.setdefault("result_rows_median", None)
             normalized_entries.append(normalized_entry)
         return normalized_entries
 
@@ -3883,6 +4048,9 @@ def _extract_source_select_per_query_metrics(
             "read_bytes_measurements_readable": [],
             "read_bytes_percentiles": [],
             "read_bytes_percentiles_readable": [],
+            "result_rows_measurements": [],
+            "result_rows_percentiles": [],
+            "result_rows_median": None,
             "elapsed_ms_median": _median_positive_finite(
                 [float(v) for v in legacy_elapsed_ms_measurements]
             ),
@@ -3906,28 +4074,115 @@ def _compute_select_time_speedup_by_query(
                 continue
         return result_values
 
+    def _query_id(entry: Dict[str, Any], fallback_index: int) -> str:
+        query_index = int(entry.get("query_index", fallback_index))
+        return str(entry.get("query_id", f"query_{query_index}"))
+
+    def _query_signature(sql: Any) -> str:
+        # Нормализуем SQL для сопоставления source/tested, игнорируя FQ table refs.
+        normalized = str(sql or "")
+        if not normalized:
+            return ""
+        normalized = re.sub(r"`[^`]+`\.`[^`]+`", "__table__", normalized)
+        normalized = re.sub(
+            r"\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*\b",
+            "__table__",
+            normalized,
+        )
+        normalized = re.sub(r"\s+", " ", normalized).strip().lower()
+        return normalized
+
+    def _pick_source_entry(
+        entries: Sequence[Dict[str, Any]],
+        *,
+        preferred_query_index: int,
+    ) -> Optional[Dict[str, Any]]:
+        if not entries:
+            return None
+        if len(entries) == 1:
+            return entries[0]
+        for entry in entries:
+            try:
+                if int(entry.get("query_index", -1)) == preferred_query_index:
+                    return entry
+            except Exception:
+                continue
+        return entries[0]
+
     source_by_index: dict[int, Dict[str, Any]] = {}
     source_by_id: dict[str, Dict[str, Any]] = {}
-    source_by_column: dict[str, Dict[str, Any]] = {}
+    source_by_signature: dict[str, list[Dict[str, Any]]] = {}
+    source_by_column_type: dict[tuple[str, str], list[Dict[str, Any]]] = {}
+    source_by_column: dict[str, list[Dict[str, Any]]] = {}
     for fallback_index, entry in enumerate(source_per_query):
         query_index = int(entry.get("query_index", fallback_index))
         source_by_index[query_index] = entry
-        query_id = str(entry.get("query_id", f"query_{query_index}"))
+        query_id = _query_id(entry, fallback_index)
         source_by_id[query_id] = entry
+        query_signature = _query_signature(entry.get("query"))
+        if query_signature:
+            source_by_signature.setdefault(query_signature, []).append(entry)
         query_column = entry.get("query_column")
+        query_type = str(entry.get("query_type") or "generic").strip() or "generic"
         if isinstance(query_column, str) and query_column:
-            source_by_column[query_column] = entry
+            source_by_column.setdefault(query_column, []).append(entry)
+            source_by_column_type.setdefault((query_column, query_type), []).append(entry)
 
     result: list[dict[str, Any]] = []
     for fallback_index, tested_entry in enumerate(tested_per_query):
         query_index = int(tested_entry.get("query_index", fallback_index))
-        query_id = str(tested_entry.get("query_id", f"query_{query_index}"))
+        query_id = _query_id(tested_entry, fallback_index)
         query_column = tested_entry.get("query_column")
+        query_type = str(tested_entry.get("query_type") or "generic").strip() or "generic"
+        query_signature = _query_signature(tested_entry.get("query"))
         source_entry = None
-        if isinstance(query_column, str) and query_column:
-            source_entry = source_by_column.get(query_column)
+        source_match_mode = "none"
+        source_entry = source_by_id.get(query_id)
+        if source_entry is not None:
+            source_query_signature = _query_signature(source_entry.get("query"))
+            # Если query_id совпал, но SQL-сигнатура не совпадает, считаем такое
+            # совпадение невалидным и продолжаем поиск по сигнатуре/контексту.
+            if (
+                query_signature
+                and source_query_signature
+                and source_query_signature != query_signature
+            ):
+                source_entry = None
+            else:
+                source_match_mode = "query_id"
+        if source_entry is None and query_signature:
+            source_entry = _pick_source_entry(
+                source_by_signature.get(query_signature, []),
+                preferred_query_index=query_index,
+            )
+            if source_entry is not None:
+                source_match_mode = "query_signature"
+        if (
+            source_entry is None
+            and isinstance(query_column, str)
+            and query_column
+        ):
+            source_entry = _pick_source_entry(
+                source_by_column_type.get((query_column, query_type), []),
+                preferred_query_index=query_index,
+            )
+            if source_entry is not None:
+                source_match_mode = "column_type"
         if source_entry is None:
-            source_entry = source_by_id.get(query_id) or source_by_index.get(query_index)
+            source_entry = source_by_index.get(query_index)
+            if source_entry is not None:
+                source_match_mode = "query_index"
+        if (
+            source_entry is None
+            and isinstance(query_column, str)
+            and query_column
+        ):
+            source_entry = _pick_source_entry(
+                source_by_column.get(query_column, []),
+                preferred_query_index=query_index,
+            )
+            if source_entry is not None:
+                source_match_mode = "column_only"
         source_percentiles = (
             _coerce_float_list(source_entry.get("elapsed_ms_percentiles", []))
             if source_entry is not None
@@ -3985,6 +4240,10 @@ def _compute_select_time_speedup_by_query(
                     or (source_entry.get("query_column") if source_entry is not None else None)
                 ),
                 "source_query": source_entry.get("query") if source_entry is not None else None,
+                "source_query_id": (
+                    _query_id(source_entry, query_index) if source_entry is not None else None
+                ),
+                "source_match_mode": source_match_mode,
                 "elapsed_ms_percentiles_speed_up_coefs": speed_up_coefs,
                 "read_bytes_percentiles_speed_up_coefs": read_bytes_speed_up_coefs,
                 "read_bytes_percentiles_speed_up_modes": read_bytes_speed_up_modes,
@@ -4391,6 +4650,18 @@ def _build_baseline_variant_result(
         metrics.get("source_table_insert_bytes_per_second_measurements_percentiles_readable", [])
         or []
     )
+    source_insert_read_bytes = list(
+        metrics.get("source_table_insert_read_bytes_measurements", []) or []
+    )
+    source_insert_read_bytes_percentiles = list(
+        metrics.get("source_table_insert_read_bytes_measurements_percentiles", []) or []
+    )
+    source_insert_written_bytes = list(
+        metrics.get("source_table_insert_written_bytes_measurements", []) or []
+    )
+    source_insert_written_bytes_percentiles = list(
+        metrics.get("source_table_insert_written_bytes_measurements_percentiles", []) or []
+    )
 
     source_select_ms = list(metrics.get("source_table_select_time_ms_measurements", []) or [])
     source_select_ms_percentiles = list(
@@ -4543,6 +4814,24 @@ def _build_baseline_variant_result(
         source_table_insert_bytes_per_second_measurements_percentiles_readable=(
             source_insert_bytes_per_sec_percentiles_readable
         ),
+        tested_table_insert_read_bytes_measurements=source_insert_read_bytes,
+        source_table_insert_read_bytes_measurements=source_insert_read_bytes,
+        tested_table_insert_read_bytes_measurements_percentiles=(
+            source_insert_read_bytes_percentiles
+        ),
+        source_table_insert_read_bytes_measurements_percentiles=(
+            source_insert_read_bytes_percentiles
+        ),
+        tested_table_insert_read_bytes_measurements_percentiles_speed_up_coefs=[],
+        tested_table_insert_written_bytes_measurements=source_insert_written_bytes,
+        source_table_insert_written_bytes_measurements=source_insert_written_bytes,
+        tested_table_insert_written_bytes_measurements_percentiles=(
+            source_insert_written_bytes_percentiles
+        ),
+        source_table_insert_written_bytes_measurements_percentiles=(
+            source_insert_written_bytes_percentiles
+        ),
+        tested_table_insert_written_bytes_measurements_percentiles_speed_up_coefs=[],
         tested_table_select_test_query=metrics.get("source_table_select_test_query"),
         source_table_select_test_query=metrics.get("source_table_select_test_query"),
         tested_table_select_time_ms_measurements=source_select_ms,
@@ -4839,6 +5128,14 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             insert_stats["bytes_per_second"],
             payload.measured_percentiles,
         )
+        insert_read_bytes_percentiles = compute_percentiles(
+            insert_stats["read_bytes"],
+            payload.measured_percentiles,
+        )
+        insert_written_bytes_percentiles = compute_percentiles(
+            insert_stats["written_bytes"],
+            payload.measured_percentiles,
+        )
 
         step_started_at = _log_step_start("measure_select")
         select_stage_started_at = time.monotonic()
@@ -4983,6 +5280,26 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             "source_table_insert_bytes_per_second_measurements_percentiles_readable": [
                 make_readable_bytes(value) for value in insert_bytes_per_second_percentiles
             ],
+            "source_table_insert_read_bytes_measurements": insert_stats["read_bytes"],
+            "source_table_insert_read_bytes_measurements_percentiles": (
+                insert_read_bytes_percentiles
+            ),
+            "source_table_insert_read_bytes_measurements_readable": [
+                make_readable_bytes(value) for value in insert_stats["read_bytes"]
+            ],
+            "source_table_insert_read_bytes_measurements_percentiles_readable": [
+                make_readable_bytes(value) for value in insert_read_bytes_percentiles
+            ],
+            "source_table_insert_written_bytes_measurements": insert_stats["written_bytes"],
+            "source_table_insert_written_bytes_measurements_percentiles": (
+                insert_written_bytes_percentiles
+            ),
+            "source_table_insert_written_bytes_measurements_readable": [
+                make_readable_bytes(value) for value in insert_stats["written_bytes"]
+            ],
+            "source_table_insert_written_bytes_measurements_percentiles_readable": [
+                make_readable_bytes(value) for value in insert_written_bytes_percentiles
+            ],
             "source_table_select_test_query": (
                 baseline_test_queries[0].query if baseline_test_queries else ""
             ),
@@ -5105,6 +5422,10 @@ def run_source_benchmark(payload: SourceBenchmarkTaskPayload) -> SourceBenchmark
             tested_select_rows_per_second=select_stats["rows_per_second"],
             source_insert_bytes_per_second=insert_stats["bytes_per_second"],
             tested_insert_bytes_per_second=insert_stats["bytes_per_second"],
+            source_insert_read_bytes=insert_stats["read_bytes"],
+            tested_insert_read_bytes=insert_stats["read_bytes"],
+            source_insert_written_bytes=insert_stats["written_bytes"],
+            tested_insert_written_bytes=insert_stats["written_bytes"],
             source_select_bytes_per_second=select_stats["bytes_per_second"],
             tested_select_bytes_per_second=select_stats["bytes_per_second"],
             insert_time_speedup=baseline_insert_time_speedup,
@@ -5419,6 +5740,16 @@ def run_variant_benchmark(
             tested_insert_bytes_per_second,
             measured_percentiles,
         )
+        tested_insert_read_bytes = list(insert_stats.get("read_bytes", []) or [])
+        tested_insert_read_bytes_percentiles = compute_percentiles(
+            tested_insert_read_bytes,
+            measured_percentiles,
+        )
+        tested_insert_written_bytes = list(insert_stats.get("written_bytes", []) or [])
+        tested_insert_written_bytes_percentiles = compute_percentiles(
+            tested_insert_written_bytes,
+            measured_percentiles,
+        )
 
         step_started_at = _log_step_start("measure_select")
         select_stage_started_at = time.monotonic()
@@ -5662,6 +5993,44 @@ def run_variant_benchmark(
             source_select_per_query_metrics,
             tested_select_per_query_metrics,
         )
+        source_match_mode_counts: dict[str, int] = {}
+        unmatched_source_query_ids: list[str] = []
+        non_exact_source_match_query_ids: list[str] = []
+        for fallback_index, entry in enumerate(tested_select_time_speedup_by_query):
+            if not isinstance(entry, dict):
+                continue
+            match_mode = str(entry.get("source_match_mode") or "none")
+            source_match_mode_counts[match_mode] = source_match_mode_counts.get(match_mode, 0) + 1
+            query_id = str(entry.get("query_id") or f"query_{fallback_index}")
+            if not str(entry.get("source_query_id") or "").strip():
+                unmatched_source_query_ids.append(query_id)
+            if match_mode not in {"query_id", "query_signature"}:
+                non_exact_source_match_query_ids.append(query_id)
+        logger.info(
+            "run_variant_benchmark: source/tested query matching summary "
+            "(total=%d, unmatched=%d, modes=%s)",
+            len(tested_select_time_speedup_by_query),
+            len(unmatched_source_query_ids),
+            source_match_mode_counts,
+        )
+        if (
+            isinstance(source_metrics.get("source_table_select_metrics_by_query"), list)
+            and unmatched_source_query_ids
+        ):
+            raise RuntimeError(
+                "Не удалось сопоставить variant select-запросы с baseline source per-query метриками; "
+                f"unmatched_query_ids={unmatched_source_query_ids[:20]}"
+            )
+        if (
+            isinstance(source_metrics.get("source_table_select_metrics_by_query"), list)
+            and non_exact_source_match_query_ids
+        ):
+            raise RuntimeError(
+                "Variant select-запросы должны сравниваться с baseline по тем же auto-queries "
+                "(match_mode должен быть query_id/query_signature); "
+                f"query_ids={non_exact_source_match_query_ids[:20]}, "
+                f"modes={source_match_mode_counts}"
+            )
         tested_select_read_bytes_speedup_by_query = _extract_read_bytes_speedup_by_query(
             tested_select_time_speedup_by_query
         )
@@ -5759,6 +6128,21 @@ def run_variant_benchmark(
             source_insert_bytes_per_second_for_score = list(
                 source_insert_bucket.get("bytes_per_second_percentiles", []) or []
             )
+        source_insert_read_bytes_for_score = list(
+            source_metrics.get("source_table_insert_read_bytes_measurements", []) or []
+        )
+        if not source_insert_read_bytes_for_score:
+            source_insert_read_bytes_for_score = list(
+                source_metrics.get("source_table_insert_read_bytes_measurements_percentiles", []) or []
+            )
+        source_insert_written_bytes_for_score = list(
+            source_metrics.get("source_table_insert_written_bytes_measurements", []) or []
+        )
+        if not source_insert_written_bytes_for_score:
+            source_insert_written_bytes_for_score = list(
+                source_metrics.get("source_table_insert_written_bytes_measurements_percentiles", [])
+                or []
+            )
         source_select_ms_for_score = list(
             source_metrics.get("source_table_select_time_ms_measurements", []) or []
         )
@@ -5778,6 +6162,53 @@ def run_variant_benchmark(
             source_select_bytes_per_second_for_score = list(
                 source_select_bucket.get("bytes_per_second_percentiles", []) or []
             )
+        source_insert_read_bytes_percentiles = list(
+            source_metrics.get("source_table_insert_read_bytes_measurements_percentiles", []) or []
+        )
+        if not source_insert_read_bytes_percentiles:
+            source_insert_read_bytes_percentiles = compute_percentiles(
+                source_insert_read_bytes_for_score,
+                measured_percentiles,
+            )
+        source_insert_written_bytes_percentiles = list(
+            source_metrics.get("source_table_insert_written_bytes_measurements_percentiles", [])
+            or []
+        )
+        if not source_insert_written_bytes_percentiles:
+            source_insert_written_bytes_percentiles = compute_percentiles(
+                source_insert_written_bytes_for_score,
+                measured_percentiles,
+            )
+        tested_insert_read_bytes_speedup: list[float] = []
+        tested_insert_written_bytes_speedup: list[float] = []
+        for percentile_index, (source_value, tested_value) in enumerate(
+            zip(source_insert_read_bytes_percentiles, tested_insert_read_bytes_percentiles)
+        ):
+            time_fallback_ratio = (
+                tested_insert_time_speedup[percentile_index]
+                if percentile_index < len(tested_insert_time_speedup)
+                else None
+            )
+            ratio, _ = _safe_ratio_with_zero_policy(
+                source_value,
+                tested_value,
+                time_fallback_ratio=time_fallback_ratio,
+            )
+            tested_insert_read_bytes_speedup.append(ratio)
+        for percentile_index, (source_value, tested_value) in enumerate(
+            zip(source_insert_written_bytes_percentiles, tested_insert_written_bytes_percentiles)
+        ):
+            time_fallback_ratio = (
+                tested_insert_time_speedup[percentile_index]
+                if percentile_index < len(tested_insert_time_speedup)
+                else None
+            )
+            ratio, _ = _safe_ratio_with_zero_policy(
+                source_value,
+                tested_value,
+                time_fallback_ratio=time_fallback_ratio,
+            )
+            tested_insert_written_bytes_speedup.append(ratio)
         step_started_at = _log_step_start("compute_score")
         _, geomean_ratio_details = _compute_variant_ratio_details(
             source_insert_time_ms_measurements=source_insert_ms_for_score,
@@ -5803,6 +6234,10 @@ def run_variant_benchmark(
             tested_select_rows_per_second=tested_select_rows_per_second,
             source_insert_bytes_per_second=source_insert_bytes_per_second_for_score,
             tested_insert_bytes_per_second=tested_insert_bytes_per_second,
+            source_insert_read_bytes=source_insert_read_bytes_for_score,
+            tested_insert_read_bytes=tested_insert_read_bytes,
+            source_insert_written_bytes=source_insert_written_bytes_for_score,
+            tested_insert_written_bytes=tested_insert_written_bytes,
             source_select_bytes_per_second=source_select_bytes_per_second_for_score,
             tested_select_bytes_per_second=tested_select_bytes_per_second,
             insert_time_speedup=tested_insert_time_speedup,
@@ -6023,6 +6458,28 @@ def run_variant_benchmark(
                     [],
                 )
                 or []
+            ),
+            tested_table_insert_read_bytes_measurements=tested_insert_read_bytes,
+            source_table_insert_read_bytes_measurements=source_insert_read_bytes_for_score,
+            tested_table_insert_read_bytes_measurements_percentiles=(
+                tested_insert_read_bytes_percentiles
+            ),
+            source_table_insert_read_bytes_measurements_percentiles=(
+                source_insert_read_bytes_percentiles
+            ),
+            tested_table_insert_read_bytes_measurements_percentiles_speed_up_coefs=(
+                tested_insert_read_bytes_speedup
+            ),
+            tested_table_insert_written_bytes_measurements=tested_insert_written_bytes,
+            source_table_insert_written_bytes_measurements=source_insert_written_bytes_for_score,
+            tested_table_insert_written_bytes_measurements_percentiles=(
+                tested_insert_written_bytes_percentiles
+            ),
+            source_table_insert_written_bytes_measurements_percentiles=(
+                source_insert_written_bytes_percentiles
+            ),
+            tested_table_insert_written_bytes_measurements_percentiles_speed_up_coefs=(
+                tested_insert_written_bytes_speedup
             ),
             tested_table_select_test_query=(
                 payload.query_plan.test_queries[0].query

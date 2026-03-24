@@ -65,6 +65,7 @@ from src.benchmark_runtime.types import (
 )
 from src.naming import variant_table_name
 from src.query_generator import QueryGenerator, generate_queries
+from src.query_generator import GeneratedQuery
 from src.resolver import RuleResolver
 from src.scoring_validation import collect_scoring_formula_issues
 
@@ -181,6 +182,23 @@ class QueryPlanBuilder:
     затем этот шаблон подставляется в имя конкретной variant-таблицы.
     """
 
+    def __init__(self) -> None:
+        """
+        Держит in-memory кэши data-aware токенов для текущего процесса runner.
+
+        Это гарантирует, что baseline и variant-планы одной таблицы строятся на
+        одинаковых auto-токенах (hit/miss, min/max), даже если build вызывается
+        несколько раз в разных фазах.
+        """
+        self._like_tokens_cache: Dict[
+            tuple[str, str, int, int, int],
+            Dict[str, Dict[str, str]],
+        ] = {}
+        self._range_tokens_cache: Dict[
+            tuple[str, str],
+            Dict[str, Dict[str, str]],
+        ] = {}
+
     @staticmethod
     def _is_string_like_column(column_type: str) -> bool:
         """Возвращает True для String/FixedString с Nullable/LowCardinality-обёртками."""
@@ -260,20 +278,50 @@ class QueryPlanBuilder:
         if not deduplicated_candidates:
             return {}
 
+        cache_key = (
+            str(source_database),
+            str(source_table),
+            int(queries_config.auto_like_sample_rows_per_column),
+            int(queries_config.auto_like_min_token_length),
+            int(queries_config.auto_like_max_token_length),
+        )
+        cached_tokens = dict(self._like_tokens_cache.get(cache_key, {}))
+        missing_columns = [
+            column_name
+            for column_name in deduplicated_candidates
+            if column_name not in cached_tokens
+        ]
+
         try:
-            tokens = provider.fetch_like_tokens(
-                source_database,
-                source_table,
-                deduplicated_candidates,
-                sample_rows_per_column=queries_config.auto_like_sample_rows_per_column,
-                min_token_length=queries_config.auto_like_min_token_length,
-                max_token_length=queries_config.auto_like_max_token_length,
-            )
+            if missing_columns:
+                fetched_tokens = provider.fetch_like_tokens(
+                    source_database,
+                    source_table,
+                    missing_columns,
+                    sample_rows_per_column=queries_config.auto_like_sample_rows_per_column,
+                    min_token_length=queries_config.auto_like_min_token_length,
+                    max_token_length=queries_config.auto_like_max_token_length,
+                )
+                cached_tokens.update(
+                    {
+                        str(column_name): dict(payload)
+                        for column_name, payload in fetched_tokens.items()
+                        if isinstance(payload, dict)
+                    }
+                )
+                self._like_tokens_cache[cache_key] = dict(cached_tokens)
+            tokens = {
+                column_name: dict(cached_tokens[column_name])
+                for column_name in deduplicated_candidates
+                if column_name in cached_tokens
+            }
             logger.info(
-                "QueryPlanBuilder: data-aware LIKE tokens collected (table=%s, columns=%d, tokens=%d)",
+                "QueryPlanBuilder: data-aware LIKE tokens resolved (table=%s, columns=%d, tokens=%d, cache_hit=%d, fetched=%d)",
                 table_ddl.name,
                 len(deduplicated_candidates),
                 len(tokens),
+                len(deduplicated_candidates) - len(missing_columns),
+                len(missing_columns),
             )
             return tokens
         except Exception:
@@ -304,6 +352,208 @@ class QueryPlanBuilder:
             )
             return {}
 
+    @staticmethod
+    def _render_query_for_source_table(
+        query_sql: str,
+        *,
+        source_database: str,
+        source_table: str,
+    ) -> str:
+        """Рендерит SQL-шаблон под source-таблицу для preflight-проверки rows>0."""
+        source_ref = f"`{source_database}`.`{source_table}`"
+        return (
+            str(query_sql)
+            .replace("{table}", source_ref)
+            .replace("{benchmark_id}", "")
+        )
+
+    @staticmethod
+    def _quote_ident(value: str) -> str:
+        """Квотирует SQL-идентификатор ClickHouse."""
+        return f"`{str(value).replace('`', '``')}`"
+
+    def _build_non_empty_fallback_query_for_column(
+        self,
+        *,
+        table_ddl: TableDDL,
+        column_name: str,
+        auto_select_limit: int,
+    ) -> Optional[GeneratedQuery]:
+        """
+        Строит fallback-hit запрос для колонки, если data-aware запросы дали 0 rows.
+
+        Цель: сохранить покрытие измеряемых колонок и при этом получить non-empty выборку.
+        """
+        column = table_ddl.column(column_name)
+        if column is None:
+            return None
+        column_ident = self._quote_ident(column_name)
+        limit = max(1, int(auto_select_limit))
+        if self._is_string_like_column(column.type):
+            query_sql = (
+                f"SELECT * FROM {{table}} "
+                f"WHERE {column_ident} LIKE '%%' "
+                f"LIMIT {limit}"
+            )
+        else:
+            query_sql = (
+                f"SELECT * FROM {{table}} "
+                f"WHERE {column_ident} IS NOT NULL "
+                f"LIMIT {limit}"
+            )
+        return GeneratedQuery(
+            query=query_sql,
+            description=f"non-empty fallback hit on {column_name}",
+            query_type="hit",
+            query_column=column_name,
+        )
+
+    def _filter_auto_queries_with_non_empty_result(
+        self,
+        *,
+        auto_queries: Sequence[GeneratedQuery],
+        table_ddl: TableDDL,
+        provider: Optional[MetadataProvider],
+        source_database: Optional[str],
+        source_table: Optional[str],
+        measured_columns: Optional[Sequence[str]],
+        auto_select_limit: int,
+    ) -> List[GeneratedQuery]:
+        """
+        Оставляет auto-запросы, которые подтверждённо возвращают >0 строк.
+
+        Строгий non-empty режим включается, если provider поддерживает
+        `estimate_query_result_rows`. В этом режиме:
+          - запросы с оценкой `0` и `None` отбрасываются;
+          - для каждой required/measured колонки должен остаться хотя бы один
+            non-empty запрос, иначе выбрасывается ValueError.
+
+        Если provider не умеет оценивать rows, набор запросов не фильтруется.
+        """
+        if not auto_queries:
+            return []
+        if provider is None or not source_database or not source_table:
+            return list(auto_queries)
+
+        estimate_rows = getattr(provider, "estimate_query_result_rows", None)
+        if not callable(estimate_rows):
+            return list(auto_queries)
+        provider_estimate_impl = getattr(type(provider), "estimate_query_result_rows", None)
+        if provider_estimate_impl is MetadataProvider.estimate_query_result_rows:
+            # Provider не реализует row-estimation явно — строгий non-empty
+            # режим подтвердить нельзя, поэтому оставляем исходный набор.
+            return list(auto_queries)
+
+        evaluated: list[tuple[GeneratedQuery, Optional[int]]] = []
+        for query in auto_queries:
+            rendered_query = self._render_query_for_source_table(
+                query.query,
+                source_database=source_database,
+                source_table=source_table,
+            )
+            estimated_rows: Optional[int]
+            try:
+                raw_estimate = estimate_rows(rendered_query)
+                if raw_estimate is None:
+                    estimated_rows = None
+                else:
+                    estimated_rows = max(0, int(raw_estimate))
+            except Exception:
+                estimated_rows = None
+            evaluated.append((query, estimated_rows))
+
+        kept: list[GeneratedQuery] = [
+            query for query, estimated_rows in evaluated if estimated_rows is not None and estimated_rows > 0
+        ]
+        dropped_zero_rows = [
+            query for query, estimated_rows in evaluated if estimated_rows == 0
+        ]
+        dropped_unknown_rows = [
+            query for query, estimated_rows in evaluated if estimated_rows is None
+        ]
+
+        required_columns: list[str] = []
+        seen_required: set[str] = set()
+        for raw_column_name in list(measured_columns or []):
+            column_name = str(raw_column_name).strip()
+            if not column_name or column_name in seen_required:
+                continue
+            if table_ddl.column(column_name) is None:
+                continue
+            seen_required.add(column_name)
+            required_columns.append(column_name)
+
+        if not required_columns:
+            for query, _ in evaluated:
+                column_name = str(query.query_column or "").strip()
+                if not column_name or column_name in seen_required:
+                    continue
+                seen_required.add(column_name)
+                required_columns.append(column_name)
+
+        kept_columns = {
+            str(query.query_column).strip()
+            for query in kept
+            if str(query.query_column or "").strip()
+        }
+
+        for column_name in required_columns:
+            if column_name in kept_columns:
+                continue
+
+            fallback_query = self._build_non_empty_fallback_query_for_column(
+                table_ddl=table_ddl,
+                column_name=column_name,
+                auto_select_limit=auto_select_limit,
+            )
+            if fallback_query is not None:
+                rendered_fallback = self._render_query_for_source_table(
+                    fallback_query.query,
+                    source_database=source_database,
+                    source_table=source_table,
+                )
+                fallback_rows: Optional[int]
+                try:
+                    raw_fallback_rows = estimate_rows(rendered_fallback)
+                    if raw_fallback_rows is None:
+                        fallback_rows = None
+                    else:
+                        fallback_rows = max(0, int(raw_fallback_rows))
+                except Exception:
+                    fallback_rows = None
+
+                if fallback_rows is not None and fallback_rows > 0:
+                    kept.append(fallback_query)
+                    kept_columns.add(column_name)
+                    continue
+
+            logger.warning(
+                "QueryPlanBuilder: measured column has no confirmed non-empty auto query "
+                "(table=%s, column=%s)",
+                table_ddl.name,
+                column_name,
+            )
+
+        deduplicated: list[GeneratedQuery] = []
+        seen_queries: set[str] = set()
+        for query in kept:
+            normalized_sql = str(query.query).strip()
+            if not normalized_sql or normalized_sql in seen_queries:
+                continue
+            seen_queries.add(normalized_sql)
+            deduplicated.append(query)
+
+        logger.info(
+            "QueryPlanBuilder: non-empty auto query filter "
+            "(table=%s, before=%d, after=%d, dropped_zero_rows=%d, dropped_unknown_rows=%d)",
+            table_ddl.name,
+            len(auto_queries),
+            len(deduplicated),
+            len(dropped_zero_rows),
+            len(dropped_unknown_rows),
+        )
+        return deduplicated
+
         candidate_columns = list(measured_columns or [])
         if not candidate_columns:
             candidate_columns = [column.name for column in table_ddl.columns]
@@ -325,17 +575,41 @@ class QueryPlanBuilder:
         if not deduplicated_candidates:
             return {}
 
+        cache_key = (str(source_database), str(source_table))
+        cached_ranges = dict(self._range_tokens_cache.get(cache_key, {}))
+        missing_columns = [
+            column_name
+            for column_name in deduplicated_candidates
+            if column_name not in cached_ranges
+        ]
+
         try:
-            ranges = provider.fetch_column_ranges(
-                source_database,
-                source_table,
-                deduplicated_candidates,
-            )
+            if missing_columns:
+                fetched_ranges = provider.fetch_column_ranges(
+                    source_database,
+                    source_table,
+                    missing_columns,
+                )
+                cached_ranges.update(
+                    {
+                        str(column_name): dict(payload)
+                        for column_name, payload in fetched_ranges.items()
+                        if isinstance(payload, dict)
+                    }
+                )
+                self._range_tokens_cache[cache_key] = dict(cached_ranges)
+            ranges = {
+                column_name: dict(cached_ranges[column_name])
+                for column_name in deduplicated_candidates
+                if column_name in cached_ranges
+            }
             logger.info(
-                "QueryPlanBuilder: data-aware range tokens collected (table=%s, columns=%d, ranges=%d)",
+                "QueryPlanBuilder: data-aware range tokens resolved (table=%s, columns=%d, ranges=%d, cache_hit=%d, fetched=%d)",
                 table_ddl.name,
                 len(deduplicated_candidates),
                 len(ranges),
+                len(deduplicated_candidates) - len(missing_columns),
+                len(missing_columns),
             )
             return ranges
         except Exception:
@@ -418,6 +692,16 @@ class QueryPlanBuilder:
                         table_ddl,
                         auto_select_limit=queries_config.auto_select_limit,
                     ).generate_data_aware_like_queries(auto_like_tokens)
+
+            auto_generated_queries = self._filter_auto_queries_with_non_empty_result(
+                auto_queries=auto_generated_queries,
+                table_ddl=table_ddl,
+                provider=provider,
+                source_database=source_database,
+                source_table=source_table,
+                measured_columns=measured_columns,
+                auto_select_limit=queries_config.auto_select_limit,
+            )
 
             auto_queries = [
                 Query(
@@ -1240,6 +1524,7 @@ class BenchmarkRunner:
         run_started_at_provider: Optional[Callable[[], datetime]] = None,
         table_execution_strategies: Optional[Dict[str, TableExecutionStrategy]] = None,
         default_table_execution_strategy: Optional[TableExecutionStrategy] = None,
+        resume_incomplete_run: bool = False,
     ) -> None:
         """
         Сохраняет engine и адаптер выполнения.
@@ -1256,6 +1541,9 @@ class BenchmarkRunner:
         )
         self._last_benchmark_started_at: Optional[datetime] = None
         self._active_source_benchmark: Optional[SourceBenchmarkResult] = None
+        self._resume_incomplete_run = bool(resume_incomplete_run)
+        self._active_resume_scope_key: Optional[Tuple[int, str, str, str]] = None
+        self._active_resume_variant_tables: set[str] = set()
         self._execution_adapter.bind_result_store(result_store)
         self._default_table_execution_strategy = (
             default_table_execution_strategy or DefaultTableExecutionStrategy()
@@ -1325,7 +1613,12 @@ class BenchmarkRunner:
         прокидывает его результат в каждый `VariantJob.source_benchmark`.
         """
         self._validate_scoring_formulas_before_run(benchmark_ids=benchmark_ids)
-        run_id = benchmark_run_id if benchmark_run_id is not None else self._next_run_id()
+        table_plans = list(self._engine.iter_table_plans(benchmark_ids=benchmark_ids))
+        run_id = self._resolve_run_id_for_run(
+            benchmark_run_id=benchmark_run_id,
+            benchmark_ids=benchmark_ids,
+            table_plans=table_plans,
+        )
         if run_id <= 0:
             raise ValueError(f"benchmark_run_id должен быть > 0, получено: {run_id}")
         run_started_at = self._next_run_started_at()
@@ -1386,12 +1679,29 @@ class BenchmarkRunner:
                 open_global_progress_hook(scope_name=scope_name)
 
         try:
-            for table_plan in self._engine.iter_table_plans(benchmark_ids=benchmark_ids):
+            for table_plan in table_plans:
                 strategy_key = self._canonical_strategy_key(table_plan.strategy)
                 strategy = self._table_execution_strategies.get(
                     strategy_key,
                     self._default_table_execution_strategy,
                 )
+                if (
+                    self._resume_incomplete_run
+                    and self._is_table_plan_finished_in_store(
+                        benchmark_run_id=run_id,
+                        table_plan=table_plan,
+                    )
+                ):
+                    logger.info(
+                        "BenchmarkRunner: table plan уже завершён в предыдущей попытке, пропускаем "
+                        "(run_id=%d, benchmark=%s, table=%s.%s, strategy=%s)",
+                        run_id,
+                        table_plan.benchmark_id,
+                        table_plan.database,
+                        table_plan.table,
+                        strategy_key,
+                    )
+                    continue
                 logger.info(
                     "BenchmarkRunner: старт table plan "
                     "(run_id=%d, benchmark=%s, table=%s.%s, strategy=%s)",
@@ -1401,11 +1711,16 @@ class BenchmarkRunner:
                     table_plan.table,
                     strategy_key,
                 )
+                self._activate_resume_state_for_table(
+                    benchmark_run_id=run_id,
+                    table_plan=table_plan,
+                )
                 self._active_source_benchmark = self._execute_source_benchmark(
                     table_plan=table_plan,
                     benchmark_run_id=run_id,
                     benchmark_started_at=run_started_at,
                 )
+                table_plan_completed = False
                 try:
                     self._register_benchmark_run_start_if_supported(
                         table_plan=table_plan,
@@ -1423,6 +1738,7 @@ class BenchmarkRunner:
                             table_plan.table,
                             self._active_source_benchmark.metrics.get("skip_reason", "unknown"),
                         )
+                        table_plan_completed = True
                         continue
                     try:
                         strategy.execute_table(
@@ -1439,6 +1755,7 @@ class BenchmarkRunner:
                             table_plan.database,
                             table_plan.table,
                         )
+                        table_plan_completed = True
                     except Exception:
                         if strategy_key != "sequential_phased_topn_strategy":
                             raise
@@ -1452,10 +1769,20 @@ class BenchmarkRunner:
                             strategy_key,
                         )
                 finally:
-                    self._register_benchmark_run_finish_if_supported(
-                        table_plan=table_plan,
-                        benchmark_run_id=run_id,
-                    )
+                    if table_plan_completed:
+                        self._register_benchmark_run_finish_if_supported(
+                            table_plan=table_plan,
+                            benchmark_run_id=run_id,
+                        )
+                    elif self._resume_incomplete_run:
+                        logger.warning(
+                            "BenchmarkRunner: table plan не завершён, оставляем как незавершённый для resume "
+                            "(run_id=%d, benchmark=%s, table=%s.%s)",
+                            run_id,
+                            table_plan.benchmark_id,
+                            table_plan.database,
+                            table_plan.table,
+                        )
                     finalize_progress_hook = getattr(
                         self._execution_adapter,
                         "finalize_progress_scope",
@@ -1464,6 +1791,7 @@ class BenchmarkRunner:
                     if callable(finalize_progress_hook):
                         finalize_progress_hook(wait=False)
                     self._active_source_benchmark = None
+                    self._clear_active_resume_state()
         finally:
             finalize_global_progress_hook = getattr(
                 self._execution_adapter,
@@ -1474,6 +1802,175 @@ class BenchmarkRunner:
                 finalize_global_progress_hook(wait=False)
         logger.info("BenchmarkRunner: run завершён (run_id=%d)", run_id)
         return run_id
+
+    def _resolve_run_id_for_run(
+        self,
+        *,
+        benchmark_run_id: Optional[int],
+        benchmark_ids: Optional[Sequence[str]],
+        table_plans: Sequence[TableBenchmarkPlan],
+    ) -> int:
+        """Возвращает run_id с учётом resume-политики."""
+        if benchmark_run_id is not None:
+            return int(benchmark_run_id)
+        if not self._resume_incomplete_run or self._result_store is None:
+            return self._next_run_id()
+
+        max_id_getter = getattr(self._result_store, "max_benchmark_run_id", None)
+        if not callable(max_id_getter):
+            return self._next_run_id()
+        try:
+            latest_run_id = int(max_id_getter() or 0)
+        except Exception:
+            logger.exception(
+                "BenchmarkRunner: не удалось прочитать max benchmark_run_id для resume-режима"
+            )
+            return self._next_run_id()
+        if latest_run_id <= 0:
+            return self._next_run_id()
+
+        unfinished_table_plans: list[TableBenchmarkPlan] = []
+        for table_plan in table_plans:
+            if not self._is_table_plan_finished_in_store(
+                benchmark_run_id=latest_run_id,
+                table_plan=table_plan,
+            ):
+                unfinished_table_plans.append(table_plan)
+        if unfinished_table_plans:
+            sample = [
+                f"{plan.benchmark_id}:{plan.database}.{plan.table}"
+                for plan in unfinished_table_plans[:5]
+            ]
+            logger.warning(
+                "BenchmarkRunner: найден незавершённый run, продолжаем "
+                "(run_id=%d, benchmark_ids=%s, unfinished_tables=%d, sample=%s)",
+                latest_run_id,
+                list(benchmark_ids) if benchmark_ids else "all",
+                len(unfinished_table_plans),
+                sample,
+            )
+            return latest_run_id
+
+        next_run_id = self._next_run_id()
+        logger.info(
+            "BenchmarkRunner: предыдущий run завершён, стартуем новый "
+            "(latest_run_id=%d, next_run_id=%d)",
+            latest_run_id,
+            next_run_id,
+        )
+        return next_run_id
+
+    def _activate_resume_state_for_table(
+        self,
+        *,
+        benchmark_run_id: int,
+        table_plan: TableBenchmarkPlan,
+    ) -> None:
+        """Подгружает список уже сохранённых variant_table для текущего table-plan."""
+        self._clear_active_resume_state()
+        if not self._resume_incomplete_run or self._result_store is None:
+            return
+        table_scope_key = (
+            benchmark_run_id,
+            table_plan.benchmark_id,
+            table_plan.database,
+            table_plan.table,
+        )
+        list_variant_tables_hook = getattr(self._result_store, "list_variant_tables", None)
+        if not callable(list_variant_tables_hook):
+            return
+        try:
+            existing_variant_tables = {
+                str(item).strip()
+                for item in (
+                    list_variant_tables_hook(
+                        benchmark_run_id=benchmark_run_id,
+                        benchmark_id=table_plan.benchmark_id,
+                        source_database=table_plan.database,
+                        source_table=table_plan.table,
+                    )
+                    or []
+                )
+                if str(item).strip()
+            }
+        except Exception:
+            logger.exception(
+                "BenchmarkRunner: не удалось прочитать сохранённые variant_table для resume "
+                "(run_id=%d, benchmark=%s, table=%s.%s)",
+                benchmark_run_id,
+                table_plan.benchmark_id,
+                table_plan.database,
+                table_plan.table,
+            )
+            return
+        self._active_resume_scope_key = table_scope_key
+        self._active_resume_variant_tables = existing_variant_tables
+        if existing_variant_tables:
+            logger.info(
+                "BenchmarkRunner: resume-режим для table plan "
+                "(run_id=%d, benchmark=%s, table=%s.%s, existing_variants=%d)",
+                benchmark_run_id,
+                table_plan.benchmark_id,
+                table_plan.database,
+                table_plan.table,
+                len(existing_variant_tables),
+            )
+
+    def _clear_active_resume_state(self) -> None:
+        """Сбрасывает кэш resume-данных по текущему table-plan."""
+        self._active_resume_scope_key = None
+        self._active_resume_variant_tables = set()
+
+    def _is_table_plan_finished_in_store(
+        self,
+        *,
+        benchmark_run_id: int,
+        table_plan: TableBenchmarkPlan,
+    ) -> bool:
+        """Проверяет через result-store, завершён ли table-plan для данного run."""
+        if self._result_store is None:
+            return False
+        finish_hook = getattr(self._result_store, "is_benchmark_run_table_finished", None)
+        if not callable(finish_hook):
+            return False
+        try:
+            return bool(
+                finish_hook(
+                    benchmark_run_id=benchmark_run_id,
+                    benchmark_id=table_plan.benchmark_id,
+                    source_database=table_plan.database,
+                    source_table=table_plan.table,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "BenchmarkRunner: не удалось проверить статус завершения table-plan "
+                "(run_id=%d, benchmark=%s, table=%s.%s)",
+                benchmark_run_id,
+                table_plan.benchmark_id,
+                table_plan.database,
+                table_plan.table,
+            )
+            return False
+
+    def _is_variant_already_persisted_for_active_scope(self, job: VariantJob) -> bool:
+        """Возвращает `True`, если variant уже сохранён в resume-scope текущей таблицы."""
+        if not self._resume_incomplete_run:
+            return False
+        if self._active_resume_scope_key is None:
+            return False
+        current_scope = (
+            job.benchmark_run_id,
+            job.benchmark_id,
+            job.source_database,
+            job.source_table,
+        )
+        if current_scope != self._active_resume_scope_key:
+            return False
+        variant_table = str(job.variant_table or "").strip()
+        if not variant_table:
+            return False
+        return variant_table in self._active_resume_variant_tables
 
     @property
     def last_benchmark_started_at(self) -> Optional[datetime]:
@@ -1495,8 +1992,8 @@ class BenchmarkRunner:
             benchmark_started_at=benchmark_started_at,
             source_benchmark=source_benchmark,
         ):
-            self._execute_and_store(job)
-            dispatched_jobs += 1
+            if self._execute_and_store(job):
+                dispatched_jobs += 1
         logger.info(
             "BenchmarkRunner: table plan dispatch завершён "
             "(run_id=%d, benchmark=%s, table=%s.%s, jobs=%d)",
@@ -2156,13 +2653,25 @@ class BenchmarkRunner:
             "Валидация scoring.expression не пройдена: benchmark run остановлен"
         )
 
-    def _execute_and_store(self, job: VariantJob) -> None:
+    def _execute_and_store(self, job: VariantJob) -> bool:
         """
         Выполняет/диспачит вариант.
 
         Важно: runner не сохраняет результаты. Сохранение выполняет backend/воркер
         внутри execution adapter реализации.
         """
+        if self._is_variant_already_persisted_for_active_scope(job):
+            logger.info(
+                "BenchmarkRunner: пропуск variant job, уже сохранён в resume-scope "
+                "(run_id=%d, benchmark=%s, table=%s.%s, variant=%s, mode=%s)",
+                job.benchmark_run_id,
+                job.benchmark_id,
+                job.source_database,
+                job.source_table,
+                job.variant_table,
+                job.variant_meta.mode,
+            )
+            return False
         logger.info(
             "BenchmarkRunner: dispatch variant job "
             "(run_id=%d, benchmark=%s, table=%s.%s, variant=%s, mode=%s, index=%d)",
@@ -2175,3 +2684,7 @@ class BenchmarkRunner:
             job.variant_meta.global_index,
         )
         self._execution_adapter.execute_variant(job)
+        variant_table = str(job.variant_table or "").strip()
+        if variant_table:
+            self._active_resume_variant_tables.add(variant_table)
+        return True

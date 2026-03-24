@@ -76,6 +76,7 @@ For each winner from `index_granularity` stage:
 For each `index_granularity` parent:
 
 - merge top-1 index option per column into one full schema;
+- even with tight beam/limit, forced top-1-per-column combination is injected and benchmarked;
 - run full benchmark (`final_validation`);
 - optional post-merge local search:
   - replace one column choice with top-2/top-3/... and re-run,
@@ -87,9 +88,10 @@ Final winner is top by score in `final_validation`.
 
 Worker-side select measurements use the same stabilization protocol for baseline and variants:
 
-- after INSERT stage: `OPTIMIZE TABLE ... FINAL`;
-- then wait until `system.merges` for the table becomes `0`;
 - in `warm` mode, warmup is executed before every measured query run.
+- `cache_mode=cold` forces `use_uncompressed_cache=0` for measured query.
+- SELECT metrics are taken from clickhouse-connect summary by default.
+- `system.query_log` mode is optional (`BENCH_SELECT_USE_QUERY_LOG=1`) and used with polling.
 
 Per-query select metrics include:
 
@@ -99,6 +101,15 @@ Per-query select metrics include:
 
 Variant quality is persisted as `measurement_quality_flag = stable`
 (noise gating disabled).
+
+## Auto Query Contract
+
+- Auto mode generates one-column queries for measured columns only.
+- For string columns: `LIKE '%...%'` shape is always used.
+- For datetime/numeric columns: only range filters (`>` / `<`) are generated.
+- `auto_include_miss_queries` is optional (default `false`).
+- If metadata provider supports `estimate_query_result_rows`, auto-queries are filtered to confirmed non-empty (`rows > 0`).
+- If a measured column still has no confirmed non-empty query after fallback, runtime logs warning and continues (no benchmark crash).
 
 ## `variant_params` Fields (actual runtime)
 

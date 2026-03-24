@@ -221,6 +221,28 @@ class BenchmarkVariantResult(_FrozenModel):
     source_table_insert_bytes_per_second_measurements_percentiles_readable: List[str] = (
         Field(default_factory=list)
     )
+    tested_table_insert_read_bytes_measurements: List[float] = Field(default_factory=list)
+    source_table_insert_read_bytes_measurements: List[float] = Field(default_factory=list)
+    tested_table_insert_read_bytes_measurements_percentiles: List[float] = Field(
+        default_factory=list
+    )
+    source_table_insert_read_bytes_measurements_percentiles: List[float] = Field(
+        default_factory=list
+    )
+    tested_table_insert_read_bytes_measurements_percentiles_speed_up_coefs: List[float] = (
+        Field(default_factory=list)
+    )
+    tested_table_insert_written_bytes_measurements: List[float] = Field(default_factory=list)
+    source_table_insert_written_bytes_measurements: List[float] = Field(default_factory=list)
+    tested_table_insert_written_bytes_measurements_percentiles: List[float] = Field(
+        default_factory=list
+    )
+    source_table_insert_written_bytes_measurements_percentiles: List[float] = Field(
+        default_factory=list
+    )
+    tested_table_insert_written_bytes_measurements_percentiles_speed_up_coefs: List[float] = (
+        Field(default_factory=list)
+    )
     tested_table_insert_metrics_json: Optional[str] = None
     source_table_insert_metrics_json: Optional[str] = None
     tested_table_select_test_query: Optional[str] = None

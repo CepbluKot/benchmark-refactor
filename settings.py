@@ -9,6 +9,8 @@ JSON-конфиги передаются как base64-строки:
 
 Дополнительные параметры launcher:
   - BENCH_TEST_DATABASE
+  - BENCH_RESUME_INCOMPLETE_RUN
+  - BENCH_KEEP_ALIVE_AFTER_RUN
   - BENCH_RESULT_CONNECTION_ID
   - BENCH_RESULT_DATABASE
   - BENCH_RESULT_TABLE
@@ -105,6 +107,8 @@ class AppSettings(BaseSettings):
 
     benchmark_ids: Annotated[List[str], NoDecode] = Field(default_factory=list)
     benchmark_run_id: Optional[int] = None
+    resume_incomplete_run: bool = False
+    keep_alive_after_run: bool = False
     test_database: Optional[str] = None
     result_connection_id: Optional[str] = None
     result_database: str = "benchmark_results"
