@@ -1,0 +1,420 @@
+name: benchmark-hatchet-m0
+
+x-resource-limit: &resource-limit
+  cpus: 1.0
+  mem_limit: 1024m
+  pids_limit: 256
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: local
+    options:
+      max-size: 10m
+      max-file: "3"
+
+x-hatchet-environment: &hatchet-environment
+  DATABASE_URL: postgresql://hatchet:${M0_HATCHET_DATABASE_PASSWORD:?required}@postgres:5432/hatchet?sslmode=disable
+  SERVER_MSGQUEUE_KIND: postgres
+  SERVER_MSGQUEUE_PUBSUB_KIND: postgres
+  SERVER_MSGQUEUE_PUBSUB_POSTGRES_MAX_CONNS: "2"
+  SERVER_MSGQUEUE_PUBSUB_POSTGRES_MIN_CONNS: "1"
+  SERVER_SECURITY_CHECK_ENABLED: "false"
+  SERVER_ANALYTICS_POSTHOG_ENABLED: "false"
+  SERVER_ALERTING_SENTRY_ENABLED: "false"
+  SERVER_PYLON_ENABLED: "false"
+  SERVER_AUTH_GOOGLE_ENABLED: "false"
+  SERVER_AUTH_GITHUB_ENABLED: "false"
+  SERVER_EMAIL_POSTMARK_ENABLED: "false"
+  SERVER_EMAIL_SMTP_ENABLED: "false"
+  SERVER_TENANT_ALERTING_SLACK_ENABLED: "false"
+  SERVER_OTEL_METRICS_ENABLED: "false"
+  SERVER_OBSERVABILITY_ENABLED: "false"
+  SERVER_PROMETHEUS_ENABLED: "false"
+  SERVER_MONITORING_ENABLED: "false"
+  SERVER_ALLOW_SIGNUP: "false"
+  SERVER_ALLOW_INVITES: "false"
+  SERVER_ALLOW_CREATE_TENANT: "false"
+  SERVER_AUTH_BASIC_AUTH_ENABLED: "true"
+  SERVER_AUTH_SET_EMAIL_VERIFIED: "true"
+  SERVER_URL: http://localhost:${M0_HATCHET_UI_PORT:-18880}
+  SERVER_ALLOWED_ORIGINS: http://localhost:${M0_HATCHET_UI_PORT:-18880}
+  SERVER_AUTH_COOKIE_DOMAIN: localhost
+  SERVER_AUTH_COOKIE_INSECURE: "true"
+  SERVER_GRPC_BIND_ADDRESS: 0.0.0.0
+  SERVER_GRPC_PORT: "7070"
+  SERVER_GRPC_INSECURE: "true"
+  SERVER_GRPC_BROADCAST_ADDRESS: hatchet-engine:7070
+  SERVER_INTERNAL_CLIENT_BASE_STRATEGY: none
+  SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS: hatchet-engine:7070
+  HATCHET_CLI_TELEMETRY_ENABLED: "false"
+
+x-product-environment: &product-environment
+  PRODUCT_DATABASE_URL: postgresql+psycopg://benchmark_app:${M0_PRODUCT_APP_PASSWORD:?required}@postgres:5432/benchmark_control
+  M0_ACTIVE_STUDY_LIMIT: ${M0_ACTIVE_STUDY_LIMIT:-100}
+  M0_ALLOWED_RELEASE_PAIRS: "${M0_CORE_RELEASE_ID:-m0-a}:${M0_PLUGIN_RELEASE_ID:-m0-a}"
+
+x-worker-environment: &worker-environment
+  HATCHET_CLIENT_TOKEN_FILE: /run/hatchet-token/token
+  HATCHET_CLIENT_SERVER_URL: http://hatchet-api:8080
+  HATCHET_CLIENT_HOST_PORT: hatchet-engine:7070
+  HATCHET_CLIENT_TLS_STRATEGY: none
+  HATCHET_CLIENT_WORKER_HEALTHCHECK_ENABLED: "true"
+  HATCHET_CLIENT_WORKER_HEALTHCHECK_PORT: "8001"
+  HATCHET_CLIENT_WORKER_HEALTHCHECK_BIND_ADDRESS: 0.0.0.0
+
+services:
+  postgres:
+    <<: *resource-limit
+    image: postgres:15-alpine@sha256:cd17e2ac98240fce1541ad2a803b34009b4eea5aec8a832363cdc7eca62e722e
+    command: ["postgres", "-c", "max_connections=80"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${M0_POSTGRES_SUPERUSER_PASSWORD:?required}
+      POSTGRES_DB: postgres
+      HATCHET_DATABASE_PASSWORD: ${M0_HATCHET_DATABASE_PASSWORD:?required}
+      PRODUCT_MIGRATOR_PASSWORD: ${M0_PRODUCT_MIGRATOR_PASSWORD:?required}
+      PRODUCT_APP_PASSWORD: ${M0_PRODUCT_APP_PASSWORD:?required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-postgres.sh:/docker-entrypoint-initdb.d/10-init-postgres.sh:ro
+    shm_size: 128m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [hatchet-db, product-db]
+
+  hatchet-migrate:
+    <<: *resource-limit
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-migrate@sha256:fa59227943ca3b607ed025e393cf267b554568b711bdb4b80a15a4581ad78a98
+    command: ["/hatchet/hatchet-migrate"]
+    environment:
+      DATABASE_URL: postgresql://hatchet:${M0_HATCHET_DATABASE_PASSWORD:?required}@postgres:5432/hatchet?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [hatchet-db]
+
+  setup-config:
+    <<: *resource-limit
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin@sha256:3fe433db638f8c2570aa28dd6bc2578774399390880639cce4ea6918598384f1
+    command:
+      - /hatchet/hatchet-admin
+      - quickstart
+      - --skip
+      - certs
+      - --generated-config-dir
+      - /hatchet/config
+      - --overwrite=false
+    environment:
+      <<: *hatchet-environment
+      ADMIN_EMAIL: ${M0_HATCHET_ADMIN_EMAIL:?required}
+      ADMIN_PASSWORD: ${M0_HATCHET_ADMIN_PASSWORD:?required}
+    volumes:
+      - hatchet-config:/hatchet/config
+    depends_on:
+      hatchet-migrate:
+        condition: service_completed_successfully
+    networks: [hatchet-db]
+
+  worker-token:
+    <<: *resource-limit
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin@sha256:3fe433db638f8c2570aa28dd6bc2578774399390880639cce4ea6918598384f1
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 077
+        if [ ! -s /run/hatchet-token/token ]; then
+          /hatchet/hatchet-admin token create \
+            --config /hatchet/config \
+            --name m0-worker \
+            --expiresIn 168h \
+            > /run/hatchet-token/token.tmp
+          mv /run/hatchet-token/token.tmp /run/hatchet-token/token
+        fi
+        chmod 0444 /run/hatchet-token/token
+    environment:
+      <<: *hatchet-environment
+    volumes:
+      - hatchet-config:/hatchet/config:ro
+      - hatchet-token:/run/hatchet-token
+    depends_on:
+      setup-config:
+        condition: service_completed_successfully
+    networks: [hatchet-db]
+
+  hatchet-engine:
+    <<: *resource-limit
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-engine@sha256:5c1d23311d7117f9a68c32ab43b9a8b814f7b50982fe310d9d0f720f722e5ac9
+    command: ["/hatchet/hatchet-engine", "--config", "/hatchet/config"]
+    restart: unless-stopped
+    environment:
+      <<: *hatchet-environment
+      DATABASE_MAX_CONNS: "8"
+      DATABASE_MIN_CONNS: "1"
+      DATABASE_DDL_POOL_MAX_CONNS: "2"
+      DATABASE_DDL_POOL_MIN_CONNS: "1"
+    volumes:
+      - hatchet-config:/hatchet/config:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8733/ready >/dev/null"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    depends_on:
+      setup-config:
+        condition: service_completed_successfully
+    networks: [hatchet-db, worker-bus]
+
+  hatchet-api:
+    <<: *resource-limit
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-api@sha256:ecb806e8464a30177c4ac0f3541d76c6f5b362ab0665003e02f767d0b0c7b83b
+    command: ["/hatchet/hatchet-api", "--config", "/hatchet/config"]
+    restart: unless-stopped
+    environment:
+      <<: *hatchet-environment
+      DATABASE_MAX_CONNS: "5"
+      DATABASE_MIN_CONNS: "1"
+      DATABASE_DDL_POOL_MAX_CONNS: "2"
+      DATABASE_DDL_POOL_MIN_CONNS: "1"
+    volumes:
+      - hatchet-config:/hatchet/config:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/ready >/dev/null"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    depends_on:
+      hatchet-engine:
+        condition: service_healthy
+    networks: [hatchet-db, worker-bus, operator-ui]
+
+  product-migrate:
+    <<: *resource-limit
+    build:
+      context: ../..
+      dockerfile: deploy/hatchet_spike/Dockerfile.control
+    image: benchmark-m0-control:local
+    command: ["m0-migrate"]
+    environment:
+      PRODUCT_DATABASE_URL: postgresql+psycopg://benchmark_migrator:${M0_PRODUCT_MIGRATOR_PASSWORD:?required}@postgres:5432/benchmark_control
+      M0_ALEMBIC_CONFIG: /app/adapters/postgres/alembic.ini
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [product-db]
+
+  control-api:
+    <<: *resource-limit
+    image: benchmark-m0-control:local
+    command: ["m0-control-api"]
+    restart: unless-stopped
+    environment:
+      <<: *product-environment
+    ports:
+      - "127.0.0.1:${M0_CONTROL_PORT:-18800}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+    depends_on:
+      product-migrate:
+        condition: service_completed_successfully
+    networks: [product-db, ingress]
+
+  attempt-api:
+    <<: *resource-limit
+    image: benchmark-m0-control:local
+    command: ["m0-attempt-api"]
+    restart: unless-stopped
+    environment:
+      <<: *product-environment
+    stop_grace_period: 20s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+    depends_on:
+      product-migrate:
+        condition: service_completed_successfully
+    networks: [product-db, plugin-api]
+
+  finalization-api:
+    <<: *resource-limit
+    image: benchmark-m0-control:local
+    command: ["m0-finalization-api"]
+    restart: unless-stopped
+    environment:
+      <<: *product-environment
+    stop_grace_period: 20s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; socket.create_connection(('127.0.0.1', 50052), 2).close()"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+    depends_on:
+      product-migrate:
+        condition: service_completed_successfully
+    networks: [product-db, core-api]
+
+  core-worker:
+    <<: *resource-limit
+    image: benchmark-m0-control:local
+    command: ["m0-core-worker"]
+    restart: unless-stopped
+    environment:
+      <<: *worker-environment
+      M0_CORE_RELEASE_ID: ${M0_CORE_RELEASE_ID:-m0-a}
+      M0_PLUGIN_RELEASE_ID: ${M0_PLUGIN_RELEASE_ID:-m0-a}
+      M0_FINALIZATION_API_TARGET: finalization-api:50052
+    volumes:
+      - hatchet-token:/run/hatchet-token:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    depends_on:
+      worker-token:
+        condition: service_completed_successfully
+      hatchet-api:
+        condition: service_healthy
+      finalization-api:
+        condition: service_healthy
+    networks: [worker-bus, core-api]
+
+  toy-worker:
+    <<: *resource-limit
+    build:
+      context: ../..
+      dockerfile: deploy/hatchet_spike/Dockerfile.toy-plugin
+    image: benchmark-m0-toy-plugin:local
+    command: ["m0-toy-plugin-worker"]
+    restart: unless-stopped
+    environment:
+      <<: *worker-environment
+      M0_PLUGIN_RELEASE_ID: ${M0_PLUGIN_RELEASE_ID:-m0-a}
+      M0_ATTEMPT_API_TARGET: attempt-api:50051
+      M0_TOY_FAULT_POINT: ${M0_TOY_FAULT_POINT:-}
+    volumes:
+      - hatchet-token:/run/hatchet-token:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    depends_on:
+      worker-token:
+        condition: service_completed_successfully
+      hatchet-api:
+        condition: service_healthy
+      attempt-api:
+        condition: service_healthy
+    networks: [worker-bus, plugin-api]
+
+  command-starter:
+    <<: *resource-limit
+    image: benchmark-m0-control:local
+    command: ["m0-command-starter"]
+    restart: unless-stopped
+    environment:
+      <<: [*product-environment, *worker-environment]
+    volumes:
+      - hatchet-token:/run/hatchet-token:ro
+    depends_on:
+      core-worker:
+        condition: service_healthy
+      toy-worker:
+        condition: service_healthy
+    networks: [worker-bus, product-db]
+
+  resource-reaper:
+    <<: *resource-limit
+    image: benchmark-m0-control:local
+    command: ["m0-reaper"]
+    restart: unless-stopped
+    environment:
+      <<: *product-environment
+    depends_on:
+      product-migrate:
+        condition: service_completed_successfully
+    networks: [product-db]
+
+  hatchet-frontend:
+    <<: *resource-limit
+    profiles: ["operator-ui"]
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-frontend@sha256:4ba75418ccb0a1b1bd0a78ca0e354c61f7b7c43afcfa83f6bf2b1d6a8eeab44b
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      hatchet-api:
+        condition: service_healthy
+    networks: [operator-ui]
+
+  operator-proxy:
+    <<: *resource-limit
+    profiles: ["operator-ui"]
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${M0_HATCHET_UI_PORT:-18880}:8080"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      hatchet-frontend:
+        condition: service_healthy
+    networks: [operator-ui, ingress]
+
+networks:
+  hatchet-db:
+    internal: true
+  product-db:
+    internal: true
+  worker-bus:
+    internal: true
+  plugin-api:
+    internal: true
+  core-api:
+    internal: true
+  operator-ui:
+    internal: true
+  ingress:
+
+volumes:
+  postgres-data:
+  hatchet-config:
+  hatchet-token:

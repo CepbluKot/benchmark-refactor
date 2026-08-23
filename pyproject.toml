@@ -1,3 +1,31 @@
+[project]
+name = "benchmark-refactor-workspace"
+version = "0.0.0"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "hypothesis==6.138.3",
+    "pytest==8.4.2",
+    "pytest-asyncio==1.1.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = [
+    "packages/experiment_domain",
+    "packages/optimizer_sdk",
+    "packages/runtime_services",
+    "packages/core_workflows",
+    "adapters/postgres",
+    "adapters/hatchet",
+    "apps/m0_control_plane",
+    "plugins/toy",
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
 testpaths = ["tests"]

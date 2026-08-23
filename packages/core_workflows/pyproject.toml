@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "benchmark-core-workflows"
+version = "0.0.1"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "benchmark-optimizer-sdk",
+    "hatchet-sdk==1.37.0",
+]
+
+[tool.uv.sources]
+benchmark-optimizer-sdk = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/core_workflows"]

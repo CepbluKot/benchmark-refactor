@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "benchmark-m0-control"
+version = "0.0.1"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "benchmark-core-workflows",
+    "benchmark-hatchet-adapter",
+    "benchmark-optimizer-sdk",
+    "benchmark-postgres-adapter",
+    "benchmark-runtime-services",
+    "fastapi==0.116.1",
+    "grpcio>=1.76.0,<2",
+    "hatchet-sdk==1.37.0",
+    "pydantic==2.11.7",
+    "typer==0.16.1",
+    "uvicorn==0.35.0",
+]
+
+[project.scripts]
+m0-attempt-api = "benchmark_m0_control.attempt_server:main"
+m0-finalization-api = "benchmark_m0_control.attempt_server:main_finalization"
+m0-command-starter = "benchmark_m0_control.starter:main"
+m0-control-api = "benchmark_m0_control.control_api:main"
+m0-core-worker = "benchmark_m0_control.core_worker:main"
+m0-migrate = "benchmark_m0_control.migrator:main"
+m0-reaper = "benchmark_m0_control.reaper:main"
+
+[tool.uv.sources]
+benchmark-core-workflows = { workspace = true }
+benchmark-hatchet-adapter = { workspace = true }
+benchmark-optimizer-sdk = { workspace = true }
+benchmark-postgres-adapter = { workspace = true }
+benchmark-runtime-services = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/benchmark_m0_control"]

@@ -1,0 +1,15 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "benchmark-runtime-services"
+version = "0.0.1"
+requires-python = ">=3.12,<3.13"
+dependencies = ["benchmark-experiment-domain"]
+
+[tool.uv.sources]
+benchmark-experiment-domain = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/runtime_services"]

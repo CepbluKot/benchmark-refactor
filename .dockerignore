@@ -1,0 +1,14 @@
+*
+!.dockerignore
+!pyproject.toml
+!uv.lock
+!packages/
+!packages/**
+!adapters/
+!adapters/**
+!apps/
+!apps/m0_control_plane/
+!apps/m0_control_plane/**
+!plugins/
+!plugins/toy/
+!plugins/toy/**

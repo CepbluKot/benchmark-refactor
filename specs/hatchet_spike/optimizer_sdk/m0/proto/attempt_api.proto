@@ -1,0 +1,113 @@
+syntax = "proto3";
+
+package benchmark.m0.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service AttemptResourceService {
+  rpc BeginAttempt(BeginAttemptRequest) returns (BeginAttemptResponse);
+  rpc RegisterResource(RegisterResourceRequest) returns (RegisterResourceResponse);
+  rpc CompleteAttempt(CompleteAttemptRequest) returns (CompleteAttemptResponse);
+  rpc ReleaseResource(ReleaseResourceRequest) returns (ReleaseResourceResponse);
+}
+
+service StudyFinalizationService {
+  rpc FinalizeStudy(FinalizeStudyRequest) returns (FinalizeStudyResponse);
+}
+
+enum AttemptStartStatus {
+  ATTEMPT_START_STATUS_UNSPECIFIED = 0;
+  ATTEMPT_START_STATUS_STARTED = 1;
+  ATTEMPT_START_STATUS_EXISTING = 2;
+  ATTEMPT_START_STATUS_ALREADY_ACCEPTED = 3;
+  ATTEMPT_START_STATUS_CANCELLED = 4;
+}
+
+enum CompletionStatus {
+  COMPLETION_STATUS_UNSPECIFIED = 0;
+  COMPLETION_STATUS_ACCEPTED = 1;
+  COMPLETION_STATUS_ALREADY_ACCEPTED = 2;
+  COMPLETION_STATUS_REJECTED_STALE = 3;
+  COMPLETION_STATUS_REJECTED_CANCELLED = 4;
+}
+
+message BeginAttemptRequest {
+  string schema_version = 1;
+  string study_id = 2;
+  string logical_job_id = 3;
+  string begin_request_id = 4;
+  string physical_invocation_id = 5;
+  string hatchet_workflow_run_id = 6;
+  string hatchet_task_run_id = 7;
+  string plugin_release_id = 8;
+  string worker_id = 9;
+  string operation_contract_sha256 = 10;
+}
+
+message BeginAttemptResponse {
+  string schema_version = 1;
+  AttemptStartStatus status = 2;
+  optional string attempt_id = 3;
+  optional int64 fence_token = 4;
+  optional google.protobuf.Timestamp lease_expires_at = 5;
+  optional string accepted_result_sha256 = 6;
+}
+
+message RegisterResourceRequest {
+  string schema_version = 1;
+  string study_id = 2;
+  string logical_job_id = 3;
+  string attempt_id = 4;
+  int64 fence_token = 5;
+  string resource_key = 6;
+  string resource_kind = 7;
+}
+
+message RegisterResourceResponse {
+  string schema_version = 1;
+  string resource_id = 2;
+  string locator_ref = 3;
+  string locator_sha256 = 4;
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+message CompleteAttemptRequest {
+  string schema_version = 1;
+  string study_id = 2;
+  string logical_job_id = 3;
+  string attempt_id = 4;
+  int64 fence_token = 5;
+  string result_sha256 = 6;
+  int32 observation_count = 7;
+}
+
+message CompleteAttemptResponse {
+  string schema_version = 1;
+  CompletionStatus status = 2;
+}
+
+message ReleaseResourceRequest {
+  string schema_version = 1;
+  string resource_id = 2;
+  string attempt_id = 3;
+  int64 fence_token = 4;
+}
+
+message ReleaseResourceResponse {
+  string schema_version = 1;
+  bool changed = 2;
+}
+
+message FinalizeStudyRequest {
+  string schema_version = 1;
+  string study_id = 2;
+  string logical_job_id = 3;
+  string result_sha256 = 4;
+}
+
+message FinalizeStudyResponse {
+  string schema_version = 1;
+  string study_id = 2;
+  string terminal_outcome = 3;
+  string result_sha256 = 4;
+}

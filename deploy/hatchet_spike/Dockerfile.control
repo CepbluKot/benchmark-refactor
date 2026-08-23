@@ -1,0 +1,26 @@
+FROM python:3.12-alpine@sha256:f7fd610959cae736251523b54eb26cecb74f60ffa60bf39d9faccf128b526ab8 AS builder
+WORKDIR /app
+ENV UV_LINK_MODE=copy
+RUN python -m pip install --no-cache-dir uv==0.8.13
+
+COPY pyproject.toml uv.lock ./
+COPY packages ./packages
+COPY adapters ./adapters
+COPY apps/m0_control_plane ./apps/m0_control_plane
+COPY plugins/toy ./plugins/toy
+RUN uv sync \
+    --frozen \
+    --no-dev \
+    --no-editable \
+    --package benchmark-m0-control
+
+FROM python:3.12-alpine@sha256:f7fd610959cae736251523b54eb26cecb74f60ffa60bf39d9faccf128b526ab8
+RUN addgroup -S -g 10001 app && adduser -S -D -H -u 10001 -G app app
+WORKDIR /app
+ENV PATH=/app/.venv/bin:$PATH \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+COPY --from=builder /app/.venv /app/.venv
+COPY --chown=app:app adapters/postgres/alembic.ini /app/adapters/postgres/alembic.ini
+COPY --chown=app:app adapters/postgres/migrations /app/adapters/postgres/migrations
+USER 10001:10001

@@ -16,9 +16,9 @@ Runtime stages are:
 
 `source_baseline` is stored separately as phase `0`.
 
-## Phase Numbering in Storage
+## Conceptual Phase Numbering
 
-`benchmark_results__phased.phase`:
+Номера используются orchestration API и логами:
 
 - `0` -> `source_baseline`
 - `1` -> `order_by`
@@ -27,6 +27,12 @@ Runtime stages are:
 - `4` -> `index_granularity`
 - `5` -> `indexes`
 - `6` -> `final_validation`
+
+В актуальной физической схеме `benchmark_results__phased` колонок `phase` и
+`phase_name` нет: migration удаляет их как legacy-дубликаты. Scope стадии хранится
+в `variant_mode`, а дополнительное имя — в `variant_params.phase_name`. Поэтому
+аналитические SQL должны фильтровать `variant_mode`; параметр `phase` в result-store
+API остаётся compatibility-входом и преобразуется в соответствующий mode.
 
 ## Core Behavior by Stage
 
@@ -53,7 +59,7 @@ For each ORDER BY branch:
 
 No full-table merge is done at this stage.
 
-### 3.5) INDEX_GRANULARITY (full-table)
+### 4) INDEX_GRANULARITY (full-table)
 
 For each ORDER BY branch:
 
@@ -61,7 +67,7 @@ For each ORDER BY branch:
 - table `SETTINGS index_granularity` is benchmarked on these full-table candidates;
 - top-N full-table candidates are kept for next stage.
 
-### 4) INDEXES (independent per column, fixed table granularity)
+### 5) INDEXES (independent per column, fixed table granularity)
 
 For each winner from `index_granularity` stage:
 
@@ -71,7 +77,7 @@ For each winner from `index_granularity` stage:
 - top-N index options are kept **per column**;
 - if no profitable/valid option remains, fallback is “no index” for that column.
 
-### 5) FINAL VALIDATION + local search
+### 6) FINAL VALIDATION + local search
 
 For each `index_granularity` parent:
 
@@ -169,6 +175,9 @@ Store computes and updates:
 
 - stage-level ranking: `rank_in_phase`, `is_top_n`;
 - one-column ranking: `rank_in_stage_column`, `is_top_n_in_stage_column`.
+
+Despite the compatibility names `rank_in_phase` and phase arguments, the actual
+SQL scope is selected by `variant_mode`.
 
 The strategy also explicitly marks winners with `is_top_n` after each stage.
 Noisy candidates (`score=NULL`) are not selected as stage winners if at least one scored candidate exists in the same stage scope.

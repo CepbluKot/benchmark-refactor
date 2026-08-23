@@ -4,6 +4,18 @@
 
 `main.py` запускает production-пайплайн на ClickHouse + Celery:
 metadata через fetcher, исполнение через Celery-задачи, результаты в ClickHouse store.
+
+Архитектурные документы:
+
+- [инструкции для coding agents](AGENTS.md);
+- [актуальный контекст и карта кода](LLM_CONTEXT.md);
+- [архитектурный аудит и roadmap](docs/ARCHITECTURE_AUDIT.md);
+- [целевая архитектура clean-slate rewrite и database plugins](docs/TARGET_ARCHITECTURE_REFACTOR.md);
+- [ADR выбора Hatchet для architecture spike](docs/adr/0001-hatchet-orchestrator-trial.md);
+- [статус и evidence M0 Hatchet spike](docs/M0_HATCHET_SPIKE_REPORT.md),
+  [локальный запуск](deploy/hatchet_spike/README.md);
+- [сквозные E2E-сценарии](docs/E2E_TEST_SCENARIOS.md);
+- [контракт phased top-N](docs/SEQUENTIAL_PHASED_TOPN_PIPELINE_CONTRACT.md).
 И ещё важно: runner теперь по умолчанию перед любой strategy сначала запускает baseline
 на исходном DDL (`execute_source_benchmark`), а потом прокидывает этот baseline
 во все variant jobs через `VariantJob.source_benchmark`.
@@ -76,7 +88,8 @@ Legacy select-агрегаты в таблице результатов удал
    (поле `VariantJob.source_benchmark`).
 8. Генерируются DDL-варианты и `VariantJob`.
 9. Каждый variant job выполняется через `BenchmarkExecutionAdapter`.
-10. `BenchmarkExecutionAdapter`/воркер считает `score` по `scoring` (встроенная формула или expression).
+10. `BenchmarkExecutionAdapter`/воркер считает `score` по `scoring.mode=expression`
+    (конфигурируемая формула или её default expression).
 11. `BenchmarkExecutionAdapter`/воркер сохраняет результат в `BenchmarkResultStore`.
 
 Если режим `sequential_topn_strategy`:
@@ -284,8 +297,9 @@ Lock настраивается через `BENCH_RESULT_STORE_REDIS_URL`
 `BENCH_RESULT_STORE_REDIS_LOCK_BLOCKING_TIMEOUT_SEC`.
 Если Redis недоступен, runtime завершится с ошибкой при старте store
 (без fallback на process-local lock).
-Для multi-pod Kubernetes это корректный межпроцессный дедуп
-(в отличие от локального файлового lock).
+Для multi-pod это межпроцессная защита узкого участка `exists -> insert`, но не
+гарантия exactly-once выполнения: Redis lock не защищает lifecycle физической
+variant-таблицы и concurrent/redelivered jobs.
 Fallback на «старую схему» таблиц результатов отключён:
 если таблица не соответствует актуальной runtime-схеме, insert завершится ошибкой.
 
@@ -296,11 +310,16 @@ Fallback на «старую схему» таблиц результатов о
 
 ```sql
 -- Финальный DDL победителя
-SELECT tested_table_ddl
+SELECT tested_table_ddl, score, variant_params_json
 FROM benchmark_results__phased
 WHERE benchmark_run_id = 123
-  AND phase = 5
-  AND rank_in_phase = 1
+  AND benchmark_id = 'my_benchmark'
+  AND source_db_name = 'analytics'
+  AND source_table_name = 'events'
+  AND variant_mode = 'final_validation'
+  AND is_top_n = 1
+ORDER BY rank_in_phase
+LIMIT 1
 ```
 
 ```sql
@@ -309,16 +328,23 @@ WITH RECURSIVE lineage AS (
     SELECT *
     FROM benchmark_results__phased
     WHERE benchmark_run_id = 123
-      AND phase = 5
+      AND benchmark_id = 'my_benchmark'
+      AND source_db_name = 'analytics'
+      AND source_table_name = 'events'
+      AND variant_mode = 'final_validation'
       AND rank_in_phase = 1
     UNION ALL
     SELECT r.*
     FROM benchmark_results__phased r
     JOIN lineage l ON r.id = l.parent_id
 )
-SELECT phase, phase_name, score, size_bytes_total, variant_params_json
+SELECT variant_mode, score, size_bytes_total, variant_params_json
 FROM lineage
-ORDER BY phase
+ORDER BY indexOf(
+    ['source_baseline', 'order_by', 'types', 'codecs',
+     'index_granularity', 'indexes', 'final_validation'],
+    variant_mode
+)
 ```
 
 ```sql
@@ -327,19 +353,30 @@ WITH RECURSIVE lineage AS (
     SELECT *
     FROM benchmark_results__phased
     WHERE benchmark_run_id = 123
-      AND phase = 5
+      AND benchmark_id = 'my_benchmark'
+      AND source_db_name = 'analytics'
+      AND source_table_name = 'events'
+      AND variant_mode = 'final_validation'
       AND rank_in_phase = 1
     UNION ALL
     SELECT r.*
     FROM benchmark_results__phased r
     JOIN lineage l ON r.id = l.parent_id
+), ordered AS (
+    SELECT
+        *,
+        indexOf(
+            ['source_baseline', 'order_by', 'types', 'codecs',
+             'index_granularity', 'indexes', 'final_validation'],
+            variant_mode
+        ) AS stage_order
+    FROM lineage
 )
 SELECT
-    phase,
-    phase_name,
-    score - lag(score) OVER (ORDER BY phase) AS score_delta
-FROM lineage
-ORDER BY phase
+    variant_mode,
+    score - lagInFrame(score) OVER (ORDER BY stage_order) AS score_delta
+FROM ordered
+ORDER BY stage_order
 ```
 
 ```sql
@@ -347,9 +384,12 @@ ORDER BY phase
 SELECT variant_params_json, score, size_bytes_total, rank_in_phase, is_top_n
 FROM benchmark_results__phased
 WHERE benchmark_run_id = 123
-  AND phase = 1
+  AND variant_mode = 'order_by'
 ORDER BY rank_in_phase
 ```
+
+В актуальной phased-схеме нет физических колонок `phase`/`phase_name`: stage scope
+задаётся `variant_mode`, а дополнительное имя доступно в `variant_params`.
 
 11. Управление run-id (`BenchmarkRunIdProvider`).
 Что это:
@@ -397,7 +437,7 @@ ORDER BY rank_in_phase
   --benchmarks-path configs/benchmarks.example.json
 ```
 
-### 3) Запуск demo
+### 3) Запуск production launcher
 
 Сделай шаги из раздела [Как запустить бенчмарк](#run), вариант A.
 
@@ -614,7 +654,7 @@ BENCH_KEEP_ALIVE_AFTER_RUN=1
 Использование в коде:
 
 ```python
-from loader import load_config
+from src.loader import load_config
 
 config = load_config("configs/benchmark.project.local.json")
 ```
@@ -632,19 +672,31 @@ config = load_config("configs/benchmark.project.local.json")
 2. Variant-результаты сохраняются в ClickHouse из Celery-воркера, не из launcher-процесса.
 3. Для `sequential_topn_strategy` launcher ждёт завершения stage1/stage2 через monitor-hook,
    после чего делает top-N отбор.
+   `sequential_phased_topn_strategy` аналогично ждёт каждую стадию.
+   Обычные `types/indexes/combined` стратегии сейчас только публикуют variant tasks:
+   сообщение launcher `completed` для них означает завершение dispatch, а не готовность
+   всех result rows.
 4. Baseline-задача в воркере создаёт временную baseline-таблицу и удаляет её в `finally`.
    Если `test_database` не задана, используется fallback `${source_database}__benchmark_tmp`.
    Baseline select/warmup выполняются по baseline-копии, а не по оригинальной таблице.
-5. Variant-задача всегда удаляет variant-таблицу в `finally`, даже при ошибке.
+5. Variant-задача удаляет variant-таблицу в `finally` при штатном завершении или
+   обработанном исключении. `SIGKILL`, OOM kill и потеря host обходят `finally`; отдельного
+   janitor для orphan tables пока нет.
 6. Для индексных вариантов insert-замеры выполняются с фильтром по индексируемым колонкам
    (legacy-совместимое поведение `tested_cols`).
 7. Ошибочные замеры помечаются значениями `< 0` (обычно `-1`), чтобы их можно было легко фильтровать.
 8. Для корректного progress/ожидания batch Celery worker обязательно запускай с `-E` (`--events`).
+   Сейчас event barrier не имеет общего terminal deadline, поэтому отсутствие events
+   способно остановить sequential launcher на неопределённое время.
 9. Insert-замеры собираются в единые массивы по всем `insert_operations_count` повторов,
    и перцентили считаются по этим единым массивам.
 10. Для расчёта размера skip-индексов worker сначала использует запросы с `active=1`;
     для старых/нестандартных схем `system.data_skipping_indices` есть fallback-запросы.
     Если `active` технически недоступен, worker логирует warning и берёт размеры без `active`.
+
+Для production обязательно задавай отдельную `test_database`: без неё variants
+создаются в source database. Ограничения конкурентных запусков, DDL safety и resume
+подробно разобраны в [архитектурном аудите](docs/ARCHITECTURE_AUDIT.md).
 
 #### 1) Запусти RabbitMQ
 

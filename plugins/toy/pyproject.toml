@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "benchmark-plugin-toy"
+version = "0.0.1"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "benchmark-hatchet-adapter",
+    "benchmark-optimizer-sdk",
+    "grpcio>=1.76.0,<2",
+    "hatchet-sdk==1.37.0",
+]
+
+[project.scripts]
+m0-toy-plugin-worker = "plugin_toy_m0.worker:main"
+
+[tool.uv.sources]
+benchmark-hatchet-adapter = { workspace = true }
+benchmark-optimizer-sdk = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/plugin_toy_m0"]

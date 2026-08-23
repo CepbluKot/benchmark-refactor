@@ -1,6 +1,6 @@
 # Примеры Запуска Бенчмарков (1 Таблица)
 
-Ниже два отдельных примера вызова:
+Ниже три отдельных примера вызова:
 1. `legacy` стратегия (одна таблица)
 2. `sequential_phased_topn_strategy` (новая стратегия, одна таблица)
 3. `same_variant_compare` — запуск legacy+phased на одном и том же варианте таблицы
@@ -106,13 +106,10 @@ BENCH_BENCHMARK_IDS=bench_hits_postgres_sequential_topn ./venv/bin/python main.p
 Оба гоняют одну и ту же таблицу `default.hits_postgres` и один и тот же набор правил
 (тип/кодек/индекс), чтобы сравнить именно поведение стратегий и метрики.
 
-### Запуск в один шаг
+### Запуск через `main.py`
 
-```bash
-./venv/bin/python run_benchmark_example.py same_variant_compare
-```
-
-### Или вручную через `main.py`
+Отдельного wrapper `run_benchmark_example.py` в репозитории нет. Сначала закодируй
+нужные четыре config-файла в env тем же способом, что в примерах выше, затем запусти:
 
 ```bash
 BENCH_BENCHMARK_IDS=bench_same_variant_compare_legacy,bench_same_variant_compare_phased \

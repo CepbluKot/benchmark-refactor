@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "benchmark-postgres-adapter"
+version = "0.0.1"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "alembic==1.16.5",
+    "benchmark-experiment-domain",
+    "benchmark-optimizer-sdk",
+    "benchmark-runtime-services",
+    "psycopg[binary,pool]==3.2.9",
+    "sqlalchemy==2.0.43",
+]
+
+[tool.uv.sources]
+benchmark-experiment-domain = { workspace = true }
+benchmark-optimizer-sdk = { workspace = true }
+benchmark-runtime-services = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/benchmark_adapters"]
