@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import { sourceError, createDemoRun, finishDemoRun } from '../src/demo/model';
+import { emptyBenchmark } from '../src/types/config';
+const source = { id: 'local_ch_hits', dbms: 'clickhouse', credential_type: 'password', host: 'localhost', port: 8123, login: 'reader' };
+assert.equal(sourceError(source, []), '');
+assert.ok(sourceError({...source, port: 0}, []));
+assert.ok(sourceError({...source, port: 1.5}, []));
+assert.ok(sourceError(source, [source]));
+const config = { ...emptyBenchmark('bench_test'), connection_id: 'local_ch_hits' };
+const run = createDemoRun(config, 'r1');
+config.id = 'changed';
+assert.equal(run.config.id, 'bench_test');
+assert.equal(finishDemoRun({...run, status: 'cancelled'}).status, 'cancelled');
+assert.equal(finishDemoRun(run).status, 'completed');
+console.log('Demo checks passed: validation, snapshot isolation, cancellation.');

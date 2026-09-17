@@ -1,6 +1,7 @@
 /** Верхняя панель: файл, выбранный бенчмарк, состояние и основные действия. */
 
 import { useRef, useState } from 'react';
+import { Button, Modal, TextArea } from '@adqm/gpb-ui';
 
 import { downloadText } from '../lib/download';
 import { useEditor } from '../state/editor';
@@ -10,40 +11,10 @@ function ImportDialog({ onClose }: { onClose(): void }): JSX.Element {
   const [text, setText] = useState('');
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(event) => event.stopPropagation()}>
-        <div className="modal-head">
-          <h3>Вставить JSON конфигурации</h3>
-          <span className="faint" style={{ marginLeft: 'auto' }}>
-            ожидается файл со списком benchmarks
-          </span>
-        </div>
-        <div className="modal-body">
-          <textarea
-            spellCheck={false}
-            value={text}
-            placeholder='{ "benchmarks": [ ... ] }'
-            onChange={(event) => setText(event.target.value)}
-          />
-        </div>
-        <div className="modal-foot">
-          <button className="btn" type="button" onClick={onClose}>
-            Отмена
-          </button>
-          <button
-            className="btn btn-primary"
-            type="button"
-            disabled={!text.trim()}
-            onClick={() => {
-              openFile('benchmarks.pasted.json', text);
-              onClose();
-            }}
-          >
-            Открыть
-          </button>
-        </div>
-      </div>
-    </div>
+    <Modal open onClose={onClose} title="Вставить JSON конфигурации" footer={<><Button variant="secondary" onClick={onClose}>Отмена</Button><Button variant="primary" disabled={!text.trim()} onClick={() => { openFile('benchmarks.pasted.json', text); onClose(); }}>Открыть</Button></>}>
+      <p className="field-help">Ожидается файл со списком `benchmarks`.</p>
+      <TextArea label="Конфигурация" spellCheck={false} rows={12} value={text} placeholder='{ "benchmarks": [ ... ] }' onChange={(event) => setText(event.target.value)} />
+    </Modal>
   );
 }
 
@@ -141,15 +112,10 @@ export function TopBar(): JSX.Element {
           }}
         />
 
-        <button className="btn" type="button" onClick={() => fileInput.current?.click()}>
-          Импорт JSON
-        </button>
-        <button className="btn btn-ghost" type="button" onClick={() => setPaste(true)}>
-          Вставить JSON
-        </button>
-        <button
-          className="btn btn-ghost"
-          type="button"
+        <Button variant="secondary" onClick={() => fileInput.current?.click()}>Импорт JSON</Button>
+        <Button variant="tertiary" onClick={() => setPaste(true)}>Вставить JSON</Button>
+        <Button
+          variant="tertiary"
           title={
             reference.connectionIds === null && reference.ruleBankIds === null
               ? 'Загрузить connections.json или rule_banks.json, чтобы включить проверку ссылок'
@@ -161,13 +127,10 @@ export function TopBar(): JSX.Element {
         >
           Справочные файлы
           {reference.connectionIds !== null || reference.ruleBankIds !== null ? ' ✓' : ''}
-        </button>
-        <button className="btn" type="button" disabled={!doc} onClick={runCheck}>
-          Проверить
-        </button>
-        <button
-          className="btn btn-primary"
-          type="button"
+        </Button>
+        <Button variant="secondary" disabled={!doc} onClick={runCheck}>Проверить</Button>
+        <Button
+          variant="primary"
           disabled={!doc}
           onClick={() => {
             downloadText(fileName ?? 'benchmarks.json', documentJson);
@@ -175,33 +138,18 @@ export function TopBar(): JSX.Element {
           }}
         >
           Экспорт JSON
-        </button>
-        <button
-          className="btn btn-ghost"
-          type="button"
+        </Button>
+        <Button
+          variant="tertiary"
           onClick={() => setPanelOpen(!panelOpen)}
           title={panelOpen ? 'Свернуть правую панель' : 'Развернуть правую панель'}
         >
           {panelOpen ? '⟩' : '⟨'}
-        </button>
+        </Button>
       </div>
 
       {paste ? <ImportDialog onClose={() => setPaste(false)} /> : null}
-      {referenceError ? (
-        <div className="modal-backdrop" onClick={() => setReferenceError(null)}>
-          <div className="modal" onClick={(event) => event.stopPropagation()}>
-            <div className="modal-head">
-              <h3>Справочный файл не загружен</h3>
-            </div>
-            <div className="modal-body">{referenceError}</div>
-            <div className="modal-foot">
-              <button className="btn" type="button" onClick={() => setReferenceError(null)}>
-                Закрыть
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      {referenceError ? <Modal open onClose={() => setReferenceError(null)} title="Справочный файл не загружен" footer={<Button variant="primary" onClick={() => setReferenceError(null)}>Закрыть</Button>}>{referenceError}</Modal> : null}
     </header>
   );
 }

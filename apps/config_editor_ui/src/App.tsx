@@ -1,89 +1,55 @@
-/** Каркас приложения: список бенчмарков, редактор разделов и правая панель. */
+import { useEffect, useState } from 'react';
+import { ComponentGallery } from '@adqm/gpb-ui';
 
-import { SECTION_TAB_LABEL, SECTION_TITLE } from './lib/issues';
-import type { SectionId } from './lib/issues';
-import { EmptyState } from './components/EmptyState';
-import { Sidebar } from './components/Sidebar';
-import { SidePanel } from './components/SidePanel';
-import { TopBar } from './components/TopBar';
-import { IssueScopeProvider } from './components/fields/Field';
-import { LimitsSection } from './components/sections/LimitsSection';
-import { QueriesSection } from './components/sections/QueriesSection';
-import { RulesSection } from './components/sections/RulesSection';
-import { ScoringSection } from './components/sections/ScoringSection';
-import { SourceSection } from './components/sections/SourceSection';
-import { TableRulesSection } from './components/sections/TableRulesSection';
+import { ProductShell } from './components/ProductShell';
+import type { ProductPage } from './components/ProductShell';
+import { useWorkspace } from './demo/workspace';
+import { BenchmarksPage } from './pages/BenchmarksPage';
+import { RuleBanksPage } from './pages/RuleBanksPage';
+import { RunsPage } from './pages/RunsPage';
+import { SourcesPage } from './pages/SourcesPage';
 import { useEditor } from './state/editor';
 
-const SECTIONS: SectionId[] = ['source', 'rules', 'queries', 'limits', 'scoring', 'tables'];
-
-function Editor(): JSX.Element {
-  const { selected, selectedIndex, section, setSection, issues } = useEditor();
-
-  if (!selected) {
-    return (
-      <div className="editor">
-        <div className="editor-scroll">
-          <div className="notice">В файле нет ни одного бенчмарка.</div>
-        </div>
-      </div>
-    );
+export function App(): JSX.Element {
+  if (window.location.pathname === '/design-system') {
+    return <ComponentGallery backHref="/" backLabel="К DDL Benchmark Engine" />;
   }
 
-  const own = issues.filter((issue) => issue.benchmarkId === selected.id);
+  const editor = useEditor();
+  const { sources, ruleBanks } = useWorkspace();
+  const [page, setPage] = useState<ProductPage>('benchmarks');
+  const [editingBenchmark, setEditingBenchmark] = useState(false);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!editor.document) editor.loadSample();
+  }, [editor.document, editor.loadSample]);
+
+  useEffect(() => {
+    editor.loadReference('connections.demo.json', JSON.stringify({ connections: sources }));
+  }, [editor.loadReference, sources]);
+
+  useEffect(() => {
+    editor.loadReference('rule_banks.demo.json', JSON.stringify({
+      rule_banks: Object.fromEntries(ruleBanks.map((bank) => [bank.id, {}])),
+    }));
+  }, [editor.loadReference, ruleBanks]);
+
+  const openRun = (id: string) => {
+    setSelectedRunId(id);
+    setPage('runs');
+  };
 
   return (
-    <IssueScopeProvider prefix={`benchmarks[${selectedIndex}]`} issues={own}>
-      <div className="editor">
-        <nav className="section-tabs">
-          {SECTIONS.map((id) => {
-            const errors = own.filter(
-              (issue) => issue.section === id && issue.level === 'error',
-            ).length;
-            return (
-              <button
-                key={id}
-                type="button"
-                className={`section-tab${section === id ? ' active' : ''}`}
-                onClick={() => setSection(id)}
-              >
-                <span title={SECTION_TITLE[id]}>{SECTION_TAB_LABEL[id]}</span>
-                {errors ? <span className="badge badge-danger">{errors}</span> : null}
-              </button>
-            );
-          })}
-        </nav>
-
-        <div className="editor-scroll">
-          <div className="editor-inner">
-            {section === 'source' ? <SourceSection benchmark={selected} /> : null}
-            {section === 'rules' ? <RulesSection benchmark={selected} /> : null}
-            {section === 'queries' ? <QueriesSection benchmark={selected} /> : null}
-            {section === 'limits' ? <LimitsSection benchmark={selected} /> : null}
-            {section === 'scoring' ? <ScoringSection benchmark={selected} /> : null}
-            {section === 'tables' ? <TableRulesSection benchmark={selected} /> : null}
-          </div>
-        </div>
-      </div>
-    </IssueScopeProvider>
-  );
-}
-
-export function App(): JSX.Element {
-  const { document: doc, panelOpen } = useEditor();
-
-  return (
-    <div className="app">
-      <TopBar />
-      {doc ? (
-        <div className={`app-body${panelOpen ? ' with-panel' : ''}`}>
-          <Sidebar />
-          <Editor />
-          {panelOpen ? <SidePanel /> : null}
-        </div>
-      ) : (
-        <EmptyState />
-      )}
-    </div>
+    <ProductShell page={page} onPageChange={(next) => {
+      setPage(next);
+      setEditingBenchmark(false);
+      if (next === 'runs') setSelectedRunId(null);
+    }}>
+      {page === 'sources' ? <SourcesPage /> : null}
+      {page === 'benchmarks' ? <BenchmarksPage editing={editingBenchmark} onEditingChange={setEditingBenchmark} onOpenRun={openRun} /> : null}
+      {page === 'runs' ? <RunsPage selectedId={selectedRunId} onSelectedId={setSelectedRunId} /> : null}
+      {page === 'rule-banks' ? <RuleBanksPage /> : null}
+    </ProductShell>
   );
 }

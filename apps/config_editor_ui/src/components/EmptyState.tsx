@@ -1,6 +1,7 @@
 /** Экран «файл ещё не открыт» и сообщения о неудачном импорте. */
 
 import { useRef } from 'react';
+import { Alert, Button, EmptyState as AdqmEmptyState } from '@adqm/gpb-ui';
 
 import { SAMPLE_FILE_PATH } from '../lib/samples';
 import { useEditor } from '../state/editor';
@@ -12,20 +13,10 @@ export function EmptyState(): JSX.Element {
   return (
     <div className="empty-state">
       <div className="empty-card">
-        <h2>Файл конфигурации не открыт</h2>
-        <p>
-          Редактор работает с файлом бенчмарков движка: JSON с непустым списком{' '}
-          <code>benchmarks</code>. Файлы подключений и банков правил редактируются отдельно и
-          подключаются сюда только для проверки ссылок.
-        </p>
+        <AdqmEmptyState title="Файл конфигурации не открыт" description="Редактор работает с JSON, содержащим непустой список benchmarks." />
 
         {loadError.length ? (
-          <div className="notice notice-danger">
-            <strong>Файл не открыт</strong>
-            {loadError.map((issue) => (
-              <div key={issue.message}>{issue.message}</div>
-            ))}
-          </div>
+          <Alert tone="danger" title="Файл не открыт">{loadError.map((issue) => <div key={issue.message}>{issue.message}</div>)}</Alert>
         ) : null}
 
         <input
@@ -42,15 +33,9 @@ export function EmptyState(): JSX.Element {
         />
 
         <div className="empty-actions">
-          <button className="btn btn-primary" type="button" onClick={() => input.current?.click()}>
-            Открыть файл
-          </button>
-          <button className="btn" type="button" onClick={loadSample}>
-            Загрузить пример проекта
-          </button>
-          <button className="btn" type="button" onClick={createFile}>
-            Создать пустой файл
-          </button>
+          <Button variant="primary" onClick={() => input.current?.click()}>Открыть файл</Button>
+          <Button variant="secondary" onClick={loadSample}>Загрузить пример проекта</Button>
+          <Button variant="secondary" onClick={createFile}>Создать пустой файл</Button>
         </div>
 
         <div className="faint" style={{ marginBottom: 14 }}>

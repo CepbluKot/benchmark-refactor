@@ -1,5 +1,7 @@
 /** Список бенчмарков текущего файла. */
 
+import { Button } from '@adqm/gpb-ui';
+
 import { describeTarget } from '../lib/summary';
 import { strategyLabel } from '../lib/vocab';
 import { useEditor } from '../state/editor';
@@ -54,25 +56,21 @@ export function Sidebar(): JSX.Element {
 
       <div className="sidebar-foot">
         <div className="inline-actions">
-          <button className="btn btn-sm" type="button" onClick={addBenchmark}>
-            Добавить
-          </button>
-          <button
-            className="btn btn-sm"
-            type="button"
+          <Button variant="secondary" onClick={addBenchmark}>Добавить</Button>
+          <Button
+            variant="secondary"
             disabled={!benchmarks.length}
             onClick={() => duplicateBenchmark(selectedIndex)}
           >
             Дублировать
-          </button>
-          <button
-            className="btn btn-sm btn-ghost btn-danger"
-            type="button"
+          </Button>
+          <Button
+            variant="danger"
             disabled={benchmarks.length <= 1}
             onClick={() => removeBenchmark(selectedIndex)}
           >
             Удалить
-          </button>
+          </Button>
         </div>
         <div className="faint">
           Точка слева: красная — ошибки, синяя — несохранённые изменения.
