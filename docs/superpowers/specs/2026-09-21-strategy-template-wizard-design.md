@@ -27,15 +27,21 @@ execution must use only the queries explicitly reviewed and saved by the user.
 the ADQM design system and has:
 
 - a back action to the strategy catalog;
-- a five-step navigation rail or stepper;
-- the active form section;
-- a compact persistent summary of the selected method and key choices;
+- a horizontal four-step stepper with numbered circles and completed-step markers;
+- one centered, wide form card with a heading and guidance for the active step;
+- no persistent summary strip or summary sidebar (user-approved design revision);
 - Back and Next actions;
 - Cancel on every step;
 - Create strategy only on the final step.
 
 Validation errors are shown on the owning step and prevent progression when a
 required value is invalid.
+
+The selected visual direction is the focused wizard (option B). Use explanatory
+selection cards for methods and priorities, descriptive switch rows for rules,
+and explicit guidance for optional constraints and final-validation alternatives.
+Keep the action footer inside the form card. On narrow screens, wrap form fields
+and preserve readable step labels. This layout applies to both creation and editing.
 
 ## Step 1: Basics
 
@@ -44,7 +50,12 @@ required value is invalid.
 
 No technical identifier or pipeline preview is shown on this step.
 
-## Step 2: Search Method
+## Step 2: Search Configuration
+
+Search procedure and variant rules share one step, in clearly separated sections.
+The wizard sequence is Basics, Search Configuration, Search Budget, Scoring.
+
+### Search Method
 
 The user selects one method from large explanatory cards:
 
@@ -66,7 +77,7 @@ The implemented pipelines are:
 - Phased Top-N: ORDER BY, types, codecs, table index granularity, indexes, and final
   validation with optional nearby index alternatives.
 
-## Step 3: Variant Rules
+### Variant Rules
 
 The page exposes only rule groups used by the selected method:
 
@@ -82,7 +93,7 @@ index rules, skip-index granularity, and table index granularity. Irrelevant gro
 are hidden rather than disabled. The template stores explicit portable rules; the
 user does not select or edit a separate rule-bank entity.
 
-## Step 4: Search Budget
+## Step 3: Search Budget
 
 Default fields:
 
@@ -109,7 +120,7 @@ not recursively enumerate every combination.
 Method-specific budget controls are hidden when the selected method cannot use
 them. All numeric values are positive integers and receive explicit units.
 
-## Step 5: Scoring
+## Step 4: Scoring
 
 The normal UI offers optimization priorities:
 

@@ -1,61 +1,39 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Switch, TextArea, TextField } from '@adqm/gpb-ui';
+import { StrategyDimensionsEditor } from '../components/StrategyDimensionsEditor';
+import { StrategyScoringEditor } from '../components/StrategyScoringEditor';
 import { useWorkspace } from '../control/workspace';
 import type { Strategy } from '../control/api';
-import { createDefaultStrategyDraft, deriveStrategyPhases, METHOD_LABELS, pruneStrategyDraft, validateStrategyStep, type ScoringPriority, type StrategyDraft, type StrategyMethod } from '../strategies/model';
+import { dimensionPhases, emptyDimensions, validateDimensions, type SearchProcedure } from '../strategies/dimensions';
+import { SCORING_PRESETS, createDefaultStrategyDraft, pruneStrategyDraft, validateStrategyStep, type StrategyDraft } from '../strategies/model';
 
-const STEPS = ['Основное', 'Метод поиска', 'Правила вариантов', 'Бюджет поиска', 'Оценка'];
-const METHODS: Array<{ value: StrategyMethod; title: string; description: string }> = [
-  { value: 'types_strategy', title: 'Типы и кодеки', description: 'Подбирает физические типы колонок и цепочки кодеков.' },
-  { value: 'indexes_strategy', title: 'Skip-индексы', description: 'Ищет подходящие skip-индексы для выбранной таблицы.' },
-  { value: 'combined_strategy', title: 'Комбинированный поиск', description: 'Оценивает типы, кодеки и индексы в одном поиске.' },
-  { value: 'sequential_topn_strategy', title: 'Последовательный Top-N', description: 'Сначала отбирает лучшие типы и кодеки, затем индексы.' },
-  { value: 'sequential_phased_topn_strategy', title: 'Поэтапный Top-N', description: 'Полный поэтапный поиск с ORDER BY и финальной проверкой.' },
+const STEPS = ['Basics', 'Search settings', 'Search budget', 'Scoring'];
+const PROCEDURES: Array<{ value: SearchProcedure; title: string; description: string }> = [
+  { value: 'combined', title: 'Combined', description: 'Generate candidates from all configured dimensions in one search.' },
+  { value: 'sequential', title: 'Sequential Top-N', description: 'Keep the best candidates after each configured dimension.' },
+  { value: 'phased', title: 'Phased Top-N', description: 'Run bounded phases and finish with an independent validation pass.' },
 ];
-const PRIORITIES: Array<{ value: ScoringPriority; title: string; description: string }> = [
-  { value: 'balanced', title: 'Сбалансированно', description: 'Учитывать чтение, вставку и размер хранения.' },
-  { value: 'faster_reads', title: 'Быстрее чтение', description: 'Отдать приоритет времени SELECT-запросов.' },
-  { value: 'faster_inserts', title: 'Быстрее вставка', description: 'Сильнее учитывать скорость загрузки данных.' },
-  { value: 'better_compression', title: 'Лучше сжатие', description: 'Сильнее учитывать итоговый размер данных.' },
+const STEP_HELP = [
+  'Give the reusable strategy a clear name and description.',
+  'Configure every optimization dimension independently, then choose how the search traverses them.',
+  'Set measurement volume and search limits.',
+  'Define the exact ranking formula and optional hard constraints.',
 ];
-const PHASE_LABELS: Record<string, string> = { order_by: 'ORDER BY', types: 'Типы', codecs: 'Кодеки', top_n: 'Top-N', index_granularity: 'Гранулярность', indexes: 'Индексы', final_validation: 'Финальная проверка' };
+const PHASE_LABELS: Record<string, string> = { order_by: 'ORDER BY', types: 'Types', codecs: 'Codecs', column_order: 'Column iteration', top_n: 'Top-N selection', index_granularity: 'Table granularity', indexes: 'Skip indexes', final_validation: 'Final validation' };
+const numberValue = (value: string): number | undefined => value === '' ? undefined : Number(value);
 
-function numberValue(value: string): number | undefined { return value === '' ? undefined : Number(value); }
 function fromStrategy(strategy?: Strategy): StrategyDraft {
   if (!strategy) return createDefaultStrategyDraft();
   const config = strategy.config;
-  return {
-    name: strategy.name,
-    description: strategy.description,
-    method: config.method,
-    rules: {
-      columnTypes: config.rules.column_types ?? false,
-      codecs: config.rules.codecs ?? false,
-      skipIndexes: config.rules.skip_indexes ?? false,
-      tableIndexGranularity: config.rules.table_index_granularity ?? false,
-      orderBy: config.rules.order_by ?? false,
-      columnOrder: config.rules.column_order ?? false,
-    },
-    budget: {
-      rowsPerInsert: config.budget.rows_per_insert,
-      insertRepetitions: config.budget.insert_repetitions,
-      maxCandidates: config.budget.max_candidates,
-      topN: config.budget.top_n,
-      advanced: Object.keys(config.budget).some((key) => !['rows_per_insert', 'insert_repetitions', 'max_candidates', 'top_n'].includes(key)),
-      baselineRows: config.budget.baseline_rows,
-      candidateRows: config.budget.candidate_rows,
-      perPhaseCandidates: config.budget.per_phase_candidates,
-      winnersPerParent: config.budget.winners_per_parent,
-      finalValidationCandidates: config.budget.final_validation_candidates,
-      finalValidationIndexAlternatives: config.budget.final_validation_index_alternatives,
-    },
-    scoring: {
-      priority: config.scoring.priority,
-      maxStorageGrowthPercent: config.scoring.max_storage_growth_percent,
-      maxInsertSlowdownPercent: config.scoring.max_insert_slowdown_percent,
-      minSelectImprovementPercent: config.scoring.min_select_improvement_percent,
-    },
-  };
+  if (config.schema_version === 2) return { name: strategy.name, description: strategy.description, procedure: config.procedure, dimensions: config.search_space, budget: { rowsPerInsert: config.budget.rows_per_insert, insertRepetitions: config.budget.insert_repetitions, maxCandidates: config.budget.max_candidates, topN: config.budget.top_n, advanced: Object.keys(config.budget).length > 4, baselineRows: config.budget.baseline_rows, candidateRows: config.budget.candidate_rows, perPhaseCandidates: config.budget.per_phase_candidates, winnersPerParent: config.budget.winners_per_parent, finalValidationCandidates: config.budget.final_validation_candidates, finalValidationIndexAlternatives: config.budget.final_validation_index_alternatives }, scoring: { preset: config.scoring.preset, formula: config.scoring.formula, direction: config.scoring.direction, maxStorageGrowthPercent: config.scoring.max_storage_growth_percent, maxInsertSlowdownPercent: config.scoring.max_insert_slowdown_percent, minSelectImprovementPercent: config.scoring.min_select_improvement_percent } };
+  const procedure: SearchProcedure = config.method === 'sequential_phased_topn_strategy' ? 'phased' : config.method === 'sequential_topn_strategy' ? 'sequential' : 'combined';
+  const dimensions = emptyDimensions();
+  if (config.rules.column_types) dimensions.column_types = [{ by_type: 'String', alternatives: ['LowCardinality(String)'] }];
+  if (config.rules.codecs) dimensions.codecs = [{ by_type: 'String', alternatives: ['ZSTD(1)'] }];
+  if (config.rules.skip_indexes) dimensions.skip_indexes = [{ by_type: 'String', indexes: [{ type: 'bloom_filter(0.01)', granularity: 4 }] }];
+  if (config.rules.table_index_granularity) dimensions.table_index_granularity_values = [8192];
+  const preset = config.scoring.priority;
+  return { name: strategy.name, description: strategy.description, procedure, dimensions, budget: { rowsPerInsert: config.budget.rows_per_insert, insertRepetitions: config.budget.insert_repetitions, maxCandidates: config.budget.max_candidates, topN: config.budget.top_n, advanced: Object.keys(config.budget).length > 4, baselineRows: config.budget.baseline_rows, candidateRows: config.budget.candidate_rows, perPhaseCandidates: config.budget.per_phase_candidates, winnersPerParent: config.budget.winners_per_parent, finalValidationCandidates: config.budget.final_validation_candidates, finalValidationIndexAlternatives: config.budget.final_validation_index_alternatives }, scoring: { preset, formula: SCORING_PRESETS[preset].formula, direction: SCORING_PRESETS[preset].direction, maxStorageGrowthPercent: config.scoring.max_storage_growth_percent, maxInsertSlowdownPercent: config.scoring.max_insert_slowdown_percent, minSelectImprovementPercent: config.scoring.min_select_improvement_percent } };
 }
 
 export function StrategyEditorPage({ strategyId, onCancel, onDone }: { strategyId?: string; onCancel(): void; onDone(): void }): JSX.Element {
@@ -69,44 +47,18 @@ export function StrategyEditorPage({ strategyId, onCancel, onDone }: { strategyI
   const [submitted, setSubmitted] = useState<ReturnType<typeof pruneStrategyDraft> | null>(null);
   const [submittedSocketAt, setSubmittedSocketAt] = useState<string | null | undefined>(undefined);
   const initialStrategyIds = useRef(new Set(strategies.map((item) => item.id)));
-  const phases = useMemo(() => deriveStrategyPhases(draft.method), [draft.method]);
-
-  useEffect(() => {
-    if (!submitted || submittedSocketAt === undefined || lastSocketEventAt === submittedSocketAt) return;
-    const match = strategies.find((item) => (strategyId ? item.id === strategyId : !initialStrategyIds.current.has(item.id)) && item.name === submitted.name);
-    if (match) onDone();
-  }, [lastSocketEventAt, onDone, strategies, strategyId, submitted, submittedSocketAt]);
-
+  const phases = useMemo(() => dimensionPhases(draft.dimensions, draft.procedure), [draft.dimensions, draft.procedure]);
+  useEffect(() => { if (!submitted || submittedSocketAt === undefined || lastSocketEventAt === submittedSocketAt) return; const match = strategies.find((item) => (strategyId ? item.id === strategyId : !initialStrategyIds.current.has(item.id)) && item.name === submitted.name); if (match) onDone(); }, [lastSocketEventAt, onDone, strategies, strategyId, submitted, submittedSocketAt]);
   const patch = <K extends keyof StrategyDraft>(key: K, value: StrategyDraft[K]) => setDraft((current) => ({ ...current, [key]: value }));
-  const next = () => { const found = validateStrategyStep(draft, step); setErrors(found); if (!Object.keys(found).length) setStep((value) => Math.min(4, value + 1)); };
-  const submit = async () => {
-    const allErrors = { ...validateStrategyStep(draft, 0), ...validateStrategyStep(draft, 3), ...validateStrategyStep(draft, 4) };
-    setErrors(allErrors);
-    if (Object.keys(allErrors).length || busy) return;
-    const payload = pruneStrategyDraft(draft);
-    setBusy(true); setFailure(null); setSubmittedSocketAt(lastSocketEventAt); setSubmitted(payload);
-    try { if (strategyId) await updateStrategy(strategyId, payload); else await createStrategy(payload); }
-    catch (reason) { setSubmitted(null); setBusy(false); setFailure(reason instanceof Error ? reason.message : 'Не удалось сохранить стратегию.'); }
-  };
-
-  const ruleSwitch = (key: keyof StrategyDraft['rules'], label: string) => <Switch label={label} checked={draft.rules[key]} onChange={(event) => patch('rules', { ...draft.rules, [key]: event.target.checked })} />;
-  const numberField = (key: keyof StrategyDraft['budget'], label: string, help?: string) => <TextField label={label} type="number" min={1} value={draft.budget[key] as number | undefined ?? ''} error={errors[key]} onChange={(event) => patch('budget', { ...draft.budget, [key]: numberValue(event.target.value) })} placeholder={help} />;
-  const scoreField = (key: keyof StrategyDraft['scoring'], label: string) => <TextField label={label} type="number" value={draft.scoring[key] as number | undefined ?? ''} error={errors[key]} onChange={(event) => patch('scoring', { ...draft.scoring, [key]: numberValue(event.target.value) })} adornment="%" />;
-
-  return <div className="page-stack product-page strategy-editor-page">
-    <div className="page-heading"><div><Button variant="secondary" onClick={onCancel}>← К стратегиям</Button><h1>{strategyId ? 'Редактировать стратегию' : 'Создать стратегию'}</h1><p>Настройте повторно используемый шаблон физического поиска.</p></div></div>
-    {failure ? <Alert tone="danger" title="Не удалось сохранить">{failure}</Alert> : null}
-    <div className="strategy-editor-layout">
-      <nav className="strategy-stepper" aria-label="Этапы создания стратегии">{STEPS.map((label, index) => <Button key={label} variant={index === step ? 'primary' : 'secondary'} aria-current={index === step ? 'step' : undefined} disabled={index > step + 1 || busy} onClick={() => index <= step && setStep(index)}><span>{index + 1}</span>{label}</Button>)}</nav>
-      <section className="strategy-editor-card">
-        {step === 0 ? <div className="form-stack"><h2>Основное</h2><TextField label="Название" value={draft.name} error={errors.name} onChange={(event) => patch('name', event.target.value)} placeholder="Например, Поэтапная оптимизация витрины" /><TextArea label="Описание" rows={4} maxLength={500} value={draft.description} onChange={(event) => patch('description', event.target.value)} placeholder="Необязательное пояснение для команды" /></div> : null}
-        {step === 1 ? <div className="form-stack"><h2>Метод поиска</h2><div className="strategy-choice-grid">{METHODS.map((method) => <Button key={method.value} variant={draft.method === method.value ? 'primary' : 'secondary'} aria-pressed={draft.method === method.value} onClick={() => patch('method', method.value)}><strong>{method.title}</strong><small>{method.description}</small></Button>)}</div><div className="strategy-pipeline"><strong>Этапы поиска</strong><div>{phases.map((phase, index) => <span key={phase}>{index ? '→ ' : ''}{PHASE_LABELS[phase] ?? phase}</span>)}</div></div></div> : null}
-        {step === 2 ? <div className="form-stack"><h2>Правила вариантов</h2><p>Включите группы изменений, которые разрешено проверять.</p>{['types_strategy', 'combined_strategy', 'sequential_topn_strategy', 'sequential_phased_topn_strategy'].includes(draft.method) ? <>{ruleSwitch('columnTypes', 'Альтернативные типы колонок')}{ruleSwitch('codecs', 'Альтернативные кодеки')}</> : null}{['indexes_strategy', 'combined_strategy', 'sequential_topn_strategy', 'sequential_phased_topn_strategy'].includes(draft.method) ? ruleSwitch('skipIndexes', 'Типы skip-индексов и их гранулярность') : null}{draft.method === 'sequential_phased_topn_strategy' ? <>{ruleSwitch('tableIndexGranularity', 'Значения index_granularity таблицы')}{ruleSwitch('orderBy', 'Кандидаты ORDER BY')}{ruleSwitch('columnOrder', 'Порядок колонок')}</> : null}</div> : null}
-        {step === 3 ? <div className="form-stack"><h2>Бюджет поиска</h2><div className="grid-2">{numberField('rowsPerInsert', 'Строк для одного измерения INSERT')}{numberField('insertRepetitions', 'Повторов измерения INSERT')}{numberField('maxCandidates', 'Максимум кандидатов')}{numberField('topN', 'Победителей Top-N')}</div><Switch label="Расширенные настройки" checked={draft.budget.advanced} onChange={(event) => patch('budget', { ...draft.budget, advanced: event.target.checked })} />{draft.budget.advanced ? <div className="grid-2">{numberField('baselineRows', 'Строк базового варианта')}{numberField('candidateRows', 'Строк варианта-кандидата')}{numberField('perPhaseCandidates', 'Кандидатов на этап')}{numberField('winnersPerParent', 'Победителей на родительский вариант')}{numberField('finalValidationCandidates', 'Вариантов финальной проверки')}{draft.method === 'sequential_phased_topn_strategy' ? numberField('finalValidationIndexAlternatives', 'Альтернатив индекса в финальной проверке') : null}</div> : null}</div> : null}
-        {step === 4 ? <div className="form-stack"><h2>Оценка</h2><div className="strategy-choice-grid scoring-grid">{PRIORITIES.map((priority) => <Button key={priority.value} variant={draft.scoring.priority === priority.value ? 'primary' : 'secondary'} aria-pressed={draft.scoring.priority === priority.value} onClick={() => patch('scoring', { ...draft.scoring, priority: priority.value })}><strong>{priority.title}</strong><small>{priority.description}</small></Button>)}</div><h3>Жёсткие ограничения</h3><div className="grid-3">{scoreField('maxStorageGrowthPercent', 'Максимальный рост хранения')}{scoreField('maxInsertSlowdownPercent', 'Максимальное замедление INSERT')}{scoreField('minSelectImprovementPercent', 'Минимальное ускорение SELECT')}</div></div> : null}
-        <footer className="strategy-editor-actions"><Button variant="secondary" disabled={busy} onClick={onCancel}>Отмена</Button><div>{step > 0 ? <Button variant="secondary" disabled={busy} onClick={() => setStep((value) => value - 1)}>Назад</Button> : null}{step < 4 ? <Button variant="primary" disabled={busy} onClick={next}>Далее</Button> : <Button variant="primary" disabled={busy} onClick={() => void submit()}>{busy ? 'Сохранение…' : strategyId ? 'Сохранить' : 'Создать стратегию'}</Button>}</div></footer>
-      </section>
-      <aside className="strategy-summary"><span>Шаблон</span><strong>{draft.name || 'Без названия'}</strong><dl><dt>Метод</dt><dd>{METHOD_LABELS[draft.method]}</dd><dt>Этапов</dt><dd>{phases.length}</dd><dt>Кандидатов</dt><dd>{draft.budget.maxCandidates}</dd><dt>Приоритет</dt><dd>{PRIORITIES.find((item) => item.value === draft.scoring.priority)?.title}</dd></dl></aside>
-    </div>
-  </div>;
+  const stepErrors = (target: number) => target === 1 ? (validateDimensions(draft.dimensions) ? { dimensions: validateDimensions(draft.dimensions)! } : {}) : validateStrategyStep(draft, target);
+  const next = () => { const found = stepErrors(step); setErrors(found); if (!Object.keys(found).length) setStep((value) => Math.min(STEPS.length - 1, value + 1)); };
+  const submit = async () => { const allErrors = { ...stepErrors(0), ...stepErrors(1), ...stepErrors(2), ...stepErrors(3) }; setErrors(allErrors); if (Object.keys(allErrors).length || busy) return; const payload = pruneStrategyDraft(draft); setBusy(true); setFailure(null); setSubmittedSocketAt(lastSocketEventAt); setSubmitted(payload); try { if (strategyId) await updateStrategy(strategyId, payload); else await createStrategy(payload); } catch (reason) { setSubmitted(null); setBusy(false); setFailure(reason instanceof Error ? reason.message : 'Could not save the strategy.'); } };
+  const numberField = (key: keyof StrategyDraft['budget'], label: string) => <TextField label={label} type="number" step={1} min={1} value={draft.budget[key] as number | undefined ?? ''} error={errors[key]} onChange={(event) => patch('budget', { ...draft.budget, [key]: numberValue(event.target.value) })} />;
+  const scoreField = (key: 'maxStorageGrowthPercent' | 'maxInsertSlowdownPercent' | 'minSelectImprovementPercent', label: string) => <TextField label={label} type="number" value={draft.scoring[key] ?? ''} error={errors[key]} onChange={(event) => patch('scoring', { ...draft.scoring, [key]: numberValue(event.target.value) })} adornment="%" />;
+  return <div className="page-stack product-page strategy-editor-page"><div className="page-heading"><div><nav className="strategy-breadcrumb" aria-label="Breadcrumb"><Button variant="secondary" disabled={busy} onClick={onCancel}>Strategies</Button><span>/</span><span>{strategyId ? 'Edit strategy' : 'New strategy'}</span></nav><h1>{strategyId ? 'Edit strategy' : 'Create strategy'}</h1><p>Define how candidates are generated, measured, and ranked.</p></div></div>{failure ? <Alert tone="danger" title="Could not save">{failure}</Alert> : null}<div className="strategy-editor-layout"><nav className="strategy-stepper" aria-label="Strategy setup steps">{STEPS.map((label, index) => <Button key={label} className={`strategy-step${index < step ? ' is-complete' : ''}`} variant="secondary" aria-current={index === step ? 'step' : undefined} disabled={index > step + 1 || busy} onClick={() => index <= step ? setStep(index) : next()}><span className="strategy-step-number">{index < step ? '✓' : index + 1}</span><span className="strategy-step-label">{label}</span></Button>)}</nav><section className="strategy-editor-card" aria-labelledby="strategy-step-title"><header className="strategy-section-heading"><h2 id="strategy-step-title">{STEPS[step]}</h2><p>{STEP_HELP[step]}</p></header>
+    {step === 0 ? <div className="form-stack"><TextField label="Name" required value={draft.name} error={errors.name} onChange={(event) => patch('name', event.target.value)} placeholder="Warehouse optimization" /><TextArea label="Description" rows={4} maxLength={500} value={draft.description} onChange={(event) => patch('description', event.target.value)} placeholder="What this strategy is intended for" /></div> : null}
+    {step === 1 ? <div className="form-stack"><div className="strategy-subsection-heading"><h3>Optimization dimensions</h3><p>Each section is configured independently; it is not a choice between types, codecs, and indexes.</p></div><StrategyDimensionsEditor value={draft.dimensions} onChange={(value) => patch('dimensions', value)} />{errors.dimensions ? <Alert tone="danger" title="Complete the search settings">{errors.dimensions}</Alert> : null}<div className="strategy-subsection-heading"><h3>Search procedure</h3><p>The procedure controls traversal only; it does not enable or disable dimensions.</p></div><div className="strategy-choice-grid strategy-procedure-grid">{PROCEDURES.map((item) => <Button key={item.value} variant={draft.procedure === item.value ? 'primary' : 'secondary'} aria-pressed={draft.procedure === item.value} onClick={() => patch('procedure', item.value)}><strong>{item.title}</strong><small>{item.description}</small></Button>)}</div><div className="strategy-pipeline"><strong>Effective sequence</strong><div>{phases.map((phase, index) => <span key={phase}>{index ? '→ ' : ''}{PHASE_LABELS[phase] ?? phase}</span>)}</div></div></div> : null}
+    {step === 2 ? <div className="form-stack"><div className="grid-2">{numberField('rowsPerInsert', 'Rows per INSERT measurement')}{numberField('insertRepetitions', 'INSERT repetitions')}{numberField('maxCandidates', 'Maximum candidates')}{numberField('topN', 'Top-N winners')}</div><Switch label="Advanced budget settings" checked={draft.budget.advanced} onChange={(event) => patch('budget', { ...draft.budget, advanced: event.target.checked })} />{draft.budget.advanced ? <div className="grid-2">{numberField('baselineRows', 'Baseline rows')}{numberField('candidateRows', 'Candidate rows')}{numberField('perPhaseCandidates', 'Candidates per phase')}{numberField('winnersPerParent', 'Winners per parent')}{numberField('finalValidationCandidates', 'Final validation candidates')}{numberField('finalValidationIndexAlternatives', 'Final index alternatives')}</div> : null}</div> : null}
+    {step === 3 ? <div className="form-stack"><StrategyScoringEditor value={draft.scoring} error={errors.formula} onChange={(value) => patch('scoring', value)} /><div className="strategy-subsection-heading"><h3>Hard constraints</h3><p>Optional. Candidates that violate a populated limit are excluded before ranking.</p></div><div className="grid-3">{scoreField('maxStorageGrowthPercent', 'Maximum storage growth')}{scoreField('maxInsertSlowdownPercent', 'Maximum INSERT slowdown')}{scoreField('minSelectImprovementPercent', 'Minimum SELECT improvement')}</div></div> : null}
+    <footer className="strategy-editor-actions"><Button variant="secondary" disabled={busy} onClick={onCancel}>Cancel</Button><div>{step > 0 ? <Button variant="secondary" disabled={busy} onClick={() => setStep((value) => value - 1)}>Back</Button> : null}{step < STEPS.length - 1 ? <Button variant="primary" disabled={busy} onClick={next}>Continue <span>→</span></Button> : <Button variant="primary" disabled={busy} onClick={() => void submit()}>{busy ? 'Saving…' : strategyId ? 'Save strategy' : 'Create strategy'}</Button>}</div></footer></section></div></div>;
 }

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace modal strategy creation and editing with a dedicated five-step page backed by a validated, versioned strategy-template contract.
+**Goal:** Replace modal strategy creation and editing with a dedicated four-step page backed by a validated, versioned strategy-template contract.
 
 **Architecture:** Extend the existing realtime Control API strategy aggregate with one JSONB configuration document while retaining readable top-level method and derived phases for catalog rendering. Add a pure TypeScript strategy-template model for defaults, phase derivation, pruning, and validation, then build one ADQM design-system page used for both create and edit flows. HTTP mutation responses remain acknowledgements; the WebSocket event remains authoritative.
 
@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - UI copy is Russian for the current product; code identifiers and protocol fields are English.
-- The page has exactly five steps: Basics, Search Method, Variant Rules, Search Budget, and Scoring.
+- The page has exactly four steps: Basics, Search Configuration (Search Method and Variant Rules), Search Budget, and Scoring.
 - Search phases are derived from the method and are never accepted as user-authored input.
 - Workload and query generation are not part of strategy creation.
 - Existing benchmarks keep their copied strategy configuration when a template is later edited.
@@ -133,7 +133,7 @@ Expected: all commands exit 0.
 
 ---
 
-### Task 3: Dedicated five-step strategy page
+### Task 3: Dedicated four-step strategy page
 
 **Files:**
 - Create: `apps/config_editor_ui/src/pages/StrategyEditorPage.tsx`
@@ -148,7 +148,7 @@ Expected: all commands exit 0.
 
 - [ ] **Step 1: Add failing UI structure checks**
 
-Extend `strategy-template-check.ts` to inspect `StrategyEditorPage.tsx` and require the five Russian step labels, all five method labels, final-step-only create action, no workload/query UI, no technical-ID input, and no raw scoring-expression UI.
+Extend `strategy-template-check.ts` to inspect `StrategyEditorPage.tsx` and require the four Russian step labels, all five method labels, final-step-only create action, no workload/query UI, no technical-ID input, and no raw scoring-expression UI.
 
 - [ ] **Step 2: Run the check and verify RED**
 
@@ -172,9 +172,9 @@ Render only the rule groups applicable to the current method. Use supported ADQM
 
 Render the four default positive-integer fields and an ADQM `Switch` for Advanced. Advanced exposes separate baseline/candidate row limits, per-phase limits, winners per parent, final-validation input size, and phased-only index alternatives.
 
-- [ ] **Step 7: Build Scoring and persistent summary**
+- [ ] **Step 7: Build Scoring in the focused wizard**
 
-Render four accessible priority cards and optional hard-constraint percentage fields. Keep the compact summary visible on every step with only method, active rules, budget, and priority; do not add a Review step or generated JSON preview.
+Render four accessible priority cards and optional hard-constraint percentage fields. Use the user-approved horizontal stepper and centered form card for creation and editing. Do not render a persistent summary strip or sidebar, a Review step, or a generated JSON preview. Each step includes short guidance; rule rows explain their scope, and final-validation alternatives explain the bounded search.
 
 - [ ] **Step 8: Enforce step ownership and submission**
 
@@ -259,7 +259,7 @@ Expected: live validation, durable event, persistence, snapshot, and deletion-gu
 
 - [ ] **Step 4: Verify the complete browser flow**
 
-At `http://127.0.0.1:18901/`, open Search Strategies, create a template through all five steps, confirm method-specific sections and advanced controls, save it, wait for the WebSocket-driven catalog row, reopen it for editing, save a change, and verify the catalog updates. Confirm no start button, modal editor, workload fields, technical ID, manual phases, raw scoring expression, or Review step appears.
+At `http://127.0.0.1:18901/`, open Search Strategies, create a template through all four steps, confirm method-specific sections and advanced controls, save it, wait for the WebSocket-driven catalog row, reopen it for editing, save a change, and verify the catalog updates. Confirm no start button, modal editor, workload fields, technical ID, manual phases, raw scoring expression, or Review step appears.
 
 - [ ] **Step 5: Re-read the spec and inspect the final diff**
 

@@ -2631,11 +2631,53 @@ textarea.control {
   min-height: min(270px, calc(100dvh - 32px));
 }
 
-.strategy-editor-layout {
+.strategy-editor-page .strategy-editor-layout {
   display: grid;
-  grid-template-columns: 210px minmax(0, 1fr) 240px;
-  gap: 20px;
+  grid-template-columns: minmax(0, 1fr);
+  width: min(100%, 1080px);
+  margin-inline: auto;
+  gap: 28px;
   align-items: start;
+}
+
+.strategy-breadcrumb { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; color: var(--text-muted); }
+.strategy-editor-page .strategy-breadcrumb .button { border: 0; background: transparent; color: var(--acm-accent); padding: 0; min-height: 0; height: auto; }
+.strategy-editor-page .strategy-stepper { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; padding: 12px 0 0; }
+.strategy-search-section + .strategy-search-section { margin-top: 28px; padding-top: 28px; border-top: 1px solid var(--border); }
+.strategy-editor-page .strategy-stepper .strategy-step { position: relative; display: flex; flex-direction: column; align-items: center; gap: 10px; height: auto; min-width: 0; padding: 8px 4px; border: 0; border-radius: 6px; background: transparent; box-shadow: none; color: var(--text-muted); white-space: normal; font-size: 14px; line-height: 1.4; }
+.strategy-editor-page .strategy-step::before { content: ''; position: absolute; height: 1px; background: var(--border-strong); top: 27px; left: calc(-50% + 28px); right: calc(50% + 28px); }
+.strategy-editor-page .strategy-step:first-child::before { display: none; }
+.strategy-editor-page .strategy-step-number { display: grid; place-items: center; width: 40px; height: 40px; flex: 0 0 40px; border-radius: 50%; background: var(--surface-sunken); font-weight: 600; }
+.strategy-editor-page .strategy-step[aria-current='step'] { color: var(--acm-accent); }
+.strategy-editor-page .strategy-step[aria-current='step'] .strategy-step-number { background: var(--acm-accent); color: var(--acm-accent-contrast, #fff); }
+.strategy-editor-page .strategy-step.is-complete .strategy-step-number { color: var(--acm-accent); background: var(--accent-soft); }
+.strategy-editor-page .strategy-step:disabled { opacity: 1; cursor: default; }
+.strategy-editor-page .strategy-step:focus-visible { outline: 2px solid var(--acm-accent); outline-offset: 3px; }
+.strategy-editor-page .strategy-step:not(:disabled):hover .strategy-step-label { text-decoration: underline; text-underline-offset: 4px; }
+.acm-theme.product-root .strategy-editor-page .strategy-stepper .button.strategy-step { background: transparent; border: 0; opacity: 1; color: var(--text-muted); }
+.acm-theme.product-root .strategy-editor-page .strategy-stepper .button.strategy-step[aria-current='step'] { color: var(--acm-accent); }
+.strategy-editor-page .strategy-editor-card { padding: 32px; border-radius: 10px; min-width: 0; }
+.strategy-editor-page .strategy-editor-card > .form-stack { gap: 24px; }
+.strategy-section-heading p { margin: 8px 0 0; color: var(--text-muted); }
+.strategy-editor-card > .strategy-section-heading { margin-bottom: 28px; }
+.strategy-subsection-heading p, .strategy-budget-help p, .strategy-rule-row p { margin: 8px 0 0; color: var(--text-muted); font-size: 13px; line-height: 1.6; }
+.strategy-rule-row { padding: 16px 20px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.strategy-editor-page .strategy-editor-card .form-stack:has(.strategy-rule-row) { gap: 12px; }
+.strategy-budget-help { min-width: 0; }
+.strategy-editor-page .strategy-editor-card h2 { font-size: 25px; line-height: 1.3; }
+.strategy-editor-page .strategy-choice-grid .button { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 8px; height: auto; min-height: 106px; padding: 20px; border-radius: 8px; white-space: normal; text-align: left; color: var(--text); background: var(--surface); border: 1px solid var(--border); }
+.strategy-editor-page .strategy-choice-grid .button small { color: var(--text-muted); font-weight: 400; line-height: 1.5; }
+.acm-theme.product-root .strategy-editor-page .strategy-choice-grid .button[aria-pressed='true'] { color: var(--text); border-color: var(--acm-accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--acm-accent); }
+.strategy-editor-page .strategy-editor-actions { margin: 28px -32px -32px; padding: 22px 32px; }
+.strategy-editor-page .strategy-editor-actions .button { min-height: 42px; }
+@media (max-width: 760px) {
+  .strategy-editor-page .strategy-editor-layout { gap: 18px; }
+  .strategy-editor-page .strategy-stepper .strategy-step { font-size: 11px; }
+  .strategy-editor-page .strategy-step-number { width: 32px; height: 32px; flex-basis: 32px; }
+  .strategy-editor-page .strategy-step::before { top: 23px; left: calc(-50% + 21px); right: calc(50% + 21px); }
+  .strategy-editor-page .strategy-editor-card { padding: 20px; }
+  .strategy-editor-page .strategy-editor-actions { margin: 24px -20px -20px; padding: 16px 20px; flex-wrap: wrap; }
+  .strategy-editor-page .grid-2, .strategy-editor-page .grid-3 { grid-template-columns: 1fr; }
 }
 
 .strategy-stepper,
@@ -2921,3 +2963,31 @@ textarea.control {
 .product-light .strategy-card-context { color: #627c9e; background: #f7f9fc; border-color: #dfe7f0; }
 .product-light .strategy-card-actions > .button.secondary { background: #fff; border-color: #dfe7f0; color: #334967; }
 .product-light .strategy-card-actions > .button.strategy-delete-action { background: #fff1f4; border-color: #ffc7d3; color: #ff1752; }
+
+/* Strategy editor v2: dense rule builders remain visually separate from the search procedure. */
+.strategy-dimensions { gap: 12px; }
+.strategy-dimension { overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.strategy-dimension > summary { display: flex; justify-content: space-between; gap: 16px; padding: 17px 20px; cursor: pointer; font-weight: 700; list-style-position: inside; }
+.strategy-dimension > summary span { color: var(--text-muted); font-size: 12px; font-weight: 500; }
+.strategy-dimension > .form-stack { padding: 4px 20px 20px; border-top: 1px solid var(--border); }
+.strategy-rule-editor { display: grid; gap: 14px; padding: 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-subtle, rgba(127, 150, 180, .05)); }
+.strategy-index-row { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(160px, .6fr) auto; align-items: end; gap: 12px; }
+.strategy-index-row > .button { margin-bottom: 1px; }
+.strategy-procedure-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.strategy-preset-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.strategy-preset-grid .button { display: flex; min-height: 96px; height: auto; padding: 16px; flex-direction: column; align-items: flex-start; justify-content: center; gap: 6px; text-align: left; white-space: normal; }
+.strategy-preset-grid .button small { color: var(--text-muted); line-height: 1.4; }
+.strategy-formula-grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(280px, .75fr); gap: 20px; align-items: start; }
+.strategy-derived-variables { display: grid; gap: 8px; padding: 16px; border-radius: 8px; background: var(--accent-soft); }
+.strategy-derived-variables code { overflow-wrap: anywhere; color: var(--text-muted); font-size: 12px; }
+.strategy-variable-catalog { display: grid; gap: 14px; padding: 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.strategy-variable-catalog h3 { margin: 0; }
+.strategy-variable-list { display: grid; max-height: 320px; overflow: auto; }
+.strategy-variable-list .button { display: flex; height: auto; padding: 10px 8px; flex-direction: column; align-items: flex-start; text-align: left; white-space: normal; }
+.strategy-variable-list code { color: var(--acm-accent); overflow-wrap: anywhere; }
+.strategy-variable-list small { color: var(--text-muted); line-height: 1.35; }
+.strategy-function-list { padding-top: 12px; border-top: 1px solid var(--border); }
+.strategy-function-list p { margin: 8px 0 0; color: var(--text-muted); line-height: 1.6; overflow-wrap: anywhere; }
+.field-error { margin: -8px 0 0; color: var(--danger, #c62443); font-size: 13px; }
+@media (max-width: 980px) { .strategy-preset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .strategy-formula-grid { grid-template-columns: 1fr; } .strategy-procedure-grid { grid-template-columns: 1fr; } }
+@media (max-width: 680px) { .strategy-preset-grid { grid-template-columns: 1fr; } .strategy-index-row { grid-template-columns: 1fr; } }
