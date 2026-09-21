@@ -64,7 +64,7 @@ export interface EditorApi {
   selectBenchmark(index: number): void;
   setSection(section: SectionId): void;
   updateSelected(updater: (benchmark: BenchmarkConfig) => BenchmarkConfig): void;
-  addBenchmark(): void;
+  addBenchmark(seed?: Partial<BenchmarkConfig>): void;
   duplicateBenchmark(index: number): void;
   removeBenchmark(index: number): void;
 
@@ -204,11 +204,12 @@ export function EditorProvider({ children }: { children: ReactNode }): JSX.Eleme
     [selectedIndex],
   );
 
-  const addBenchmark = useCallback(() => {
+  const addBenchmark = useCallback((seed: Partial<BenchmarkConfig> = {}) => {
     setDocument((prev) => {
       if (!prev) return prev;
-      const base = `benchmark_${prev.benchmarks.length + 1}`;
-      const next = [...prev.benchmarks, emptyBenchmark(base)];
+      const base = seed.id ?? `benchmark_${prev.benchmarks.length + 1}`;
+      const created = { ...emptyBenchmark(base), ...seed } as BenchmarkConfig;
+      const next = [...prev.benchmarks, created];
       setSelectedIndex(next.length - 1);
       setSectionState('source');
       return { ...prev, benchmarks: next };

@@ -1,0 +1,5 @@
+{
+  "name": "Remix: LLMOps Flow",
+  "description": "A frontend dashboard for managing the lifecycle of LLM applications, including deployments, monitoring, scaling, and cost tracking.",
+  "requestFramePermissions": []
+}

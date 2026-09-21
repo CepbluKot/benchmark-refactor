@@ -1,0 +1,11 @@
+---
+description: Translate user requests to English for internal task execution while replying in Russian
+alwaysApply: true
+---
+
+# Internal working language
+
+- Translate Russian user requests into concise English internally before planning, searching, coding, or validating.
+- Use English for internal notes, task decomposition, search terms, and code-facing reasoning.
+- Reply to the user in Russian unless they use another language.
+- Keep the translation faithful: preserve product names, file paths, code identifiers, quoted UI text, and explicit constraints.

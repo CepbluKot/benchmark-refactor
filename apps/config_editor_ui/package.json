@@ -9,11 +9,13 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b --pretty",
+    "check:ui-kit": "esbuild scripts/ui-kit-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/ui-kit-check.mjs && node node_modules/.cache/ui-kit-check.mjs",
     "check:demo": "esbuild scripts/demo-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/demo-check.mjs && node node_modules/.cache/demo-check.mjs",
-    "check:roundtrip": "esbuild scripts/roundtrip-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/roundtrip.mjs && node node_modules/.cache/roundtrip.mjs"
+    "check:roundtrip": "esbuild scripts/roundtrip-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/roundtrip.mjs && node node_modules/.cache/roundtrip.mjs",
+    "check:strategy-template": "esbuild scripts/strategy-template-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/strategy-template-check.mjs && node node_modules/.cache/strategy-template-check.mjs"
   },
   "dependencies": {
-    "@adqm/gpb-ui": "file:vendor/adqm-gpb-ui-0.5.0.tgz",
+    "@adqm/gpb-ui": "file:vendor/adqm-gpb-ui-0.5.1.tgz",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },

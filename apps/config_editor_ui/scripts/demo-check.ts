@@ -7,7 +7,7 @@ assert.ok(sourceError({...source, port: 0}, []));
 assert.ok(sourceError({...source, port: 1.5}, []));
 assert.ok(sourceError(source, [source]));
 const config = { ...emptyBenchmark('bench_test'), connection_id: 'local_ch_hits' };
-const run = createDemoRun(config, 'r1');
+const run = createDemoRun(config, 'workspace-demo', 'r1');
 config.id = 'changed';
 assert.equal(run.config.id, 'bench_test');
 assert.equal(finishDemoRun({...run, status: 'cancelled'}).status, 'cancelled');

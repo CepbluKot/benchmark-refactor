@@ -1,55 +1,14 @@
-import { useEffect, useState } from 'react';
-import { ComponentGallery } from '@adqm/gpb-ui';
-
+import { useState } from 'react';
+import { Alert } from '@adqm/gpb-ui';
 import { ProductShell } from './components/ProductShell';
 import type { ProductPage } from './components/ProductShell';
-import { useWorkspace } from './demo/workspace';
+import { useWorkspace } from './control/workspace';
 import { BenchmarksPage } from './pages/BenchmarksPage';
+import { CreateBenchmarkPage } from './pages/CreateBenchmarkPage';
+import { DesignSystemPage } from './pages/DesignSystemPage';
+import { EditBenchmarkPage } from './pages/EditBenchmarkPage';
 import { RuleBanksPage } from './pages/RuleBanksPage';
 import { RunsPage } from './pages/RunsPage';
 import { SourcesPage } from './pages/SourcesPage';
-import { useEditor } from './state/editor';
-
-export function App(): JSX.Element {
-  if (window.location.pathname === '/design-system') {
-    return <ComponentGallery backHref="/" backLabel="К DDL Benchmark Engine" />;
-  }
-
-  const editor = useEditor();
-  const { sources, ruleBanks } = useWorkspace();
-  const [page, setPage] = useState<ProductPage>('benchmarks');
-  const [editingBenchmark, setEditingBenchmark] = useState(false);
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!editor.document) editor.loadSample();
-  }, [editor.document, editor.loadSample]);
-
-  useEffect(() => {
-    editor.loadReference('connections.demo.json', JSON.stringify({ connections: sources }));
-  }, [editor.loadReference, sources]);
-
-  useEffect(() => {
-    editor.loadReference('rule_banks.demo.json', JSON.stringify({
-      rule_banks: Object.fromEntries(ruleBanks.map((bank) => [bank.id, {}])),
-    }));
-  }, [editor.loadReference, ruleBanks]);
-
-  const openRun = (id: string) => {
-    setSelectedRunId(id);
-    setPage('runs');
-  };
-
-  return (
-    <ProductShell page={page} onPageChange={(next) => {
-      setPage(next);
-      setEditingBenchmark(false);
-      if (next === 'runs') setSelectedRunId(null);
-    }}>
-      {page === 'sources' ? <SourcesPage /> : null}
-      {page === 'benchmarks' ? <BenchmarksPage editing={editingBenchmark} onEditingChange={setEditingBenchmark} onOpenRun={openRun} /> : null}
-      {page === 'runs' ? <RunsPage selectedId={selectedRunId} onSelectedId={setSelectedRunId} /> : null}
-      {page === 'rule-banks' ? <RuleBanksPage /> : null}
-    </ProductShell>
-  );
-}
+import { StrategyEditorPage } from './pages/StrategyEditorPage';
+export function App(): JSX.Element { const { ready, error } = useWorkspace(); const [page, setPage] = useState<ProductPage>(() => window.location.pathname === '/design-system' ? 'design-system' : 'benchmarks'); const [selectedRunId, setSelectedRunId] = useState<string | null>(null); const [editingBenchmarkId, setEditingBenchmarkId] = useState<string | null>(null); const [editingStrategyId, setEditingStrategyId] = useState<string | null>(null); if (!ready) return <main className="app-loading"><h1>DB Benchmark</h1>{error ? <Alert tone="danger" title="Нет связи с Control API">{error}</Alert> : <p>Загружаем состояние бенчмарков…</p>}</main>; const changePage = (next: ProductPage) => { setPage(next); if (next === 'runs') setSelectedRunId(null); }; return <ProductShell page={page} onPageChange={changePage}>{error ? <Alert tone="warning" title="Обновления в реальном времени отключены">{error}</Alert> : null}{page === 'sources' ? <SourcesPage /> : null}{page === 'benchmarks' ? <BenchmarksPage onCreate={() => setPage('create-benchmark')} onEdit={(id) => { setEditingBenchmarkId(id); setPage('edit-benchmark'); }} /> : null}{page === 'create-benchmark' ? <CreateBenchmarkPage onCancel={() => setPage('benchmarks')} onDone={() => setPage('benchmarks')} /> : null}{page === 'edit-benchmark' && editingBenchmarkId ? <EditBenchmarkPage benchmarkId={editingBenchmarkId} onCancel={() => setPage('benchmarks')} onDone={() => setPage('benchmarks')} /> : null}{page === 'runs' ? <RunsPage selectedId={selectedRunId} onSelectedId={setSelectedRunId} /> : null}{page === 'strategies' ? <RuleBanksPage onCreate={() => setPage('create-strategy')} onEdit={(id) => { setEditingStrategyId(id); setPage('edit-strategy'); }} /> : null}{page === 'create-strategy' ? <StrategyEditorPage onCancel={() => setPage('strategies')} onDone={() => setPage('strategies')} /> : null}{page === 'edit-strategy' && editingStrategyId ? <StrategyEditorPage strategyId={editingStrategyId} onCancel={() => setPage('strategies')} onDone={() => setPage('strategies')} /> : null}{page === 'design-system' ? <DesignSystemPage /> : null}</ProductShell>; }

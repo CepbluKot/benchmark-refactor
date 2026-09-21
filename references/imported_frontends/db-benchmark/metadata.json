@@ -1,0 +1,6 @@
+{
+  "name": "DB Benchmark",
+  "description": "Внутреннее веб-приложение для настройки и проведения экспериментов над физической структурой таблиц ClickHouse.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

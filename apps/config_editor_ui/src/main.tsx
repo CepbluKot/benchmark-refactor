@@ -2,8 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import { App } from './App';
-import { WorkspaceProvider } from './demo/workspace';
-import { EditorProvider } from './state/editor';
+import { WorkspaceProvider } from './control/workspace';
 import '@adqm/gpb-ui/styles.css';
 import './styles.css';
 
@@ -12,10 +11,8 @@ if (!container) throw new Error('Не найден контейнер #root');
 
 createRoot(container).render(
   <StrictMode>
-    <EditorProvider>
-      <WorkspaceProvider>
-        <App />
-      </WorkspaceProvider>
-    </EditorProvider>
+    <WorkspaceProvider>
+      <App />
+    </WorkspaceProvider>
   </StrictMode>,
 );

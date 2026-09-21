@@ -1,0 +1,96 @@
+{
+  "entities": {
+    "Deployment": {
+      "title": "Deployment",
+      "description": "Represents a model deployment on the cluster.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "modelName": { "type": "string" },
+        "modelVersion": { "type": "string" },
+        "clusterId": { "type": "string" },
+        "replicas": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "pulling", "running", "failed"] },
+        "message": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "team": { "type": "string" },
+        "product": { "type": "string" },
+        "ownerId": { "type": "string" }
+      },
+      "required": ["modelName", "modelVersion", "clusterId", "replicas", "status", "createdAt", "team", "product", "ownerId"]
+    },
+    "CostEntry": {
+      "title": "CostEntry",
+      "description": "Represents a single inference cost record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "deploymentId": { "type": "string" },
+        "modelName": { "type": "string" },
+        "team": { "type": "string" },
+        "product": { "type": "string" },
+        "inputTokens": { "type": "number" },
+        "outputTokens": { "type": "number" },
+        "cost": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "ownerId": { "type": "string" }
+      },
+      "required": ["deploymentId", "modelName", "team", "product", "inputTokens", "outputTokens", "cost", "timestamp", "ownerId"]
+    },
+    "ModelRate": {
+      "title": "ModelRate",
+      "description": "Pricing and power consumption for a specific model.",
+      "type": "object",
+      "properties": {
+        "modelName": { "type": "string" },
+        "inputPricePer1M": { "type": "number" },
+        "outputPricePer1M": { "type": "number" },
+        "wattsPerReplica": { "type": "number" }
+      },
+      "required": ["modelName", "inputPricePer1M", "outputPricePer1M", "wattsPerReplica"]
+    },
+    "GlobalConfig": {
+      "title": "GlobalConfig",
+      "description": "Dynamic configuration for the cluster.",
+      "type": "object",
+      "properties": {
+        "electricityPriceKwh": { "type": "number" },
+        "lastUpdated": { "type": "string", "format": "date-time" }
+      },
+      "required": ["electricityPriceKwh", "lastUpdated"]
+    },
+    "EnergyTimeSeries": {
+      "title": "EnergyTimeSeries",
+      "description": "Historical energy consumption data point.",
+      "type": "object",
+      "properties": {
+        "timestamp": { "type": "string", "format": "date-time" },
+        "power_watts": { "type": "number" },
+        "cost": { "type": "number" }
+      },
+      "required": ["timestamp", "power_watts", "cost"]
+    }
+  },
+  "firestore": {
+    "/deployments/{deploymentId}": {
+      "schema": "Deployment",
+      "description": "Active and past deployments."
+    },
+    "/costs/{costId}": {
+      "schema": "CostEntry",
+      "description": "Inference cost logs."
+    },
+    "/rates/{modelName}": {
+      "schema": "ModelRate",
+      "description": "Pricing catalogs."
+    },
+    "/config/global": {
+      "schema": "GlobalConfig",
+      "description": "Cluster-wide configuration."
+    },
+    "/energy_history/{historyId}": {
+      "schema": "EnergyTimeSeries",
+      "description": "Legacy energy consumption tracking."
+    }
+  }
+}

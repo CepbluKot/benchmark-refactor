@@ -56,7 +56,7 @@ export function Sidebar(): JSX.Element {
 
       <div className="sidebar-foot">
         <div className="inline-actions">
-          <Button variant="secondary" onClick={addBenchmark}>Добавить</Button>
+          <Button variant="secondary" onClick={() => addBenchmark()}>Добавить</Button>
           <Button
             variant="secondary"
             disabled={!benchmarks.length}

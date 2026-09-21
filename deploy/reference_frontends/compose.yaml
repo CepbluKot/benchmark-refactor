@@ -1,0 +1,16 @@
+services:
+  db-benchmark-reference:
+    image: db-benchmark-reference:local
+    build:
+      context: ../..
+      dockerfile: references/imported_frontends/db-benchmark/Dockerfile
+    ports:
+      - "18902:8080"
+
+  llmops-flow-reference:
+    image: llmops-flow-reference:local
+    build:
+      context: ../..
+      dockerfile: references/imported_frontends/llmops-flow-design-system/Dockerfile
+    ports:
+      - "18903:8080"

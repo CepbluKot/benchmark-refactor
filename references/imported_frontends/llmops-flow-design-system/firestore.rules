@@ -1,0 +1,120 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // -------------------------------------------------------------------------
+    // Phase 3: Primitives
+    // -------------------------------------------------------------------------
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(data) {
+      return isSignedIn() && data.ownerId == request.auth.uid;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 2: Validation Helpers
+    // -------------------------------------------------------------------------
+
+    function isValidDeployment(d) {
+      return d.keys().hasAll(['modelName', 'modelVersion', 'clusterId', 'replicas', 'status', 'createdAt', 'team', 'product', 'ownerId'])
+        && d.keys().size() == 9
+        && d.modelName is string && d.modelName.size() <= 100
+        && d.modelVersion is string && d.modelVersion.size() <= 50
+        && d.clusterId is string && d.clusterId.size() <= 50
+        && d.replicas is number && d.replicas >= 0
+        && d.status in ['pending', 'pulling', 'running', 'failed']
+        && d.createdAt is timestamp
+        && d.team is string && d.team.size() <= 100
+        && d.product is string && d.product.size() <= 100
+        && d.ownerId == request.auth.uid;
+    }
+
+    function isValidCostEntry(c) {
+      return c.keys().hasAll(['deploymentId', 'modelName', 'team', 'product', 'inputTokens', 'outputTokens', 'cost', 'timestamp', 'ownerId'])
+        && c.keys().size() == 9
+        && c.deploymentId is string && c.deploymentId.size() <= 128
+        && c.modelName is string && c.modelName.size() <= 100
+        && c.team is string && c.team.size() <= 100
+        && c.product is string && c.product.size() <= 100
+        && c.inputTokens is number && c.inputTokens >= 0
+        && c.outputTokens is number && c.outputTokens >= 0
+        && c.cost is number && c.cost >= 0
+        && c.timestamp is timestamp
+        && c.ownerId == request.auth.uid;
+    }
+
+    function isValidModelRate(r) {
+      return r.keys().hasAll(['modelName', 'inputPricePer1M', 'outputPricePer1M', 'wattsPerReplica'])
+        && r.keys().size() == 4
+        && r.modelName is string
+        && r.inputPricePer1M is number && r.inputPricePer1M >= 0
+        && r.outputPricePer1M is number && r.outputPricePer1M >= 0
+        && r.wattsPerReplica is number && r.wattsPerReplica >= 0;
+    }
+
+    function isValidGlobalConfig(c) {
+      return c.keys().hasAll(['electricityPriceKwh', 'lastUpdated'])
+        && c.keys().size() == 2
+        && c.electricityPriceKwh is number && c.electricityPriceKwh >= 0
+        && c.lastUpdated is timestamp;
+    }
+
+    function isValidEnergyTimeSeries(e) {
+      return e.keys().hasAll(['timestamp', 'power_watts', 'cost'])
+        && e.keys().size() == 3
+        && e.timestamp is timestamp
+        && e.power_watts is number && e.power_watts >= 0
+        && e.cost is number && e.cost >= 0;
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 1: Security Match Blocks
+    // -------------------------------------------------------------------------
+
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    match /deployments/{deploymentId} {
+      allow read: if isOwner(resource.data);
+      allow create: if isSignedIn() && isValidId(deploymentId) && isValidDeployment(request.resource.data)
+                    && request.resource.data.createdAt == request.time;
+      allow update: if isOwner(resource.data) && isValidDeployment(request.resource.data)
+                    && request.resource.data.ownerId == resource.data.ownerId
+                    && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isOwner(resource.data);
+    }
+
+    match /costs/{costId} {
+      allow read: if isOwner(resource.data);
+      allow create: if isSignedIn() && isValidId(costId) && isValidCostEntry(request.resource.data)
+                    && request.resource.data.timestamp == request.time;
+      // Costs are typically immutable after creation
+      allow update, delete: if false;
+    }
+
+    match /rates/{modelName} {
+      allow read: if true; // Public catalogs
+      // Only system/admins should manage rates. For now disable client writes.
+      allow write: if false;
+    }
+
+    match /config/global {
+      allow read: if true;
+      allow write: if false; // System managed
+    }
+
+    match /energy_history/{historyId} {
+      allow read: if true; // Public dashboard data
+      allow write: if false;
+    }
+  }
+}

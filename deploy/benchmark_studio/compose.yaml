@@ -1,0 +1,52 @@
+name: benchmark-studio
+services:
+  postgres:
+    image: postgres:15-alpine
+    pull_policy: never
+    environment:
+      POSTGRES_USER: benchmark
+      POSTGRES_PASSWORD: ${CONTROL_DB_PASSWORD:?set CONTROL_DB_PASSWORD in .env}
+      POSTGRES_DB: benchmark_control
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U benchmark -d benchmark_control"], interval: 2s, timeout: 3s, retries: 30}
+    networks: [control]
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    pull_policy: never
+    volumes: [./clickhouse-init:/docker-entrypoint-initdb.d:ro, clickhouse-data:/var/lib/clickhouse]
+    healthcheck: {test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping | grep -q Ok"], interval: 2s, timeout: 3s, retries: 30}
+    networks: [control]
+  control-api:
+    build: {context: ../.., dockerfile: apps/realtime_control_api/Dockerfile}
+    image: benchmark-studio-control:local
+    pull_policy: never
+    environment:
+      CONTROL_DATABASE_URL: postgresql://benchmark:${CONTROL_DB_PASSWORD:?set CONTROL_DB_PASSWORD in .env}@postgres:5432/benchmark_control
+      CLICKHOUSE_SOURCE_HOST: ${CLICKHOUSE_SOURCE_HOST:?set CLICKHOUSE_SOURCE_HOST in .env}
+      CLICKHOUSE_SOURCE_PORT: ${CLICKHOUSE_SOURCE_PORT:?set CLICKHOUSE_SOURCE_PORT in .env}
+      CLICKHOUSE_SOURCE_USER: ${CLICKHOUSE_SOURCE_USER:?set CLICKHOUSE_SOURCE_USER in .env}
+      CLICKHOUSE_SOURCE_PASSWORD: ${CLICKHOUSE_SOURCE_PASSWORD:-}
+      CLICKHOUSE_SANDBOX_HOST: ${CLICKHOUSE_SANDBOX_HOST:-clickhouse}
+      CLICKHOUSE_SANDBOX_PORT: ${CLICKHOUSE_SANDBOX_PORT:-8123}
+      CLICKHOUSE_SANDBOX_USER: ${CLICKHOUSE_SANDBOX_USER:?set CLICKHOUSE_SANDBOX_USER in .env}
+      CLICKHOUSE_SANDBOX_PASSWORD: ${CLICKHOUSE_SANDBOX_PASSWORD:-}
+      CORS_ALLOWED_ORIGINS: ${UI_ORIGIN:-http://127.0.0.1:18901}
+    depends_on:
+      postgres: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    ports: ["18900:8000"]
+    healthcheck: {test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"], interval: 2s, timeout: 3s, retries: 30}
+    networks: [control, ingress]
+  ui:
+    build: {context: ../.., dockerfile: apps/config_editor_ui/Dockerfile}
+    image: benchmark-studio-ui:local
+    pull_policy: never
+    depends_on:
+      control-api: {condition: service_healthy}
+    ports: ["18901:8080"]
+    volumes: [./runtime-config.local.js:/usr/share/nginx/html/runtime-config.js:ro]
+    networks: [ingress]
+networks:
+  control: {internal: true}
+  ingress: {}
+volumes: {postgres-data: {}, clickhouse-data: {}}

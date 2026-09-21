@@ -10,5 +10,5 @@
  *                          проверка подключения, запуск, результаты).
  */
 window.__DDL_BENCH_CONFIG__ = {
-  apiBaseUrl: null,
+  apiBaseUrl: "http://benchmark.lan.awesomeio.ru:18900",
 };

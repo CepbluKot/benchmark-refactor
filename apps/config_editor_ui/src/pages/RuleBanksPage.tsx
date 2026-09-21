@@ -1,25 +1,25 @@
-import { useState } from 'react';
-import { Badge, Button, Modal, TextArea, TextField } from '@adqm/gpb-ui';
+import { useMemo, useState } from 'react';
+import { Alert, Button, Modal, SelectField } from '@adqm/gpb-ui';
+import { ActionIcon } from '../components/ActionIcon';
+import { MonitoringTable, type MonitoringTableColumn } from '../components/MonitoringTable';
+import { useWorkspace } from '../control/workspace';
+import type { Strategy } from '../control/api';
+import { METHOD_LABELS } from '../strategies/model';
 
-import type { RuleBankSummary } from '../demo/model';
-import { useWorkspace } from '../demo/workspace';
+const OPTIONS = Object.entries(METHOD_LABELS).map(([value, label]) => ({ value, label }));
 
-function emptyBank(): RuleBankSummary { return { id: '', description: '', columnRules: 0, codecRules: 0, indexRules: 0, orderByRules: 0, defaultFor: [] }; }
-
-export function RuleBanksPage(): JSX.Element {
-  const { ruleBanks, saveRuleBank, removeRuleBank } = useWorkspace();
-  const [draft, setDraft] = useState<RuleBankSummary | null>(null);
-  const [previousId, setPreviousId] = useState<string | undefined>();
-  const open = (bank?: RuleBankSummary) => { setPreviousId(bank?.id); setDraft(bank ? { ...bank, defaultFor: [...bank.defaultFor] } : emptyBank()); };
-  return <div className="page-stack">
-    <div className="page-heading"><div><span className="eyebrow">Пространство поиска</span><h1>Банки правил</h1><p>Наборы типов, кодеков, индексов и вариантов ORDER BY для повторного использования.</p></div><Button variant="primary" onClick={() => open()}>Добавить банк</Button></div>
-    <section className="rule-bank-grid">{ruleBanks.map((bank) => <article className="rule-bank-card" key={bank.id}>
-      <div className="rule-bank-card-head"><div><Badge tone="info">ClickHouse</Badge><h2 className="mono">{bank.id}</h2></div><div className="table-actions"><Button variant="tertiary" onClick={() => open(bank)}>Изменить</Button><Button variant="danger" onClick={() => removeRuleBank(bank.id)}>Удалить</Button></div></div>
-      <p>{bank.description}</p><div className="rule-counts"><div><strong>{bank.columnRules}</strong><span>правил типов</span></div><div><strong>{bank.codecRules}</strong><span>кодеков</span></div><div><strong>{bank.indexRules}</strong><span>индексов</span></div><div><strong>{bank.orderByRules}</strong><span>ORDER BY</span></div></div>
-      <div className="card-footer-note">{bank.defaultFor.length ? `По умолчанию для: ${bank.defaultFor.join(', ')}` : 'Подключается явно в настройках бенчмарка'}</div>
-    </article>)}</section>
-    <Modal open={Boolean(draft)} onClose={() => setDraft(null)} title={previousId ? `Банк ${previousId}` : 'Новый банк правил'} footer={<><Button variant="secondary" onClick={() => setDraft(null)}>Отмена</Button><Button variant="primary" disabled={!draft?.id.trim()} onClick={() => { if (!draft) return; saveRuleBank(draft, previousId); setDraft(null); }}>Сохранить</Button></>}>
-      {draft ? <div className="form-stack"><TextField label="Идентификатор" value={draft.id} onChange={(event) => setDraft({ ...draft, id: event.target.value })} /><TextArea label="Описание" rows={3} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /><div className="form-grid"><TextField label="Правила типов" type="number" min={0} value={draft.columnRules} onChange={(event) => setDraft({ ...draft, columnRules: Number(event.target.value) })} /><TextField label="Правила кодеков" type="number" min={0} value={draft.codecRules} onChange={(event) => setDraft({ ...draft, codecRules: Number(event.target.value) })} /><TextField label="Правила индексов" type="number" min={0} value={draft.indexRules} onChange={(event) => setDraft({ ...draft, indexRules: Number(event.target.value) })} /><TextField label="Правила ORDER BY" type="number" min={0} value={draft.orderByRules} onChange={(event) => setDraft({ ...draft, orderByRules: Number(event.target.value) })} /></div><p className="field-help">Сейчас форма демонстрирует каталог банков. Полный редактор содержимого банка потребует зеркало `RuleBankConfig`, аналогичное редактору бенчмарка.</p></div> : null}
-    </Modal>
-  </div>;
+export function RuleBanksPage({ onCreate, onEdit }: { onCreate(): void; onEdit(id: string): void }): JSX.Element {
+  const { strategies, benchmarks, deleteStrategy } = useWorkspace();
+  const [selected, setSelected] = useState<Strategy | null>(null);
+  const [strategyFilter, setStrategyFilter] = useState('all');
+  const [failure, setFailure] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const used = selected ? benchmarks.some((item) => item.strategyId === selected.id) : false;
+  const rows = useMemo(() => strategyFilter === 'all' ? strategies : strategies.filter((item) => item.strategy === strategyFilter), [strategies, strategyFilter]);
+  const remove = async () => { if (!selected || busy || used) return; setBusy(true); setFailure(null); try { await deleteStrategy(selected.id); setSelected(null); } catch (error) { setFailure(error instanceof Error ? error.message : 'Не удалось удалить стратегию'); } finally { setBusy(false); } };
+  const columns: MonitoringTableColumn<Strategy>[] = [
+    { key: 'name', label: 'Название', render: (item) => <strong>{item.name}</strong> },
+    { key: 'actions', label: '', render: (item) => <div className="table-actions"><Button variant="secondary" aria-label={`Изменить стратегию: ${item.name}`} onClick={() => onEdit(item.id)}><ActionIcon name="edit" />Изменить</Button><Button variant="secondary" className="action-icon-danger" aria-label={`Удалить стратегию: ${item.name}`} onClick={() => { setSelected(item); setFailure(null); }}><ActionIcon name="delete" />Удалить</Button></div> },
+  ];
+  return <div className="page-stack product-page strategies-page"><div className="page-heading"><div><h1>Стратегии поиска</h1><p>Общие шаблоны для всех пространств. Применяются при создании бенчмарка.</p></div><Button variant="primary" onClick={onCreate}>＋ Создать стратегию</Button></div><MonitoringTable rows={rows} columns={columns} rowKey={(item) => item.id} title="" description="" searchPlaceholder="Поиск по названию, методу или этапу…" searchText={(item) => `${item.name} ${item.strategy} ${item.phases.join(' ')}`} filters={<SelectField label="Метод поиска" value={strategyFilter} options={[{ value: 'all', label: 'Все методы' }, ...OPTIONS]} onChange={(event) => setStrategyFilter(event.target.value)} />} filtersActive={strategyFilter !== 'all'} onResetFilters={() => setStrategyFilter('all')} emptyTitle="Стратегий пока нет" emptyDescription="Создайте первую стратегию поиска." /><Modal open={selected !== null} onClose={() => { if (!busy) setSelected(null); }} title="Удалить стратегию" footer={<><Button variant="secondary" disabled={busy} onClick={() => setSelected(null)}>Отмена</Button><Button variant="primary" disabled={busy || used} onClick={() => void remove()}>{busy ? 'Удаление…' : 'Удалить'}</Button></>}><div className="form-stack">{failure ? <Alert tone="danger" title="Не удалось удалить">{failure}</Alert> : null}<p>Удалить стратегию «{selected?.name}»? Это действие нельзя отменить.</p>{used ? <Alert tone="warning" title="Стратегия используется">Сначала выберите другую стратегию в связанных бенчмарках.</Alert> : null}</div></Modal></div>;
 }

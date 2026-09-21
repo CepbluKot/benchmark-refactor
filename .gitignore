@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+deploy/benchmark_studio/.env
+
+# Generated offline Docker image bundles
+deploy/benchmark_studio/offline-release-*/benchmark-studio-images.tar.gz

@@ -17,12 +17,10 @@ interface MonitoringTableProps<Row> {
   searchText(row: Row): string;
   searchPlaceholder?: string;
   filters?: ReactNode;
-  headerAction?: ReactNode;
   emptyTitle?: string;
   emptyDescription?: string;
   pageSize?: number;
   compact?: boolean;
-  showFilters?: boolean;
   filtersActive?: boolean;
   onResetFilters?: () => void;
 }
@@ -39,10 +37,9 @@ export function MonitoringTable<Row>({
   title,
   description,
   searchText,
+  searchPlaceholder,
   filters,
-  headerAction,
   pageSize = 5,
-  showFilters = true,
   filtersActive = false,
   onResetFilters,
 }: MonitoringTableProps<Row>): JSX.Element {
@@ -51,12 +48,7 @@ export function MonitoringTable<Row>({
       <section className="monitor-table-shell">
         <header className="monitor-table-heading">
           <div><h2>{title}</h2><p>{description}</p></div>
-          {headerAction ? <div className="monitor-table-heading-action">{headerAction}</div> : null}
         </header>
-        {showFilters && filters ? <div className="monitor-filter-grid monitor-filter-grid--library">
-          {filters}
-          <Button variant="secondary" disabled={!filtersActive} onClick={onResetFilters}>Сбросить фильтры</Button>
-        </div> : null}
         <DataTable
           rows={rows}
           columns={columns.map(({ key, label, render }) => ({ key, label, render }))}
@@ -64,6 +56,8 @@ export function MonitoringTable<Row>({
           searchText={searchText}
           label={`Поиск в таблице «${title}»`}
           pageSize={pageSize}
+          searchPlaceholder={searchPlaceholder}
+          filters={filters ? <div className={`monitor-filter-set${filtersActive ? ' is-active' : ''}`}>{filters}{filtersActive ? <Button variant="tertiary" onClick={onResetFilters}>Сбросить</Button> : null}</div> : undefined}
         />
       </section>
     </div>

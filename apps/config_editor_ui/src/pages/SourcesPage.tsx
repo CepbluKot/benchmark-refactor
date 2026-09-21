@@ -1,68 +1,46 @@
-import { useMemo, useState } from 'react';
-import { Alert, Badge, Button, Modal, SelectField, Status, TextField } from '@adqm/gpb-ui';
+import { useState } from 'react';
+import { Alert, Badge, Button, Modal, SelectField, TextField } from '@adqm/gpb-ui';
+import { ActionIcon } from '../components/ActionIcon';
+import { MaterialIcon } from '../components/MaterialIcon';
+import type { Source } from '../control/api';
+import { useWorkspace } from '../control/workspace';
 
-import { MonitoringTable, type MonitoringTableColumn } from '../components/MonitoringTable';
-import type { DataSource } from '../demo/model';
-import { sourceError } from '../demo/model';
-import { useWorkspace } from '../demo/workspace';
-import { useEditor } from '../state/editor';
-
-interface SourceDraft extends DataSource { password: string }
-
-function emptySource(): SourceDraft {
-  return { id: '', dbms: 'clickhouse', credential_type: 'password', host: '', port: 8123, login: '', password: '', status: 'unchecked' };
-}
-
-function status(source: DataSource): JSX.Element {
-  if (source.status === 'available') return <Status status="success" label="Доступно" />;
-  if (source.status === 'unavailable') return <Status status="danger" label="Недоступно" />;
-  return <Status status="neutral" label="Не проверено" />;
-}
+interface SourceDraft { name: string; host: string; port: number; login: string; secretRef: string }
+const emptySource = (): SourceDraft => ({ name: '', host: '', port: 8123, login: '', secretRef: '' });
+const sourceDraft = (source: Source): SourceDraft => ({ name: source.name, host: source.host, port: source.port, login: source.login, secretRef: '' });
+function sourceStatus(source: Source): JSX.Element { return <Badge tone={source.status === 'available' ? 'success' : source.status === 'unavailable' ? 'danger' : 'neutral'}><span className="status-badge">{source.status === 'available' ? 'Готов' : source.status === 'unavailable' ? 'Недоступен' : 'Не проверен'}</span></Badge>; }
 
 export function SourcesPage(): JSX.Element {
-  const { sources, saveSource, removeSource, checkSource } = useWorkspace();
-  const { benchmarks } = useEditor();
-  const [draft, setDraft] = useState<SourceDraft | null>(null);
-  const [previousId, setPreviousId] = useState<string | undefined>();
-  const [showValidation, setShowValidation] = useState(false);
-  const [statusFilter, setStatusFilter] = useState('all');
-  const usedBy = useMemo(() => Object.fromEntries(sources.map((source) => [source.id, benchmarks.filter((benchmark) => benchmark.connection_id === source.id).length])), [benchmarks, sources]);
-  const visibleSources = useMemo(() => statusFilter === 'all' ? sources : sources.filter((source) => source.status === statusFilter), [sources, statusFilter]);
-  const columns = useMemo<MonitoringTableColumn<DataSource>[]>(() => [
-    { key: 'id', label: 'Подключение', render: (source) => <strong className="mono">{source.id}</strong> },
-    { key: 'dbms', label: 'СУБД', render: () => <Badge tone="info">ClickHouse</Badge> },
-    { key: 'address', label: 'Адрес', render: (source) => <span className="mono">{source.host}:{source.port}</span> },
-    { key: 'login', label: 'Пользователь', render: (source) => <span className="mono">{source.login}</span> },
-    { key: 'status', label: 'Состояние', render: (source) => <>{status(source)}{source.checkedAt ? <small className="cell-note">демо-проверка {new Date(source.checkedAt).toLocaleTimeString('ru-RU')}</small> : null}</> },
-    { key: 'usage', label: 'Используется', render: (source) => `${usedBy[source.id] ?? 0} бенчмарка` },
-    { key: 'actions', label: '', className: 'monitor-actions-cell', render: (source) => <div className="table-actions"><Button variant="tertiary" onClick={() => checkSource(source.id)}>Проверить</Button><Button variant="secondary" onClick={() => open(source)}>Изменить</Button><Button variant="danger" disabled={Boolean(usedBy[source.id])} title={usedBy[source.id] ? 'Сначала измените ссылки в бенчмарках' : 'Удалить источник'} onClick={() => removeSource(source.id)}>Удалить</Button></div> },
-  ], [checkSource, removeSource, usedBy]);
-  const error = draft ? sourceError(draft, sources.filter((item) => item.id !== previousId)) : '';
-
-  const open = (source?: DataSource) => {
-    setShowValidation(false);
-    setPreviousId(source?.id);
-    setDraft(source ? { ...source, password: '' } : emptySource());
-  };
-
-  return (
-    <div className="page-stack">
-      <div className="page-heading">
-        <div><span className="eyebrow">Конфигурация среды</span><h1>Источники данных</h1><p>Подключения к ClickHouse, которые выбираются в настройках бенчмарков.</p></div>
-        <Button variant="primary" onClick={() => open()}>Добавить источник</Button>
-      </div>
-      <Alert tone="info" title="Демо-режим">Проверка соединения меняет только локальный статус интерфейса. Запрос к базе данных не выполняется.</Alert>
-      <MonitoringTable rows={visibleSources} columns={columns} rowKey={(source) => source.id} title="Подключения" description={`${sources.length} настроено · пароли не отображаются и не сохраняются в браузере`} searchPlaceholder="ID, адрес или пользователь…" searchText={(source) => `${source.id} ${source.host} ${source.port} ${source.login}`} filters={<SelectField label="Состояние" value={statusFilter} options={[{ value: 'all', label: 'Все состояния' }, { value: 'available', label: 'Доступно' }, { value: 'unavailable', label: 'Недоступно' }, { value: 'unchecked', label: 'Не проверено' }]} onChange={(event) => setStatusFilter(event.target.value)} />} filtersActive={statusFilter !== 'all'} onResetFilters={() => setStatusFilter('all')} />
-      <Modal open={Boolean(draft)} onClose={() => setDraft(null)} title={previousId ? `Подключение ${previousId}` : 'Новое подключение'} footer={<><Button variant="secondary" onClick={() => setDraft(null)}>Отмена</Button><Button variant="primary" onClick={() => { if (!draft || error) { setShowValidation(true); return; } const { password: _password, ...source } = draft; saveSource({ ...source, status: previousId ? source.status : 'unchecked' }, previousId); setDraft(null); }}>Сохранить</Button></>}>
-        {draft ? <div className="form-stack">
-          {showValidation && error ? <Alert tone="danger" title="Проверьте форму">{error}</Alert> : null}
-          <TextField label="Идентификатор" value={draft.id} onChange={(event) => setDraft({ ...draft, id: event.target.value })} placeholder="local_ch_hits" />
-          <SelectField label="СУБД" value={draft.dbms} options={[{ value: 'clickhouse', label: 'ClickHouse' }]} onChange={() => undefined} />
-          <div className="form-grid"><TextField label="Хост" value={draft.host} onChange={(event) => setDraft({ ...draft, host: event.target.value })} placeholder="clickhouse.internal" /><TextField label="Порт" type="number" value={draft.port} onChange={(event) => setDraft({ ...draft, port: Number(event.target.value) })} /></div>
-          <div className="form-grid"><TextField label="Пользователь" value={draft.login} onChange={(event) => setDraft({ ...draft, login: event.target.value })} /><TextField label="Пароль" type="password" value={draft.password} onChange={(event) => setDraft({ ...draft, password: event.target.value })} placeholder={previousId ? 'Оставьте пустым, чтобы не менять' : 'Не сохраняется в демо'} /></div>
-          <p className="field-help">В реальном продукте пароль должен передаваться серверу и храниться в Secret Manager. В демо он удаляется при закрытии формы.</p>
-        </div> : null}
-      </Modal>
+  const { sources, benchmarks, createSource, updateSource, deleteSource } = useWorkspace();
+  const [mode, setMode] = useState<'create' | 'edit' | 'delete' | null>(null); const [selected, setSelected] = useState<Source | null>(null); const [draft, setDraft] = useState<SourceDraft | null>(null); const [statusFilter, setStatusFilter] = useState('all'); const [failure, setFailure] = useState<string | null>(null); const [saving, setSaving] = useState(false);
+  const [query, setQuery] = useState('');
+  const [page, setPage] = useState(0);
+  const visible = sources.filter(source => (statusFilter === 'all' || source.status === statusFilter)
+    && `${source.name} ClickHouse ${source.host}:${source.port}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+  const pageCount = Math.max(1, Math.ceil(visible.length / 12));
+  const currentPage = Math.min(page, pageCount - 1);
+  const pageSources = visible.slice(currentPage * 12, (currentPage + 1) * 12);
+  const openCreate = () => { setFailure(null); setSelected(null); setDraft(emptySource()); setMode('create'); };
+  const openEdit = (source: Source) => { setFailure(null); setSelected(source); setDraft(sourceDraft(source)); setMode('edit'); };
+  const openDelete = (source: Source) => { setFailure(null); setSelected(source); setDraft(null); setMode('delete'); };
+  const close = () => { if (!saving) { setMode(null); setSelected(null); setDraft(null); } };
+  const save = async () => { if (!draft) return; if (!draft.name.trim() || !draft.host.trim() || !draft.login.trim() || !draft.secretRef.trim()) { setFailure('Заполните название, хост, логин и ссылку на секрет.'); return; } setSaving(true); setFailure(null); try { if (mode === 'edit' && selected) await updateSource(selected.id, draft); else await createSource(draft); setMode(null); setSelected(null); setDraft(null); } catch (error) { setFailure(error instanceof Error ? error.message : 'Не удалось сохранить источник'); } finally { setSaving(false); } };
+  const remove = async () => { if (!selected) return; setSaving(true); setFailure(null); try { await deleteSource(selected.id); setMode(null); setSelected(null); } catch (error) { setFailure(error instanceof Error ? error.message : 'Не удалось удалить источник'); } finally { setSaving(false); } };
+  const sourceUsed = selected ? benchmarks.some((benchmark) => benchmark.sourceId === selected.id) : false;
+  return <div className="page-stack product-page sources-page"><div className="page-heading"><div><h1>Источники данных</h1></div><Button variant="primary" onClick={openCreate}>＋ Создать источник</Button></div>{failure && !mode ? <Alert tone="danger" title="Ошибка">{failure}</Alert> : null}<div className="source-list-toolbar">
+      <TextField label="Поиск источников" placeholder="Название, тип или адрес…" value={query} onChange={event => { setQuery(event.target.value); setPage(0); }} />
+      <SelectField label="Статус" value={statusFilter} options={[{ value: 'all', label: 'Все состояния' }, { value: 'available', label: 'Готов' }, { value: 'unchecked', label: 'Не проверен' }, { value: 'unavailable', label: 'Недоступен' }]} onChange={event => { setStatusFilter(event.target.value); setPage(0); }} />
+      <span className="source-list-count" aria-live="polite">Найдено: {visible.length}</span>
     </div>
-  );
+    <ul className="source-list" aria-label="Источники данных">
+      {pageSources.map(source => <li key={source.id} className="source-card">
+        <div className="source-card-icon" aria-hidden="true"><MaterialIcon name="data" size={28} /></div>
+        <div className="source-card-info"><h2>{source.name}</h2><div className="source-card-meta"><span>ClickHouse</span><span aria-hidden="true">·</span><span className="mono">{source.host}:{source.port}</span></div></div>
+        <div className="source-card-actions">{sourceStatus(source)}<div className="source-card-action-buttons"><Button variant="secondary" className="source-card-action" onClick={() => openEdit(source)}><ActionIcon name="edit" />Изменить</Button><Button variant="secondary" className="source-card-action source-card-action-danger" onClick={() => openDelete(source)}><ActionIcon name="delete" />Удалить</Button></div></div>
+      </li>)}
+    </ul>
+    {!visible.length ? <div className="source-list-empty"><h2>{sources.length ? 'Источники не найдены' : 'Источников пока нет'}</h2><p>{sources.length ? 'Измените поисковый запрос или статус.' : 'Создайте подключение, чтобы выбрать таблицы для бенчмарков.'}</p>{sources.length ? <Button variant="secondary" onClick={() => { setQuery(''); setStatusFilter('all'); setPage(0); }}>Сбросить фильтры</Button> : null}</div> : null}
+    {pageCount > 1 ? <div className="source-list-pagination"><span>Страница {currentPage + 1} из {pageCount}</span><Button variant="secondary" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>Назад</Button><Button variant="secondary" disabled={currentPage === pageCount - 1} onClick={() => setPage(currentPage + 1)}>Вперёд</Button></div> : null}
+
+    <Modal open={mode !== null} onClose={close} title={mode === 'delete' ? 'Удалить источник' : mode === 'edit' ? 'Редактировать источник' : 'Создать источник'} footer={<><Button variant="secondary" disabled={saving} onClick={close}>Отмена</Button>{mode === 'delete' ? <Button variant="primary" disabled={saving || sourceUsed} onClick={() => void remove()}>{saving ? 'Удаление…' : 'Удалить'}</Button> : <Button variant="primary" disabled={saving} onClick={() => void save()}>{saving ? 'Сохранение…' : mode === 'edit' ? 'Сохранить' : 'Создать'}</Button>}</>}>{mode === 'delete' ? <div className="form-stack">{sourceUsed ? <Alert tone="warning" title="Источник используется">Сначала выберите другой источник в связанных бенчмарках.</Alert> : null}<p>Удалить источник «{selected?.name}»? Это действие нельзя отменить.</p></div> : draft ? <div className="form-stack source-modal-form">{failure ? <Alert tone="danger" title="Проверьте форму">{failure}</Alert> : null}<TextField label="Название подключения" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="Например, prod_clickhouse" /><SelectField label="Тип источника" value="clickhouse" options={[{ value: 'clickhouse', label: 'ClickHouse' }]} onChange={() => undefined} /><div className="form-grid"><TextField label="Хост" value={draft.host} onChange={(event) => setDraft({ ...draft, host: event.target.value })} placeholder="clickhouse.internal" /><TextField label="Порт" type="number" value={draft.port} onChange={(event) => setDraft({ ...draft, port: Number(event.target.value) })} /></div><TextField label="Логин" value={draft.login} onChange={(event) => setDraft({ ...draft, login: event.target.value })} placeholder="benchmark_reader" /><TextField label="Ссылка на секрет" value={draft.secretRef} onChange={(event) => setDraft({ ...draft, secretRef: event.target.value })} placeholder="secret://benchmark/source-reader" /><p className="field-help">Пароль не передаётся через браузер. Укажите ссылку на секрет, доступный Control API.</p></div> : null}</Modal></div>;
 }

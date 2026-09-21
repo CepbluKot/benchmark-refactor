@@ -8,6 +8,16 @@ Communicate with the user in Russian unless they use another language. Use Engli
 for code identifiers, protocol fields, schemas, and package names. Architecture and
 product documentation may remain in Russian.
 
+## AI execution workflow
+
+For Codex work, the root agent must read and follow
+[docs/AI_EXECUTION_WORKFLOW.md](docs/AI_EXECUTION_WORKFLOW.md). It classifies
+each request and, when useful, delegates scoped work to Luna Low or read-only
+planning to Sol Medium while Terra Medium owns implementation and verification.
+The user does not need to route models or transfer briefs between tasks. The
+architecture, security, authorization, and verification rules in this file
+remain authoritative.
+
 ## Current repository state
 
 The repository currently contains a legacy ClickHouse + Celery implementation, a
@@ -50,6 +60,35 @@ These choices are explicit product constraints for the greenfield runtime.
 - A browser UI is a possible later client, not a v1 deliverable. Its frontend stack
   is not selected. Keep the Control API usable by CLI and a future UI without adding
   frontend tooling now.
+
+### UI design system
+
+- For any explicitly requested UI design or frontend work, use the local
+  [ADQM design system](/home/oleg/Documents/Codex/2026-09-11/new-chat/work/adqm_design_system-repo/README.md)
+  as the visual and component source of truth.
+- Read its [React UI documentation](/home/oleg/Documents/Codex/2026-09-11/new-chat/work/adqm_design_system-repo/react-ui/README.md)
+  before implementation. Reuse the `@adqm/gpb-ui` components, theme tokens, fonts,
+  spacing, and interaction patterns; extend them consistently when needed instead
+  of introducing a competing UI kit or visual language.
+- Use the library's supported themes. Package styles, fonts, icons, and other
+  assets locally so the UI works without Internet access or external CDNs.
+- Adapt components to actual benchmark configuration and result contracts; the
+  design-system demo data and cluster-management screens are not product requirements.
+- Product state must come from the versioned Control API. After the initial
+  snapshot, every state transition visible in the browser is delivered through
+  the durable WebSocket event stream; REST mutation responses acknowledge a
+  command and never act as authoritative UI state. Do not add polling or SSE.
+- Do not add mocks, demo fixtures, simulated completions, synthetic candidates,
+  or fake connection/run results to product runtime, component tests, or E2E
+  checks. Integration proof uses disposable real PostgreSQL, ClickHouse, and
+  the configured orchestration path. Pure deterministic unit tests may use
+  explicit in-memory values only when they do not stand in for runtime evidence.
+- This design-system choice applies to UI work when requested; it does not add a
+  browser UI to the target v1 scope or change the Python server stack.
+- Product-facing React screens must use `@adqm/gpb-ui` controls rather than raw form
+  elements or a parallel UI kit. Before handing off UI work, run
+  `npm run check:ui-kit`, typecheck and production build. The local `/design-system`
+  catalogue is the reference for choosing a supported component.
 
 ### Closed-contour deployment
 
@@ -517,6 +556,69 @@ At handoff report:
 - checks not run and why;
 - migrations/deployment impact;
 - remaining risks or explicit follow-up.
+
+## General development practices
+
+These practices are adapted from the Proactive Monitoring workspace's development
+rules. This repository's architecture, runtime contracts, resource limits, and
+explicit authorization rules remain authoritative.
+
+### Source ownership and artifacts
+
+- Read the nearest component instructions and derive commands from that component;
+  do not assume another repository's build or test commands apply here.
+- Fix the authoritative source and regenerate derived bundles, schemas, snapshots,
+  or exports. Do not hand-edit generated output unless the task targets that export.
+- Keep durable deliverables, manifests, and checksums in this repository. Temporary
+  processing directories must not become the only copy of a deliverable. Preserve
+  source provenance and report any intentionally external artifact location.
+- Before declaring a file or component missing, inspect its actual filesystem path,
+  including ignored and untracked files; Git visibility alone is not evidence of
+  absence. Do not reconstruct source from an archive or image without verification.
+
+### Regression and contract verification
+
+- For a reproducible behavioral bug, establish a focused failing test before
+  accepting the fix and retain it as a regression test. If the component cannot
+  reproduce it locally, report the missing coverage explicitly.
+- Make the smallest coherent change at the owning layer. For changes consumed by
+  multiple components, verify producers and consumers and regenerate affected
+  contract artifacts.
+- For material reliability, security, state-machine, SQL, scale, or cross-component
+  changes, use read-only subagents for boundary/test analysis and final diff review.
+  Keep parallel work read-heavy; never assign overlapping edits concurrently.
+- Tests, typechecks, artifact checks, and runtime evidence take precedence over LLM
+  review. Review cannot waive a failed check. Preserve reusable failure cases in
+  sanitized regression fixtures without copying production secrets or payloads.
+- For authorized deployment changes, verify health and at least one real semantic
+  path. A running container or HTTP success alone does not prove correct behavior.
+  Use a verified deployment definition; do not invent one from container inspection.
+- Hooks and automated review provide guardrails, not proof that tests ran or
+  authorization for deployment, commits, destructive actions, or external writes.
+
+### Reliability and diagnostics
+
+- Preserve stable correlation identities across service and task boundaries. After
+  an ambiguous timeout or broken response to a side-effecting request, reconcile the
+  existing operation before retrying; use the contract's idempotency mechanism.
+- Validate semantic outcomes separately from transport success. Stale observations
+  must not regress terminal state or overwrite newer authoritative state.
+- Recovery must be bounded and follow persisted execution intent and the owning
+  state-machine contract. Missing intent is not permission to execute old work.
+  For recovery changes, compare state before and after startup, including dormant
+  and terminal work, and verify that only eligible operations resume.
+- Emit bounded structured application logs with timestamps, severity, component,
+  event, and available correlation IDs. Record durations, classified failures, and
+  actual accepted state transitions at I/O boundaries; respect the prohibition on
+  I/O and ambient clocks inside deterministic durable orchestration tasks.
+- Make background failures and reconciliation outcomes diagnosable. Redact secrets
+  recursively, including exception text and stack traces; prefer safe counts and
+  fingerprints to full payloads, SQL, or native documents. Test changed error paths
+  for correlation and redaction as well as behavior.
+- Keep visualization sampling separate from experiment inputs and raw evidence.
+  Bound frontend processing and display volume; avoid unbounded recursion or
+  spreading large arrays into function arguments. Define stable pagination semantics
+  rather than inferring totals from the currently loaded page.
 
 ## Testing and quality gates
 
