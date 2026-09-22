@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Button } from '@adqm/gpb-ui';
 import { WorkspaceIcon } from './WorkspaceIcon';
 import { MaterialIcon } from './MaterialIcon';
+import { useI18n } from '../i18n';
 
 export function WorkspaceMenu({ workspaces, activeId, onSelect, onCreate }: {
   workspaces: { id: string; name: string; icon: string }[];
@@ -9,6 +10,7 @@ export function WorkspaceMenu({ workspaces, activeId, onSelect, onCreate }: {
   onSelect(id: string): void;
   onCreate(): void;
 }): JSX.Element {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -39,12 +41,12 @@ export function WorkspaceMenu({ workspaces, activeId, onSelect, onCreate }: {
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setOpen(true); }
     }}>
       <span className="workspace-menu-icon" aria-hidden="true"><WorkspaceIcon icon={workspaces.find((item) => item.id === activeId)?.icon} /></span>
-      <span className="workspace-menu-copy"><small>Текущее пространство</small><strong>{workspaces.find(item => item.id === activeId)?.name ?? 'Выберите пространство'}</strong></span>
+      <span className="workspace-menu-copy"><small>{t('Текущее пространство', 'Current workspace')}</small><strong>{workspaces.find(item => item.id === activeId)?.name ?? t('Выберите пространство', 'Select workspace')}</strong></span>
       <MaterialIcon name="chevron_down" />
     </Button>
-    {open && <div id="workspace-options" role="menu" aria-label="Пространства" className="workspace-menu-options">
+    {open && <div id="workspace-options" role="menu" aria-label={t('Пространства', 'Workspaces')} className="workspace-menu-options">
       <div className="workspace-menu-list">{workspaces.map(item => <Button key={item.id} variant="tertiary" role="menuitemradio" aria-checked={item.id === activeId} className="workspace-menu-option" onClick={() => { onSelect(item.id); close(); }}><span className="workspace-menu-option-label"><span aria-hidden="true"><WorkspaceIcon icon={item.icon} /></span>{item.name}</span>{item.id === activeId ? <MaterialIcon name="check" /> : null}</Button>)}</div>
-      <Button variant="tertiary" role="menuitem" className="workspace-menu-create" onClick={() => { close(); onCreate(); }}>Создать пространство</Button>
+      <Button variant="tertiary" role="menuitem" className="workspace-menu-create" onClick={() => { close(); onCreate(); }}>{t('Создать пространство', 'Create workspace')}</Button>
     </div>}
   </div>;
 }

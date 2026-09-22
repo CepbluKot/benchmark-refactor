@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { Button, DataTable } from '@adqm/gpb-ui';
+import { useI18n } from '../i18n';
 
 export interface MonitoringTableColumn<Row> {
   key: string;
@@ -43,6 +44,7 @@ export function MonitoringTable<Row>({
   filtersActive = false,
   onResetFilters,
 }: MonitoringTableProps<Row>): JSX.Element {
+  const { t } = useI18n();
   return (
     <div className="monitor-table-block">
       <section className="monitor-table-shell">
@@ -54,10 +56,10 @@ export function MonitoringTable<Row>({
           columns={columns.map(({ key, label, render }) => ({ key, label, render }))}
           rowKey={rowKey}
           searchText={searchText}
-          label={`Поиск в таблице «${title}»`}
+          label={t(`Поиск в таблице «${title}»`, `Search table “${title}”`)}
           pageSize={pageSize}
           searchPlaceholder={searchPlaceholder}
-          filters={filters ? <div className={`monitor-filter-set${filtersActive ? ' is-active' : ''}`}>{filters}{filtersActive ? <Button variant="tertiary" onClick={onResetFilters}>Сбросить</Button> : null}</div> : undefined}
+          filters={filters ? <div className={`monitor-filter-set${filtersActive ? ' is-active' : ''}`}>{filters}{filtersActive ? <Button variant="tertiary" onClick={onResetFilters}>{t('Сбросить', 'Reset')}</Button> : null}</div> : undefined}
         />
       </section>
     </div>

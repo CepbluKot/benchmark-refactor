@@ -6,7 +6,7 @@ import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 from uuid import uuid4
 
 import psycopg
@@ -82,10 +82,140 @@ class StrategyTemplateConfig(ApiModel):
         return self
 
 
+class StrategyAlternativeRule(ApiModel):
+    by_type: str = Field(min_length=1, max_length=512)
+    by_name: str | None = Field(default=None, max_length=512)
+    alternatives: list[str] = Field(min_length=1, max_length=50)
+
+    @field_validator('by_type', 'by_name', mode='before')
+    @classmethod
+    def non_blank_optional(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        result = value.strip()
+        if not result:
+            raise ValueError('Value must not be blank')
+        return result
+
+    @field_validator('alternatives')
+    @classmethod
+    def valid_alternatives(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value for value in normalized) or len(set(normalized)) != len(normalized):
+            raise ValueError('Alternatives must be nonblank and unique')
+        return normalized
+
+
+class StrategyIndexAlternative(ApiModel):
+    type: str = Field(min_length=1, max_length=2048)
+    granularity: int = Field(gt=0)
+
+    @field_validator('type')
+    @classmethod
+    def valid_type(cls, value: str) -> str:
+        result = value.strip()
+        if not result:
+            raise ValueError('Index type must not be blank')
+        return result
+
+
+class StrategyIndexRule(ApiModel):
+    by_type: str = Field(min_length=1, max_length=512)
+    by_name: str | None = Field(default=None, max_length=512)
+    indexes: list[StrategyIndexAlternative] = Field(min_length=1, max_length=50)
+
+    @field_validator('by_type', 'by_name', mode='before')
+    @classmethod
+    def non_blank_optional(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        result = value.strip()
+        if not result:
+            raise ValueError('Value must not be blank')
+        return result
+
+
+class StrategyOrderBy(ApiModel):
+    first_column: str | None = Field(default=None, max_length=2048)
+    candidates: list[str] = Field(default_factory=list, max_length=50)
+
+    @field_validator('first_column', mode='before')
+    @classmethod
+    def first_column_not_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        result = value.strip()
+        if not result:
+            raise ValueError('First column must not be blank')
+        return result
+
+    @field_validator('candidates')
+    @classmethod
+    def valid_candidates(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value for value in normalized) or len(set(normalized)) != len(normalized):
+            raise ValueError('ORDER BY candidates must be nonblank and unique')
+        return normalized
+
+
+class StrategyColumnOrder(ApiModel):
+    column: str = Field(min_length=1, max_length=512)
+    position: int = Field(gt=0)
+
+
+class StrategySearchSpace(ApiModel):
+    column_types: list[StrategyAlternativeRule] = Field(default_factory=list, max_length=50)
+    codecs: list[StrategyAlternativeRule] = Field(default_factory=list, max_length=50)
+    skip_indexes: list[StrategyIndexRule] = Field(default_factory=list, max_length=50)
+    order_by: StrategyOrderBy = Field(default_factory=StrategyOrderBy)
+    column_order: list[StrategyColumnOrder] = Field(default_factory=list, max_length=200)
+    table_index_granularity_values: list[int] = Field(default_factory=list, max_length=50)
+
+    @model_validator(mode='after')
+    def valid_search_space(self) -> 'StrategySearchSpace':
+        if self.table_index_granularity_values and (any(value <= 0 for value in self.table_index_granularity_values) or len(set(self.table_index_granularity_values)) != len(self.table_index_granularity_values)):
+            raise ValueError('Table granularities must be positive and unique')
+        columns = [item.column.strip() for item in self.column_order]
+        positions = [item.position for item in self.column_order]
+        if any(not item for item in columns) or len(set(columns)) != len(columns) or len(set(positions)) != len(positions):
+            raise ValueError('Column iteration names and positions must be unique')
+        if not any((self.column_types, self.codecs, self.skip_indexes, self.order_by.candidates, self.column_order, self.table_index_granularity_values)):
+            raise ValueError('At least one search dimension is required')
+        return self
+
+
+class StrategyScoringV2(ApiModel):
+    preset: Literal['balanced', 'faster_reads', 'faster_inserts', 'better_compression', 'read_only', 'insert_only', 'storage_only', 'p95_select', 'custom']
+    formula: str = Field(min_length=1, max_length=4096)
+    direction: Literal['maximize', 'minimize']
+    max_storage_growth_percent: float | None = Field(default=None, allow_inf_nan=False)
+    max_insert_slowdown_percent: float | None = Field(default=None, allow_inf_nan=False)
+    min_select_improvement_percent: float | None = Field(default=None, allow_inf_nan=False)
+
+    @field_validator('formula')
+    @classmethod
+    def formula_not_blank(cls, value: str) -> str:
+        result = value.strip()
+        if not result:
+            raise ValueError('Formula must not be blank')
+        return result
+
+
+class StrategyTemplateConfigV2(ApiModel):
+    schema_version: Literal[2]
+    procedure: Literal['combined', 'sequential', 'phased']
+    search_space: StrategySearchSpace
+    budget: StrategyBudget
+    scoring: StrategyScoringV2
+
+
+StrategyConfig: TypeAlias = StrategyTemplateConfig | StrategyTemplateConfigV2
+
+
 class StrategyCreate(ApiModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default='', max_length=500)
-    config: StrategyTemplateConfig
+    config: StrategyConfig
 
     @field_validator('name')
     @classmethod
@@ -103,6 +233,26 @@ def derive_phases(method: StrategyMethod) -> list[str]:
         'sequential_topn_strategy': ['types', 'codecs', 'top_n', 'indexes'],
         'sequential_phased_topn_strategy': ['order_by', 'types', 'codecs', 'index_granularity', 'indexes', 'final_validation'],
     }[method]
+
+
+def strategy_projection(config: StrategyConfig) -> tuple[StrategyMethod, list[str]]:
+    if config.schema_version == 1:
+        return config.method, derive_phases(config.method)
+    method: StrategyMethod = {'combined': 'combined_strategy', 'sequential': 'sequential_topn_strategy', 'phased': 'sequential_phased_topn_strategy'}[config.procedure]
+    space = config.search_space
+    phases = [
+        *(['order_by'] if space.order_by.candidates else []),
+        *(['types'] if space.column_types else []),
+        *(['codecs'] if space.codecs else []),
+        *(['column_order'] if space.column_order else []),
+        *(['index_granularity'] if space.table_index_granularity_values else []),
+        *(['indexes'] if space.skip_indexes else []),
+    ]
+    if config.procedure == 'sequential':
+        phases.append('top_n')
+    if config.procedure == 'phased':
+        phases.append('final_validation')
+    return method, phases
 
 
 class BenchmarkCreate(ApiModel):
@@ -133,6 +283,91 @@ class SourceUpdate(SourceCreate):
 class RunCreate(ApiModel):
     benchmark_id: str = Field(min_length=1, max_length=160)
     idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+OptionKind = Literal['source_type', 'column_type', 'codec_alternative', 'skip_index', 'table_granularity']
+
+
+class StrategyOptionsMatcher(ApiModel):
+    by_type: str = Field(min_length=1, max_length=512)
+
+    @field_validator('by_type')
+    @classmethod
+    def matcher_not_blank(cls, value: str) -> str:
+        result = value.strip()
+        if not result:
+            raise ValueError('Source type must not be blank')
+        return result
+
+
+class StrategyOptionsRequest(ApiModel):
+    schema_version: Literal[1]
+    kind: OptionKind
+    locale: Literal['ru', 'en'] = 'ru'
+    query: str = Field(default='', max_length=128)
+    matcher: StrategyOptionsMatcher | None = None
+    selected: list[str] = Field(default_factory=list, max_length=50)
+    limit: int = Field(default=20, ge=1, le=50)
+
+    @field_validator('selected')
+    @classmethod
+    def selected_values_bounded(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value or len(value) > 2048 for value in normalized) or len(set(normalized)) != len(normalized):
+            raise ValueError('Selected alternatives must be unique nonblank expressions')
+        return normalized
+
+
+STRATEGY_OPTIONS_CATALOGUE_REVISION = 'strategy-options-v1-local'
+STRATEGY_OPTIONS: dict[str, list[dict[str, Any]]] = {
+    'source_type': [
+        {'id': 'type.string', 'canonical_value': 'String', 'label': {'ru': 'String', 'en': 'String'}, 'description': {'ru': 'Строковые значения.', 'en': 'String values.'}},
+        {'id': 'type.integer', 'canonical_value': 'Int64', 'label': {'ru': 'Int64', 'en': 'Int64'}, 'description': {'ru': 'Целочисленные значения.', 'en': 'Integer values.'}},
+        {'id': 'type.float', 'canonical_value': 'Float64', 'label': {'ru': 'Float64', 'en': 'Float64'}, 'description': {'ru': 'Числа с плавающей точкой.', 'en': 'Floating-point values.'}},
+    ],
+    'column_type': [
+        {'id': 'type.low-cardinality-string', 'canonical_value': 'LowCardinality(String)', 'label': {'ru': 'LowCardinality(String)', 'en': 'LowCardinality(String)'}, 'description': {'ru': 'Словарное представление строк.', 'en': 'Dictionary-encoded strings.'}, 'requires_parameters': False},
+        {'id': 'type.fixed-string', 'canonical_value': 'FixedString(16)', 'label': {'ru': 'FixedString', 'en': 'FixedString'}, 'description': {'ru': 'Строка фиксированной длины.', 'en': 'Fixed-length string.'}, 'requires_parameters': True, 'parameter_schema': {'name': 'length', 'kind': 'integer', 'minimum': 1, 'maximum': 65535, 'default': 16}},
+    ],
+    'codec_alternative': [
+        {'id': 'codec.zstd-1', 'canonical_value': 'ZSTD(1)', 'label': {'ru': 'ZSTD · уровень 1', 'en': 'ZSTD · level 1'}, 'description': {'ru': 'Сжатие с уровнем 1.', 'en': 'Compression at level 1.'}},
+        {'id': 'codec.zstd-3', 'canonical_value': 'ZSTD(3)', 'label': {'ru': 'ZSTD · уровень 3', 'en': 'ZSTD · level 3'}, 'description': {'ru': 'Сжатие с уровнем 3.', 'en': 'Compression at level 3.'}},
+        {'id': 'codec.delta-zstd-3', 'canonical_value': 'Delta, ZSTD(3)', 'label': {'ru': 'Delta → ZSTD(3)', 'en': 'Delta → ZSTD(3)'}, 'description': {'ru': 'Цепочка Delta и ZSTD.', 'en': 'Delta followed by ZSTD.'}},
+    ],
+    'skip_index': [
+        {'id': 'index.bloom', 'canonical_value': 'bloom_filter(0.01)', 'label': {'ru': 'Bloom filter', 'en': 'Bloom filter'}, 'description': {'ru': 'Вероятностный индекс для строковых значений.', 'en': 'Probabilistic index for string values.'}, 'default_granularity': 4},
+        {'id': 'index.minmax', 'canonical_value': 'minmax', 'label': {'ru': 'MinMax', 'en': 'MinMax'}, 'description': {'ru': 'Индекс диапазона значений.', 'en': 'Value-range index.'}, 'default_granularity': 4},
+    ],
+    'table_granularity': [
+        {'id': 'granularity.8192', 'canonical_value': '8192', 'label': {'ru': '8192 строк', 'en': '8192 rows'}, 'description': {'ru': 'Стандартный размер гранулы.', 'en': 'Standard granule size.'}, 'integer_value': 8192},
+        {'id': 'granularity.16384', 'canonical_value': '16384', 'label': {'ru': '16384 строк', 'en': '16384 rows'}, 'description': {'ru': 'Увеличенный размер гранулы.', 'en': 'Larger granule size.'}, 'integer_value': 16384},
+    ],
+}
+
+
+def suggest_strategy_options(request: StrategyOptionsRequest) -> dict[str, Any]:
+    selected = set(request.selected)
+    query = request.query.strip().lower()
+    items: list[dict[str, Any]] = []
+    for option in STRATEGY_OPTIONS[request.kind]:
+        canonical = option['canonical_value']
+        searchable = ' '.join((canonical, option['label'][request.locale], option['description'][request.locale])).lower()
+        if canonical in selected or (query and query not in searchable):
+            continue
+        item = {
+            'id': option['id'],
+            'kind': request.kind,
+            'canonical_value': canonical,
+            'label': option['label'][request.locale],
+            'description': option['description'][request.locale],
+            'applicability': 'conditional' if request.matcher is None else 'supported',
+            'reason_code': 'SOURCE_CAPABILITIES_UNVERIFIED' if request.matcher is None else 'GENERIC_CATALOGUE_COMPATIBILITY',
+        }
+        for key in ('requires_parameters', 'parameter_schema', 'default_granularity', 'integer_value'):
+            if key in option:
+                item[key] = option[key]
+        items.append(item)
+    return {'schema_version': 1, 'catalogue_revision': STRATEGY_OPTIONS_CATALOGUE_REVISION, 'items': items[:request.limit], 'next_cursor': None}
 
 
 class EventBus:
@@ -264,6 +499,10 @@ def create_app() -> FastAPI:
     @app.get('/api/v1/bootstrap')
     def get_bootstrap() -> dict[str, Any]: return bootstrap()
 
+    @app.post('/api/v1/strategy-options/suggest')
+    def strategy_options(payload: StrategyOptionsRequest) -> dict[str, Any]:
+        return suggest_strategy_options(payload)
+
     @app.post('/api/v1/workspaces', status_code=202)
     async def create_workspace(payload: WorkspaceCreate) -> dict[str, Any]:
         workspace_id = f'workspace-{uuid4()}'
@@ -319,11 +558,11 @@ def create_app() -> FastAPI:
     async def create_strategy(payload: StrategyCreate) -> dict[str, Any]:
         strategy_id = f'strategy-{uuid4()}'
         command_id = str(uuid4())
-        phases = derive_phases(payload.config.method)
+        strategy, phases = strategy_projection(payload.config)
         config = payload.config.model_dump(exclude_none=True)
         with connect() as conn:
-            conn.execute('INSERT INTO strategies (id,name,strategy,phases,description,config,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)', (strategy_id, payload.name.strip(), payload.config.method, json.dumps(phases), payload.description.strip(), json.dumps(config), now()))
-            event = record_event(conn, 'strategy', strategy_id, 'strategy.created', {'id': strategy_id, 'name': payload.name.strip(), 'description': payload.description.strip(), 'strategy': payload.config.method, 'phases': phases, 'config': config}, command_id)
+            conn.execute('INSERT INTO strategies (id,name,strategy,phases,description,config,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)', (strategy_id, payload.name.strip(), strategy, json.dumps(phases), payload.description.strip(), json.dumps(config), now()))
+            event = record_event(conn, 'strategy', strategy_id, 'strategy.created', {'id': strategy_id, 'name': payload.name.strip(), 'description': payload.description.strip(), 'strategy': strategy, 'phases': phases, 'config': config}, command_id)
             conn.commit()
         await bus.publish(event)
         return {'command_id': command_id, 'aggregate_id': strategy_id, 'accepted_event_id': event['event_id']}
@@ -333,13 +572,13 @@ def create_app() -> FastAPI:
         if not payload.name.strip():
             raise HTTPException(422, 'Strategy name is required')
         command_id = str(uuid4())
-        phases = derive_phases(payload.config.method)
+        strategy, phases = strategy_projection(payload.config)
         config = payload.config.model_dump(exclude_none=True)
         with connect() as conn:
-            result = conn.execute('UPDATE strategies SET name=%s,description=%s,strategy=%s,phases=%s,config=%s WHERE id=%s RETURNING id', (payload.name.strip(), payload.description.strip(), payload.config.method, json.dumps(phases), json.dumps(config), strategy_id))
+            result = conn.execute('UPDATE strategies SET name=%s,description=%s,strategy=%s,phases=%s,config=%s WHERE id=%s RETURNING id', (payload.name.strip(), payload.description.strip(), strategy, json.dumps(phases), json.dumps(config), strategy_id))
             if not result.fetchone():
                 raise HTTPException(404, 'Strategy not found')
-            event = record_event(conn, 'strategy', strategy_id, 'strategy.updated', {'id': strategy_id, 'name': payload.name.strip(), 'description': payload.description.strip(), 'strategy': payload.config.method, 'phases': phases, 'config': config}, command_id)
+            event = record_event(conn, 'strategy', strategy_id, 'strategy.updated', {'id': strategy_id, 'name': payload.name.strip(), 'description': payload.description.strip(), 'strategy': strategy, 'phases': phases, 'config': config}, command_id)
             conn.commit()
         await bus.publish(event)
         return {'command_id': command_id, 'aggregate_id': strategy_id, 'accepted_event_id': event['event_id']}

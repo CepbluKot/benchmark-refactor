@@ -94,6 +94,12 @@ These choices are explicit product constraints for the greenfield runtime.
 
 - Production runs in a private network with no Internet access and only internal
   infrastructure connectivity.
+- Every locally built, loaded, exported, or deployed OCI/Docker image must use the
+  literal tag `:local`. This applies to Dockerfiles, Compose `image:` values, build
+  commands, deployment commands, archives, and handoff instructions. Do not use
+  `:latest`, commit-derived tags, timestamps, or ad hoc feature tags for local
+  images. Production release identity remains the pinned immutable digest; `:local`
+  is the only permitted mutable tag for local workflows.
 - Hatchet, PostgreSQL, and S3-compatible object storage are self-hosted inside that
   contour. Do not depend on Hatchet Cloud, public object storage, or a SaaS control
   plane.

@@ -41,20 +41,17 @@ export const FORMULA_FUNCTIONS = ['safe_div', 'at', 'pct', 'coalesce', 'clamp', 
 
 const defaultDimensions = (): SearchDimensions => ({
   ...emptyDimensions(),
-  column_types: [{ by_type: 'String', alternatives: ['LowCardinality(String)'] }],
-  codecs: [{ by_type: 'String', alternatives: ['ZSTD(1)', 'ZSTD(3)'] }],
-  skip_indexes: [{ by_type: 'String', indexes: [{ type: 'bloom_filter(0.01)', granularity: 4 }] }],
-  table_index_granularity_values: [8192],
 });
 
 export function createDefaultStrategyDraft(): StrategyDraft { const preset = SCORING_PRESETS.balanced; return { name: '', description: '', procedure: 'phased', dimensions: defaultDimensions(), budget: { rowsPerInsert: 100000, insertRepetitions: 3, maxCandidates: 100, topN: 10, advanced: false }, scoring: { preset: 'balanced', formula: preset.formula, direction: preset.direction } }; }
 const positive = (value: number | undefined): boolean => value !== undefined && Number.isInteger(value) && value > 0;
 const finiteOptional = (value: number | undefined): boolean => value === undefined || Number.isFinite(value);
-export function validateStrategyStep(draft: StrategyDraft, step: number): Record<string, string> {
+export interface StrategyValidationMessages { name: string; positive: string; formula: string; finite: string }
+export function validateStrategyStep(draft: StrategyDraft, step: number, messages: StrategyValidationMessages = { name: 'Укажите название стратегии.', positive: 'Введите целое число больше нуля.', formula: 'Введите формулу оценки.', finite: 'Введите конечное число.' }): Record<string, string> {
   const errors: Record<string, string> = {};
-  if (step === 0 && !draft.name.trim()) errors.name = 'Укажите название стратегии.';
-  if (step === 2) for (const [key, value] of Object.entries({ rowsPerInsert: draft.budget.rowsPerInsert, insertRepetitions: draft.budget.insertRepetitions, maxCandidates: draft.budget.maxCandidates, topN: draft.budget.topN })) if (!positive(value)) errors[key] = 'Введите целое число больше нуля.';
-  if (step === 3) { if (!draft.scoring.formula.trim()) errors.formula = 'Введите формулу оценки.'; if (!finiteOptional(draft.scoring.maxStorageGrowthPercent)) errors.maxStorageGrowthPercent = 'Введите конечное число.'; if (!finiteOptional(draft.scoring.maxInsertSlowdownPercent)) errors.maxInsertSlowdownPercent = 'Введите конечное число.'; if (!finiteOptional(draft.scoring.minSelectImprovementPercent)) errors.minSelectImprovementPercent = 'Введите конечное число.'; }
+  if (step === 0 && !draft.name.trim()) errors.name = messages.name;
+  if (step === 2) for (const [key, value] of Object.entries({ rowsPerInsert: draft.budget.rowsPerInsert, insertRepetitions: draft.budget.insertRepetitions, maxCandidates: draft.budget.maxCandidates, topN: draft.budget.topN })) if (!positive(value)) errors[key] = messages.positive;
+  if (step === 3) { if (!draft.scoring.formula.trim()) errors.formula = messages.formula; if (!finiteOptional(draft.scoring.maxStorageGrowthPercent)) errors.maxStorageGrowthPercent = messages.finite; if (!finiteOptional(draft.scoring.maxInsertSlowdownPercent)) errors.maxInsertSlowdownPercent = messages.finite; if (!finiteOptional(draft.scoring.minSelectImprovementPercent)) errors.minSelectImprovementPercent = messages.finite; }
   return errors;
 }
 export function pruneStrategyDraft(draft: StrategyDraft): { name: string; description: string; config: StrategyTemplateV2 } {
