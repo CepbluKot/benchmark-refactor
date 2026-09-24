@@ -179,8 +179,6 @@ class StrategySearchSpace(ApiModel):
         positions = [item.position for item in self.column_order]
         if any(not item for item in columns) or len(set(columns)) != len(columns) or len(set(positions)) != len(positions):
             raise ValueError('Column iteration names and positions must be unique')
-        if not any((self.column_types, self.codecs, self.skip_indexes, self.order_by.candidates, self.column_order, self.table_index_granularity_values)):
-            raise ValueError('At least one search dimension is required')
         return self
 
 
@@ -248,9 +246,9 @@ def strategy_projection(config: StrategyConfig) -> tuple[StrategyMethod, list[st
         *(['index_granularity'] if space.table_index_granularity_values else []),
         *(['indexes'] if space.skip_indexes else []),
     ]
-    if config.procedure == 'sequential':
+    if phases and config.procedure == 'sequential':
         phases.append('top_n')
-    if config.procedure == 'phased':
+    if phases and config.procedure == 'phased':
         phases.append('final_validation')
     return method, phases
 
@@ -493,7 +491,7 @@ def create_app() -> FastAPI:
     @app.get('/health/ready', status_code=204)
     def ready() -> Response:
         with connect() as conn, conn.cursor() as cur: cur.execute('SELECT 1')
-        clickhouse_query('SELECT 1')
+        clickhouse_query('SELECT 1', sandbox=True)
         return Response(status_code=204)
 
     @app.get('/api/v1/bootstrap')

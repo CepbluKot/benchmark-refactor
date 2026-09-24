@@ -28,7 +28,7 @@ config = {
     'budget': {'rows_per_insert': 100000, 'insert_repetitions': 3, 'max_candidates': 100, 'top_n': 10},
     'scoring': {'preset': 'balanced', 'formula': 'read_gain', 'direction': 'maximize'},
 }
-created = None
+created_ids: list[str] = []
 try:
     suggestions = request('/api/v1/strategy-options/suggest', {
         'schema_version': 1,
@@ -44,6 +44,7 @@ try:
     assert any(item['canonical_value'] == 'ZSTD(3)' for item in suggestions['items'])
     body = {'name': f'V2 strategy {uuid4()}', 'description': 'v2 API check', 'config': config}
     created = request('/api/v1/strategies', body, 'POST')['aggregate_id']
+    created_ids.append(created)
     persisted = next(item for item in request('/api/v1/bootstrap')['strategies'] if item['id'] == created)
     assert persisted['config'] == config
     assert persisted['phases'] == ['types', 'codecs', 'index_granularity', 'final_validation']
@@ -52,7 +53,32 @@ try:
         raise AssertionError('Invalid v2 strategy was accepted')
     except urllib.error.HTTPError as error:
         assert error.code == 422
+    empty_config = {
+        **config,
+        'procedure': 'combined',
+        'search_space': {
+            'column_types': [],
+            'codecs': [],
+            'skip_indexes': [],
+            'order_by': {'candidates': []},
+            'column_order': [],
+            'table_index_granularity_values': [],
+        },
+    }
+    empty_body = {
+        'name': f'Empty v2 strategy {uuid4()}',
+        'description': 'empty search-space API check',
+        'config': empty_config,
+    }
+    empty_id = request('/api/v1/strategies', empty_body, 'POST')['aggregate_id']
+    created_ids.append(empty_id)
+    empty_persisted = next(
+        item for item in request('/api/v1/bootstrap')['strategies']
+        if item['id'] == empty_id
+    )
+    assert empty_persisted['config'] == empty_config
+    assert empty_persisted['phases'] == []
     print('V2 strategy persistence and options contract passed')
 finally:
-    if created:
-        request('/api/v1/strategies/' + created, {}, 'DELETE')
+    for strategy_id in created_ids:
+        request('/api/v1/strategies/' + strategy_id, {}, 'DELETE')

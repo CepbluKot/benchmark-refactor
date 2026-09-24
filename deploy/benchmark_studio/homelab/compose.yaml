@@ -1,0 +1,140 @@
+name: benchmark-studio-preview
+services:
+  postgres:
+    image: benchmark-studio-postgres:local
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: benchmark
+      POSTGRES_PASSWORD: ${CONTROL_DB_PASSWORD:?generated on the host at first deployment}
+      POSTGRES_DB: benchmark_control
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U benchmark -d benchmark_control"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    cpus: 0.50
+    mem_limit: 512m
+    pids_limit: 128
+    security_opt: [no-new-privileges:true]
+    networks: [preview]
+
+  clickhouse:
+    image: benchmark-studio-clickhouse:local
+    pull_policy: never
+    restart: unless-stopped
+    volumes:
+      - ./clickhouse-init:/docker-entrypoint-initdb.d:ro
+      - ./clickhouse-config/benchmark-preview-limits.xml:/etc/clickhouse-server/config.d/benchmark-preview-limits.xml:ro
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping | grep -q Ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    cpus: 0.75
+    mem_limit: 1024m
+    pids_limit: 256
+    security_opt: [no-new-privileges:true]
+    networks: [preview]
+
+  control-api:
+    image: benchmark-studio-control:local
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      CONTROL_DATABASE_URL: postgresql://benchmark:${CONTROL_DB_PASSWORD:?generated on the host at first deployment}@postgres:5432/benchmark_control
+      CLICKHOUSE_SOURCE_HOST: benchmark-source-not-configured.invalid
+      CLICKHOUSE_SOURCE_PORT: 8123
+      CLICKHOUSE_SOURCE_USER: disabled
+      CLICKHOUSE_SANDBOX_HOST: clickhouse
+      CLICKHOUSE_SANDBOX_PORT: 8123
+      CLICKHOUSE_SANDBOX_USER: benchmark_writer
+      CLICKHOUSE_SANDBOX_PASSWORD: ""
+      CORS_ALLOWED_ORIGINS: https://benchmark.lan.awesomeio.ru
+    depends_on:
+      postgres: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    cpus: 0.50
+    mem_limit: 384m
+    pids_limit: 128
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    networks: [preview]
+
+  gateway:
+    image: benchmark-studio-gateway:local
+    pull_policy: never
+    restart: unless-stopped
+    depends_on:
+      control-api: {condition: service_healthy}
+    ports:
+      - "192.168.20.68:18900:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 64
+    read_only: true
+    tmpfs: [/var/cache/nginx, /var/run, /tmp]
+    security_opt: [no-new-privileges:true]
+    networks:
+      preview: {}
+      edge:
+        ipv4_address: 172.29.87.2
+
+  ui:
+    image: benchmark-studio-ui:local
+    pull_policy: never
+    restart: unless-stopped
+    ports:
+      - "192.168.20.68:18901:8080"
+    volumes:
+      - ./runtime-config.js:/usr/share/nginx/html/runtime-config.js:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 64
+    read_only: true
+    tmpfs: [/var/cache/nginx, /var/run, /tmp]
+    security_opt: [no-new-privileges:true]
+    networks:
+      edge:
+        ipv4_address: 172.29.87.3
+
+networks:
+  preview:
+    name: benchmark-studio-preview
+    internal: true
+  edge:
+    name: benchmark-studio-preview-edge
+    driver: bridge
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.name: br-bench-prev
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+    ipam:
+      config:
+        - subnet: 172.29.87.0/29
+          gateway: 172.29.87.1
+
+volumes:
+  postgres-data:
+    name: benchmark-studio-preview-postgres-data
+  clickhouse-data:
+    name: benchmark-studio-preview-clickhouse-data

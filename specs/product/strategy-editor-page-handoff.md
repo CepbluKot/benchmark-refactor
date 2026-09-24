@@ -397,42 +397,12 @@ as an accidental consequence of relabeling this existing search control.
 
 ## 11. Step 3 — Бюджет поиска
 
-Heading: `Бюджет поиска`.
-Helper: `Ограничьте объём измерений и число проверяемых вариантов.`
-
-Two-column field grid on desktop, one column on mobile:
-
-| Field | Meaning/unit | Validation |
-| --- | --- | --- |
-| Строк для одного измерения INSERT | rows copied per measurement | positive integer |
-| Повторов измерения INSERT | number of repetitions | positive integer |
-| Максимум кандидатов | candidate count | positive integer |
-| Победителей Top-N | retained candidates | positive integer, applicable procedures only |
-
-Under row-limit fields:
-`По умолчанию базовый вариант и кандидаты используют одинаковое число строк.`
-
-Below the grid, ADQM Switch `Расширенные настройки`. Revealing it preserves
-already entered values; hiding it must have explicit serialization semantics.
-Current contract omits advanced values when disabled. Preserve this behavior or
-document and test an approved change; do not silently send hidden stale values.
-
-Advanced fields, with units in labels/hints:
-
-- `Строк базового варианта` — rows.
-- `Строк варианта-кандидата` — rows.
-- `Кандидатов на этап` — candidates; only for applicable procedures.
-- `Победителей на родительский вариант` — candidates; only when applicable.
-- `Вариантов финальной проверки` — candidates; phased only.
-- `Альтернатив индекса в финальной проверке` — positive count; phased with indexes.
-
-For the last field, permanent helper:
-`1 — только лучшее сочетание. Большее число проверяет следующие варианты по одной колонке, без полного перебора сочетаний.`
-
-Procedure-dependent fields must be defined consistently in UI, validator, and
-serializer. Search dimensions do not disappear when a budget field is inapplicable.
-Determine authoritative runtime applicability from the documented contract before
-changing existing API validation; do not infer it from English field names alone.
+**Superseded by the latest user-approved budget-page direction.** Implement this
+step using [the dedicated search-budget handoff](strategy-search-budget-handoff.md).
+The old Advanced switch and its six advanced fields must not be rendered. The
+replacement separates INSERT-test data from candidate/Top-N search limits and uses
+plain-language live explanations. The API compatibility requirements in the
+dedicated handoff are mandatory.
 
 ## 12. Step 4 — Оценка
 
@@ -472,8 +442,9 @@ per-phase formula overrides.
 - A collapsed panel containing an invalid field opens automatically on validation.
 - Next focuses the first invalid field and stays on the owning step.
 - Save validates every step, then navigates to the earliest invalid one.
-- Require at least one effective optimization rule/alternative; iteration order
-  alone is not an optimization target.
+- An entirely empty search space is valid. A rule that exists must still be
+  complete. The warning, API, and phase-projection contract is defined in
+  [Empty Strategy Search Space Handoff](strategy-empty-search-space-handoff.md).
 - Blank added rows are errors, not silently dropped configuration, except an
   explicitly removed row. Whitespace normalization must be deterministic.
 - Rules require source type and effective alternatives; index candidates require
@@ -608,9 +579,10 @@ npm run build
 git diff --check
 ```
 
-API checks must include valid v2 round trips; unknown keys; invalid/empty type,
-codec, and index candidates; noninteger/zero granularity; duplicate column priority;
-empty effective search space; old snapshot preservation; and event/bootstrap parity.
+API checks must include valid v2 round trips, including an entirely empty search
+space; unknown keys; invalid/empty type, codec, and index candidates;
+noninteger/zero granularity; duplicate column priority; old snapshot preservation;
+and event/bootstrap parity.
 Run on Python 3.12 with the repository's approved dependencies. Do not claim tests
 passed merely because the older v1 test script passed.
 

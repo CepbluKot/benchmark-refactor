@@ -43,7 +43,7 @@ const defaultDimensions = (): SearchDimensions => ({
   ...emptyDimensions(),
 });
 
-export function createDefaultStrategyDraft(): StrategyDraft { const preset = SCORING_PRESETS.balanced; return { name: '', description: '', procedure: 'phased', dimensions: defaultDimensions(), budget: { rowsPerInsert: 100000, insertRepetitions: 3, maxCandidates: 100, topN: 10, advanced: false }, scoring: { preset: 'balanced', formula: preset.formula, direction: preset.direction } }; }
+export function createDefaultStrategyDraft(): StrategyDraft { const preset = SCORING_PRESETS.balanced; return { name: '', description: '', procedure: 'combined', dimensions: defaultDimensions(), budget: { rowsPerInsert: 100000, insertRepetitions: 3, maxCandidates: 100, topN: 10, advanced: false }, scoring: { preset: 'balanced', formula: preset.formula, direction: preset.direction } }; }
 const positive = (value: number | undefined): boolean => value !== undefined && Number.isInteger(value) && value > 0;
 const finiteOptional = (value: number | undefined): boolean => value === undefined || Number.isFinite(value);
 export interface StrategyValidationMessages { name: string; positive: string; formula: string; finite: string }

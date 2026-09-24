@@ -1,0 +1,19 @@
+[Unit]
+Description=Block new outbound traffic from the Benchmark Studio preview edge network
+Wants=network-pre.target
+After=network-pre.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/benchmark-studio-preview-egress-guard
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run
+
+[Install]
+WantedBy=multi-user.target

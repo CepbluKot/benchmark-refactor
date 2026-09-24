@@ -13,7 +13,6 @@ function methodOptions(t: (ru: string, en: string) => string): Array<{ value: St
     { value: 'indexes_strategy', label: t('Skip-индексы', 'Skip indexes') },
     { value: 'combined_strategy', label: t('Комбинированный', 'Combined') },
     { value: 'sequential_topn_strategy', label: t('Последовательный Top-N', 'Sequential Top-N') },
-    { value: 'sequential_phased_topn_strategy', label: t('Поэтапный Top-N', 'Phased Top-N') },
   ];
 }
 

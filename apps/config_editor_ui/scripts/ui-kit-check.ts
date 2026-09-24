@@ -52,6 +52,9 @@ if (!/\.table-actions\s*\{[^}]*display:\s*(?:flex|inline-flex)/s.test(productSty
   violations.push('действия строк таблицы не оформлены общим компонентом table-actions');
 }
 if (!strategyDimensions.includes('className="strategy-add"')) violations.push('кнопки добавления в редакторе стратегий не имеют семантический класс strategy-add');
+if (!strategyDimensions.includes('accent="column-order" icon="source"')) violations.push('порядок колонок не имеет отдельные цвет и иконку');
+if (!strategyDimensions.includes('accent="granularity" icon="analytics"')) violations.push('гранулярность таблицы не имеет отдельную иконку аналитики');
+if (!/--strategy-column-order-accent:\s*#[0-9a-f]{6}/i.test(productStyles) || !/\.strategy-dimension-column-order\s*\{[^}]*--strategy-dimension-accent:\s*var\(--strategy-column-order-accent\)/s.test(productStyles)) violations.push('порядок колонок не имеет отдельный акцентный цвет');
 if (!/\.product-root\s+\.button\.strategy-add\s*\{[^}]*color:/s.test(productStyles)) violations.push('конструктивный цвет кнопок добавления не перекрывает базовый secondary-стиль');
 if (!/\.product-root\s+\.button\.strategy-remove\s*\{[^}]*border-color:\s*var\(--danger\)/s.test(productStyles)) violations.push('danger-стиль кнопок удаления не перекрывает базовый secondary-стиль');
 if (!/\.product-root\s+\.button\.strategy-add\s*\{[^}]*background:\s*var\(--acm-accent\)\s*!important/s.test(productStyles)) violations.push('кнопки добавления должны авторитетно перекрывать фон secondary-кнопки');

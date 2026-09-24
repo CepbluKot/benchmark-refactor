@@ -153,6 +153,9 @@ activemq-data/
 
 # Environments
 
+# Agent planning and visual-companion scratch workspaces.
+.superpowers/
+
 .venv
 env/
 venv/

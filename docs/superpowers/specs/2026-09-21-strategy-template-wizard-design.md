@@ -95,30 +95,13 @@ user does not select or edit a separate rule-bank entity.
 
 ## Step 3: Search Budget
 
-Default fields:
-
-- Rows copied per INSERT measurement.
-- INSERT measurement repetitions.
-- Maximum candidates.
-- Top-N winners.
-
-The same row limit applies to baseline and candidate measurements by default.
-
-Advanced settings:
-
-- separate baseline and candidate row limits;
-- per-phase candidate limits;
-- winners per parent candidate;
-- final-validation input size;
-- index alternatives checked during final validation.
-
-`Index alternatives checked during final validation` applies only to Phased Top-N.
-A value of one checks only the best index combination. Higher values also replace
-one column at a time with its second-, third-, and later-ranked index option. It does
-not recursively enumerate every combination.
-
-Method-specific budget controls are hidden when the selected method cannot use
-them. All numeric values are positive integers and receive explicit units.
+This section is superseded by
+`specs/product/strategy-search-budget-handoff.md`. The current direction renders
+two visually distinct groups: INSERT-test data and candidate/Top-N search limits.
+It exposes the four primary positive-integer controls directly and removes the
+Advanced switch plus all six advanced controls from the product page. Existing
+optional advanced keys remain protocol-compatible for lossless edits of older
+saved strategies.
 
 ## Step 4: Scoring
 

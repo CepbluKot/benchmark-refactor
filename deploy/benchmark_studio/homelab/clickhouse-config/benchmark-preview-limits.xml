@@ -1,0 +1,5 @@
+<clickhouse>
+    <!-- Cap the eagerly created scheduler pool for this small, pids-limited preview. -->
+    <background_schedule_pool_size>32</background_schedule_pool_size>
+    <max_thread_pool_size>256</max_thread_pool_size>
+</clickhouse>

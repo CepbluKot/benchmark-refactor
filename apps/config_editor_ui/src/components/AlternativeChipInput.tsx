@@ -19,7 +19,7 @@ export function AlternativeChipInput({ kind, label, matcherType, values, onChang
     const normalized = value.trim();
     if (!normalized || values.includes(normalized)) return;
     onChange([...values, normalized]);
-    setQuery(''); setOpen(false);
+    setQuery(''); setOpen(showSuggestions);
   };
   useEffect(() => {
     if (!open || !showSuggestions) return;
@@ -41,7 +41,7 @@ export function AlternativeChipInput({ kind, label, matcherType, values, onChang
   return <div className={`alternative-chip-input alternative-chip-input-${tone}`}>
     <span className="alternative-chip-label">{label}</span>
     {values.length ? <div className="alternative-chip-list">{values.map((value) => <span key={value} className="alternative-chip"><code>{value}</code><Button variant="tertiary" className="strategy-remove" aria-label={`${t('Удалить', 'Remove')} ${value}`} onClick={() => onChange(values.filter((item) => item !== value))}>×</Button></span>)}</div> : null}
-    <div className="alternative-picker">
+    <div className="alternative-picker" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false); }}>
       <TextField id={inputId} label={t('Добавить вариант', 'Add alternative')} value={query} placeholder={placeholder} role="combobox" aria-autocomplete="list" aria-expanded={open && showSuggestions} aria-controls={showSuggestions ? listId : undefined} aria-activedescendant={open && showSuggestions && items[active] ? `${listId}-${items[active].id}` : undefined} onFocus={() => setOpen(showSuggestions)} onChange={(event) => { setQuery(event.target.value); setOpen(showSuggestions); }} onKeyDown={(event) => {
         if (event.key === 'ArrowDown' && items.length) { event.preventDefault(); setActive((value) => Math.min(value + 1, items.length - 1)); }
         if (event.key === 'ArrowUp' && items.length) { event.preventDefault(); setActive((value) => Math.max(value - 1, 0)); }

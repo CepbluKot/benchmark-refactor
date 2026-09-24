@@ -1,0 +1,4 @@
+benchmark-studio-control:local sha256:c2a909ba34500796054e03f903377ae2651b59b7eba0a9d438c6008f2286e544 benchmark-studio-api-base:local
+postgres:15-alpine sha256:dc703a24c2b3c32f7ccda197a44e1b07ad1edc523c1ce5227197a587edb3b8c1 benchmark-studio-postgres:local
+clickhouse/clickhouse-server:24.8 sha256:356762482583e52094a9d6a181c2dd5d4c26932c2abb88c76721984d68964804 benchmark-studio-clickhouse:local
+nginx:1.27.5-alpine sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 benchmark-studio-nginx-base:local

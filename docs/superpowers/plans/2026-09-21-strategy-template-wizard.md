@@ -10,6 +10,14 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-21-strategy-template-wizard-design.md`
 
+## Supersession notice
+
+Task 3 step 6 below is historical and must not be implemented as written. The
+current Search Budget requirements and executable steps are in
+`docs/superpowers/plans/2026-09-22-strategy-search-budget.md`, backed by
+`specs/product/strategy-search-budget-handoff.md`. The current direction removes
+the Advanced switch and advanced budget fields from the product page.
+
 ## Global Constraints
 
 - UI copy is Russian for the current product; code identifiers and protocol fields are English.

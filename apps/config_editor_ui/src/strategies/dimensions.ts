@@ -17,7 +17,11 @@ export interface SearchDimensions {
 export function emptyDimensions(): SearchDimensions {
   return { column_types: [], codecs: [], skip_indexes: [], order_by: { candidates: [] }, column_order: [], table_index_granularity_values: [] };
 }
-export interface DimensionValidationMessages { rule: string; index: string; granularity: string; columnOrder: string; unique: string; required: string }
+export interface DimensionValidationMessages { rule: string; index: string; granularity: string; columnOrder: string; unique: string }
+
+export function hasSearchDimensions(value: SearchDimensions): boolean {
+  return Boolean(value.column_types.length || value.codecs.length || value.skip_indexes.length || value.order_by.candidates.length || value.column_order.length || value.table_index_granularity_values.length);
+}
 
 export function validateDimensions(d: SearchDimensions, messages: DimensionValidationMessages = {
   rule: 'Для каждого правила задайте исходный тип и хотя бы одну альтернативу.',
@@ -25,7 +29,6 @@ export function validateDimensions(d: SearchDimensions, messages: DimensionValid
   granularity: 'Гранулярность таблицы: только целые числа больше нуля.',
   columnOrder: 'Для порядка колонок задайте имя и целую позицию больше нуля.',
   unique: 'Имена и позиции колонок должны быть уникальными.',
-  required: 'Настройте хотя бы одно направление оптимизации.',
 }): string | undefined {
   const positive = (n: number) => Number.isInteger(n) && n > 0;
   for (const rule of [...d.column_types, ...d.codecs]) {
@@ -37,7 +40,6 @@ export function validateDimensions(d: SearchDimensions, messages: DimensionValid
   if (d.table_index_granularity_values.some(n => !positive(n))) return messages.granularity;
   if (d.column_order.some(row => !row.column.trim() || !positive(row.position))) return messages.columnOrder;
   if (new Set(d.column_order.map(row => row.column.trim())).size !== d.column_order.length || new Set(d.column_order.map(row => row.position)).size !== d.column_order.length) return messages.unique;
-  if (!d.column_types.length && !d.codecs.length && !d.skip_indexes.length && !d.order_by.candidates.length && !d.column_order.length && !d.table_index_granularity_values.length) return messages.required;
   return undefined;
 }
 export function dimensionPhases(d: SearchDimensions, procedure: SearchProcedure): string[] {
@@ -49,5 +51,6 @@ export function dimensionPhases(d: SearchDimensions, procedure: SearchProcedure)
     ...(d.table_index_granularity_values.length ? ['index_granularity'] : []),
     ...(d.skip_indexes.length ? ['indexes'] : []),
   ];
+  if (!phases.length) return [];
   return [...phases, ...(procedure === 'sequential' ? ['top_n'] : procedure === 'phased' ? ['final_validation'] : [])];
 }

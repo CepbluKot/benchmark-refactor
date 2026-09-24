@@ -10,12 +10,17 @@
     "preview": "vite preview",
     "typecheck": "tsc -b --pretty",
     "check:strategy-options": "esbuild scripts/strategy-options-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/strategy-options-check.mjs && node node_modules/.cache/strategy-options-check.mjs",
+    "check:source-type-autocomplete": "esbuild scripts/source-type-autocomplete-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/source-type-autocomplete-check.mjs && node node_modules/.cache/source-type-autocomplete-check.mjs",
+    "check:alternative-focus": "esbuild scripts/alternative-focus-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/alternative-focus-check.mjs && node node_modules/.cache/alternative-focus-check.mjs",
     "check:navigation-state": "esbuild scripts/navigation-state-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/navigation-state-check.mjs && node node_modules/.cache/navigation-state-check.mjs",
     "check:i18n": "esbuild scripts/i18n-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/i18n-check.mjs && node node_modules/.cache/i18n-check.mjs",
     "check:ui-kit": "esbuild scripts/ui-kit-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/ui-kit-check.mjs && node node_modules/.cache/ui-kit-check.mjs",
     "check:demo": "esbuild scripts/demo-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/demo-check.mjs && node node_modules/.cache/demo-check.mjs",
     "check:roundtrip": "esbuild scripts/roundtrip-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/roundtrip.mjs && node node_modules/.cache/roundtrip.mjs",
-    "check:strategy-template": "esbuild scripts/strategy-template-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/strategy-template-check.mjs && node node_modules/.cache/strategy-template-check.mjs"
+    "check:strategy-template": "esbuild scripts/strategy-template-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/strategy-template-check.mjs && node node_modules/.cache/strategy-template-check.mjs",
+    "check:strategy-empty-search-space": "esbuild scripts/strategy-empty-search-space-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/strategy-empty-search-space-check.mjs && node node_modules/.cache/strategy-empty-search-space-check.mjs",
+    "check:strategy-budget-layout": "esbuild scripts/strategy-budget-layout-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/strategy-budget-layout-check.mjs && node node_modules/.cache/strategy-budget-layout-check.mjs",
+    "check:search-procedure-availability": "esbuild scripts/search-procedure-availability-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/search-procedure-availability-check.mjs && node node_modules/.cache/search-procedure-availability-check.mjs"
   },
   "dependencies": {
     "@adqm/gpb-ui": "file:vendor/adqm-gpb-ui-0.5.1.tgz",
